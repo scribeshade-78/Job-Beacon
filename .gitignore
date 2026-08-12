@@ -7,3 +7,5 @@ dist/
 .DS_Store
 Thumbs.db
 
+/docs/JobBeacon End-to-End Documentation.pdf
+
