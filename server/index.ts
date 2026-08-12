@@ -1,6 +1,7 @@
 import express from "express";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { APP_NAME, HEALTH_PATH, type HealthResponse } from "../shared/app.js";
 
 const app = express();
@@ -28,7 +29,13 @@ if (existsSync(clientBuildPath)) {
   app.use(express.static(clientBuildPath));
 }
 
-app.listen(port, host, () => {
-  console.log(`${APP_NAME} server listening at http://${host}:${port}`);
-});
+const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
+
+if (isMainModule) {
+  app.listen(port, host, () => {
+    console.log(`${APP_NAME} server listening at http://${host}:${port}`);
+  });
+}
+
+export { app };
 
