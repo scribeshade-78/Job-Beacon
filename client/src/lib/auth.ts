@@ -1,0 +1,226 @@
+import { useSyncExternalStore } from "react";
+import type { Session, SupabaseClient, User } from "@supabase/supabase-js";
+import { getSupabaseBrowserClient } from "./supabaseClient";
+
+export type AuthStatus = "loading" | "signedOut" | "confirmationPending" | "signedIn" | "error";
+
+export interface AuthUser {
+  id: string;
+  email: string | null;
+}
+
+export interface AuthState {
+  status: AuthStatus;
+  user: AuthUser | null;
+  session: Session | null;
+  error: string | null;
+}
+
+type Listener = () => void;
+
+export interface AuthStore {
+  getState(): AuthState;
+  subscribe(listener: Listener): () => void;
+  signUp(email: string, password: string): Promise<void>;
+  signIn(email: string, password: string): Promise<void>;
+  signOut(): Promise<void>;
+  dispose(): void;
+}
+
+function toAuthUser(user: User | null | undefined): AuthUser | null {
+  if (!user) {
+    return null;
+  }
+
+  return { id: user.id, email: user.email ?? null };
+}
+
+const initialState: AuthState = { status: "loading", user: null, session: null, error: null };
+
+/**
+ * Framework-independent auth state store. Creates exactly one
+ * `onAuthStateChange` subscription for its lifetime; call `dispose()` to
+ * tear it down. The callback only performs synchronous state updates —
+ * no awaited Supabase calls happen inside it (current supabase-js guidance:
+ * the async onAuthStateChange overload is deprecated specifically because
+ * calling `refreshSession` from inside a TOKEN_REFRESHED handler can
+ * deadlock; kept as a blanket rule here so no future addition reintroduces
+ * that hazard). Protected API fetching is a separate function
+ * (`fetchVerifiedIdentity`) called from outside this callback.
+ */
+export function createAuthStore(
+  client: SupabaseClient,
+  options: { emailRedirectTo?: string } = {},
+): AuthStore {
+  const emailRedirectTo = options.emailRedirectTo ?? window.location.origin;
+
+  let state: AuthState = initialState;
+  const listeners = new Set<Listener>();
+
+  function setState(next: AuthState) {
+    state = next;
+    listeners.forEach((listener) => listener());
+  }
+
+  const {
+    data: { subscription },
+  } = client.auth.onAuthStateChange((event, session) => {
+    if (event === "SIGNED_OUT") {
+      setState({ status: "signedOut", user: null, session: null, error: null });
+      return;
+    }
+
+    if (session) {
+      setState({ status: "signedIn", user: toAuthUser(session.user), session, error: null });
+      return;
+    }
+
+    // INITIAL_SESSION with no persisted session, or any other event with no session.
+    setState({ status: "signedOut", user: null, session: null, error: null });
+  });
+
+  async function signUp(email: string, password: string): Promise<void> {
+    const { data, error } = await client.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo },
+    });
+
+    if (error) {
+      setState({ status: "error", user: null, session: null, error: error.message });
+      return;
+    }
+
+    if (!data.session) {
+      setState({ status: "confirmationPending", user: null, session: null, error: null });
+      return;
+    }
+
+    setState({
+      status: "signedIn",
+      user: toAuthUser(data.user),
+      session: data.session,
+      error: null,
+    });
+  }
+
+  async function signIn(email: string, password: string): Promise<void> {
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      setState({ status: "error", user: null, session: null, error: error.message });
+      return;
+    }
+
+    setState({
+      status: "signedIn",
+      user: toAuthUser(data.user),
+      session: data.session,
+      error: null,
+    });
+  }
+
+  async function signOut(): Promise<void> {
+    await client.auth.signOut();
+    // onAuthStateChange's SIGNED_OUT event updates state.
+  }
+
+  return {
+    getState: () => state,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    signUp,
+    signIn,
+    signOut,
+    dispose: () => {
+      subscription.unsubscribe();
+      listeners.clear();
+    },
+  };
+}
+
+let singletonStore: AuthStore | null = null;
+
+function getAuthStore(): AuthStore {
+  if (!singletonStore) {
+    singletonStore = createAuthStore(getSupabaseBrowserClient());
+  }
+
+  return singletonStore;
+}
+
+export function useAuth() {
+  const store = getAuthStore();
+  const state = useSyncExternalStore(store.subscribe, store.getState);
+
+  return {
+    ...state,
+    signUp: store.signUp,
+    signIn: store.signIn,
+    signOut: store.signOut,
+  };
+}
+
+export type MeResult =
+  | { kind: "success"; user: AuthUser }
+  | { kind: "unauthenticated" }
+  | { kind: "retryableError"; message: string };
+
+/**
+ * Calls the protected /api/me endpoint. On a 401, attempts at most one
+ * Supabase session refresh and one retry — never loops. Network failures
+ * and 5xx responses are treated as retryable server errors that keep the
+ * session; only a 401 that survives a refresh+retry is "unauthenticated".
+ */
+export async function fetchVerifiedIdentity(
+  client: Pick<SupabaseClient, "auth">,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MeResult> {
+  async function attempt(token: string): Promise<Response | null> {
+    try {
+      return await fetchImpl("/api/me", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  let response = await attempt(accessToken);
+
+  if (response === null) {
+    return { kind: "retryableError", message: "Network error contacting the server." };
+  }
+
+  if (response.status === 401) {
+    const { data, error } = await client.auth.refreshSession();
+
+    if (error || !data.session) {
+      return { kind: "unauthenticated" };
+    }
+
+    response = await attempt(data.session.access_token);
+
+    if (response === null) {
+      return { kind: "retryableError", message: "Network error contacting the server." };
+    }
+
+    if (response.status === 401) {
+      return { kind: "unauthenticated" };
+    }
+  }
+
+  if (response.status >= 500) {
+    return { kind: "retryableError", message: "Server error. Please try again." };
+  }
+
+  if (!response.ok) {
+    return { kind: "retryableError", message: "Unexpected error. Please try again." };
+  }
+
+  const body = (await response.json()) as AuthUser;
+  return { kind: "success", user: body };
+}
