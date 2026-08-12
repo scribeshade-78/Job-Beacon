@@ -25,3 +25,18 @@ export function createSupabaseBrowserClient(
 ): SupabaseClient {
   return createClient(config.url, config.publishableKey);
 }
+
+let cachedBrowserClient: SupabaseClient | null = null;
+
+/**
+ * Lazy singleton — avoids constructing more than one GoTrueClient (and its
+ * background auth-state listeners) per page. Fails clearly on first real
+ * use if configuration is missing, same as createSupabaseBrowserClient.
+ */
+export function getSupabaseBrowserClient(): SupabaseClient {
+  if (!cachedBrowserClient) {
+    cachedBrowserClient = createSupabaseBrowserClient();
+  }
+
+  return cachedBrowserClient;
+}
