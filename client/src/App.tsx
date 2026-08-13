@@ -1,12 +1,43 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { APP_NAME } from "../../shared/app";
 import { fetchVerifiedIdentity, useAuth, type AuthUser } from "./lib/auth";
+import { ensureCandidateProfile } from "./lib/profile";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 
 export function App() {
   const auth = useAuth();
   const [identity, setIdentity] = useState<AuthUser | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (auth.status !== "signedIn" || !auth.user) {
+      setProfileError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setProfileError(null);
+
+    ensureCandidateProfile(getSupabaseBrowserClient(), auth.user.id).then((result) => {
+      if (cancelled) {
+        return;
+      }
+
+      if (result.kind === "error") {
+        setProfileError(result.message);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately depends on auth.status only. TOKEN_REFRESHED keeps status
+    // "signedIn" but issues a new session/access_token object — this must
+    // run once per sign-in, not on every refresh. Widening this array
+    // reintroduces a redundant insert attempt on every token refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.status]);
 
   useEffect(() => {
     if (auth.status !== "signedIn" || !auth.session) {
@@ -63,6 +94,7 @@ export function App() {
         <section aria-labelledby="app-title" className="foundation-card">
           <h1 id="app-title">{APP_NAME}</h1>
           {identityError && <p role="alert">{identityError}</p>}
+          {profileError && <p role="alert">{profileError}</p>}
           {identity && <p>Signed in as {identity.email ?? identity.id}</p>}
           <button type="button" onClick={() => void auth.signOut()}>
             Log out
