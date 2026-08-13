@@ -1,0 +1,110 @@
+import { describe, expect, it, vi } from "vitest";
+import { discoverUsajobs } from "./usajobs.js";
+
+// Fixture shaped from the corroborated (not primary-source-verified, see
+// the adapter's verification note) SearchResult.SearchResultItems[].
+// MatchedObjectDescriptor structure.
+const fixtureResponse = {
+  SearchResult: {
+    SearchResultItems: [
+      {
+        MatchedObjectDescriptor: {
+          PositionID: "ABC-2026-0001",
+          PositionTitle: "IT SPECIALIST (INFOSEC/NETWORK)",
+          PositionURI: "https://www.usajobs.gov/job/123456700",
+          OrganizationName: "Department of Example",
+          PositionLocationDisplay: "Washington, DC",
+          PublicationStartDate: "2026-08-01",
+          PositionRemuneration: [
+            { MinimumRange: "95000", MaximumRange: "120000", RateIntervalCode: "Per Year" },
+          ],
+        },
+      },
+    ],
+  },
+};
+
+function fixtureFetch(status = 200, body: unknown = fixtureResponse) {
+  return vi.fn().mockResolvedValue({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  }) as unknown as typeof fetch;
+}
+
+const credentials = { apiKey: "test-key", userAgent: "test@example.com" };
+
+describe("discoverUsajobs", () => {
+  it("throws a config-boundary error and never calls fetch when credentials are missing", async () => {
+    const fetchImpl = fixtureFetch();
+
+    await expect(
+      discoverUsajobs({ keyword: "engineer" }, { apiKey: "", userAgent: "" }, fetchImpl),
+    ).rejects.toThrow(/Authorization-Key/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("sends the correct headers (Host, User-Agent as registered email, Authorization-Key)", async () => {
+    const fetchImpl = fixtureFetch();
+
+    await discoverUsajobs({ keyword: "engineer" }, credentials, fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://data.usajobs.gov/api/search?Keyword=engineer",
+      {
+        headers: {
+          Host: "data.usajobs.gov",
+          "User-Agent": "test@example.com",
+          "Authorization-Key": "test-key",
+        },
+      },
+    );
+  });
+
+  it("normalizes search results into DiscoveredVacancy shape", async () => {
+    const result = await discoverUsajobs({ keyword: "engineer" }, credentials, fixtureFetch());
+
+    expect(result[0]).toEqual({
+      sourceVacancyId: "ABC-2026-0001",
+      authoritativeUrl: "https://www.usajobs.gov/job/123456700",
+      rawTitle: "IT SPECIALIST (INFOSEC/NETWORK)",
+      companyName: "Department of Example",
+      companyDomain: null,
+      country: "US",
+      region: null,
+      city: null,
+      remoteType: null,
+      currency: "USD",
+      salaryMin: 95000,
+      salaryMax: 120000,
+      salaryInterval: "year",
+      salarySource: "employer_disclosed",
+      publishedAt: "2026-08-01",
+      raw: fixtureResponse.SearchResult.SearchResultItems[0].MatchedObjectDescriptor,
+    });
+  });
+
+  it("defaults companyName when OrganizationName is absent", async () => {
+    const result = await discoverUsajobs(
+      {},
+      credentials,
+      fixtureFetch(200, {
+        SearchResult: {
+          SearchResultItems: [
+            { MatchedObjectDescriptor: { PositionID: "X-1", PositionTitle: "Analyst", PositionURI: "https://usajobs.gov/job/x1" } },
+          ],
+        },
+      }),
+    );
+
+    expect(result[0].companyName).toBe("U.S. Government");
+    expect(result[0].salaryMin).toBeNull();
+    expect(result[0].currency).toBeNull();
+  });
+
+  it("throws a clear error on a non-2xx response", async () => {
+    await expect(
+      discoverUsajobs({}, credentials, fixtureFetch(500, {})),
+    ).rejects.toThrow(/500/);
+  });
+});
