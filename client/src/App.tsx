@@ -1,7 +1,32 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { APP_NAME } from "../../shared/app";
+import {
+  authorize,
+  CONSENT_DISCLOSURE,
+  getAuthorization,
+  pause,
+  resume as resumeAutomation,
+  stop,
+  type Authorization,
+} from "./lib/automationAuthorization";
 import { fetchVerifiedIdentity, useAuth, type AuthUser } from "./lib/auth";
+import {
+  EXCLUSION_CATEGORIES,
+  listExclusions,
+  setExclusion,
+  type ExclusionCategory,
+} from "./lib/exclusions";
+import {
+  enrollTotp,
+  listTotpFactors,
+  unenrollFactor,
+  verifyEnrollment,
+  type TotpEnrollment,
+  type TotpFactorSummary,
+} from "./lib/mfa";
 import { ensureCandidateProfile } from "./lib/profile";
+import { deleteResume, getResumeSignedUrl, listResumes, uploadResume, type ResumeDocument } from "./lib/resume";
+import { revokeOtherSessions } from "./lib/session";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 
 export function App() {
@@ -9,15 +34,23 @@ export function App() {
   const [identity, setIdentity] = useState<AuthUser | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  // candidate_profiles is the FK target for resume_documents,
+  // candidate_exclusions, and automation_authorizations — panels backed by
+  // those tables must not render (and let the candidate attempt an insert)
+  // until this resolves, or a fast interaction on a slow connection hits a
+  // foreign-key violation before the row exists.
+  const [profileReady, setProfileReady] = useState(false);
 
   useEffect(() => {
     if (auth.status !== "signedIn" || !auth.user) {
       setProfileError(null);
+      setProfileReady(false);
       return;
     }
 
     let cancelled = false;
     setProfileError(null);
+    setProfileReady(false);
 
     ensureCandidateProfile(getSupabaseBrowserClient(), auth.user.id).then((result) => {
       if (cancelled) {
@@ -26,6 +59,8 @@ export function App() {
 
       if (result.kind === "error") {
         setProfileError(result.message);
+      } else {
+        setProfileReady(true);
       }
     });
 
@@ -100,6 +135,17 @@ export function App() {
             Log out
           </button>
         </section>
+
+        {auth.user && profileReady && (
+          <>
+            <ResumesPanel candidateId={auth.user.id} />
+            <ExclusionsPanel candidateId={auth.user.id} />
+            <AutomationPanel candidateId={auth.user.id} />
+          </>
+        )}
+        {/* Doesn't touch candidate_profiles-referencing tables, so it
+            doesn't need to wait on profileReady. */}
+        {auth.user && <SecurityPanel />}
       </main>
     );
   }
@@ -168,5 +214,399 @@ function AuthForm({ onSignUp, onSignIn }: AuthFormProps) {
         Sign up
       </button>
     </form>
+  );
+}
+
+const EXCLUSION_LABELS: Record<ExclusionCategory, string> = {
+  staffing_agencies: "Staffing agencies",
+  contract_roles: "Contract roles",
+  relocation_required: "Roles requiring relocation",
+  sensitive_sectors: "Sensitive sectors",
+};
+
+interface ResumesPanelProps {
+  candidateId: string;
+}
+
+function ResumesPanel({ candidateId }: ResumesPanelProps) {
+  const [resumes, setResumes] = useState<ResumeDocument[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function refresh() {
+    const result = await listResumes(getSupabaseBrowserClient());
+
+    if (result.kind === "success") {
+      setResumes(result.resumes);
+    } else {
+      setError(result.message);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    const result = await uploadResume(
+      getSupabaseBrowserClient(),
+      candidateId,
+      { name: file.name, type: file.type, size: file.size },
+      file,
+    );
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refresh();
+    }
+
+    setBusy(false);
+  }
+
+  async function handleView(storagePath: string) {
+    const result = await getResumeSignedUrl(getSupabaseBrowserClient(), storagePath);
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    window.open(result.url, "_blank", "noopener,noreferrer");
+  }
+
+  async function handleDelete(id: string, storagePath: string) {
+    setBusy(true);
+    const result = await deleteResume(getSupabaseBrowserClient(), id, storagePath);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refresh();
+    }
+
+    setBusy(false);
+  }
+
+  return (
+    <section aria-labelledby="resumes-title" className="foundation-card">
+      <h2 id="resumes-title">Resumes</h2>
+      {error && <p role="alert">{error}</p>}
+      <input
+        type="file"
+        accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        disabled={busy}
+        onChange={(event) => void handleFileChange(event)}
+        aria-label="Upload resume"
+      />
+      <ul>
+        {resumes?.map((resume) => (
+          <li key={resume.id}>
+            {resume.originalFilename}{" "}
+            <button type="button" disabled={busy} onClick={() => void handleView(resume.storagePath)}>
+              View
+            </button>
+            <button type="button" disabled={busy} onClick={() => void handleDelete(resume.id, resume.storagePath)}>
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+interface ExclusionsPanelProps {
+  candidateId: string;
+}
+
+function ExclusionsPanel({ candidateId }: ExclusionsPanelProps) {
+  const [active, setActive] = useState<Set<ExclusionCategory> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listExclusions(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setActive(new Set(result.categories));
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  async function handleToggle(category: ExclusionCategory, checked: boolean) {
+    setError(null);
+    const result = await setExclusion(getSupabaseBrowserClient(), candidateId, category, checked);
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    setActive((previous) => {
+      const next = new Set(previous ?? []);
+
+      if (checked) {
+        next.add(category);
+      } else {
+        next.delete(category);
+      }
+
+      return next;
+    });
+  }
+
+  return (
+    <section aria-labelledby="exclusions-title" className="foundation-card">
+      <h2 id="exclusions-title">Exclusions</h2>
+      {error && <p role="alert">{error}</p>}
+      {EXCLUSION_CATEGORIES.map((category) => (
+        <label key={category}>
+          <input
+            type="checkbox"
+            checked={active?.has(category) ?? false}
+            onChange={(event) => void handleToggle(category, event.target.checked)}
+          />
+          {EXCLUSION_LABELS[category]}
+        </label>
+      ))}
+    </section>
+  );
+}
+
+interface AutomationPanelProps {
+  candidateId: string;
+}
+
+function AutomationPanel({ candidateId }: AutomationPanelProps) {
+  const [authorization, setAuthorization] = useState<Authorization | "notYetAuthorized" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [busy, setBusy] = useState(false);
+
+  async function refresh() {
+    const result = await getAuthorization(getSupabaseBrowserClient());
+
+    if (result.kind === "authorized") {
+      setAuthorization(result.authorization);
+    } else if (result.kind === "notYetAuthorized") {
+      setAuthorization("notYetAuthorized");
+    } else {
+      setError(result.message);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function run(action: (client: ReturnType<typeof getSupabaseBrowserClient>) => Promise<{ kind: string; message?: string }>) {
+    setBusy(true);
+    setError(null);
+    const result = await action(getSupabaseBrowserClient());
+
+    if (result.kind === "error" && result.message) {
+      setError(result.message);
+      setBusy(false);
+      return;
+    }
+
+    await refresh();
+    setBusy(false);
+  }
+
+  return (
+    <section aria-labelledby="automation-title" className="foundation-card">
+      <h2 id="automation-title">Automation</h2>
+      {error && <p role="alert">{error}</p>}
+
+      {authorization === "notYetAuthorized" && (
+        <>
+          <ul>
+            {CONSENT_DISCLOSURE.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+          <button type="button" disabled={busy} onClick={() => void run((client) => authorize(client, candidateId))}>
+            Authorize
+          </button>
+        </>
+      )}
+
+      {authorization && authorization !== "notYetAuthorized" && (
+        <>
+          <p>Status: {authorization.status}</p>
+          {authorization.status !== "paused" && (
+            <button type="button" disabled={busy} onClick={() => void run((client) => pause(client, candidateId))}>
+              Pause
+            </button>
+          )}
+          {authorization.status === "paused" && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run((client) => resumeAutomation(client, candidateId))}
+            >
+              Resume
+            </button>
+          )}
+          {authorization.status !== "stopped" && (
+            <button type="button" disabled={busy} onClick={() => void run((client) => stop(client, candidateId))}>
+              Stop
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function SecurityPanel() {
+  const [factors, setFactors] = useState<TotpFactorSummary[] | null>(null);
+  const [pendingEnrollment, setPendingEnrollment] = useState<TotpEnrollment | null>(null);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [revokeMessage, setRevokeMessage] = useState<string | null>(null);
+
+  async function refreshFactors() {
+    const result = await listTotpFactors(getSupabaseBrowserClient());
+
+    if (result.kind === "success") {
+      setFactors(result.factors);
+    } else {
+      setError(result.message);
+    }
+  }
+
+  useEffect(() => {
+    void refreshFactors();
+  }, []);
+
+  async function handleEnroll() {
+    setError(null);
+
+    // A previously abandoned enrollment (e.g. the tab closed mid-QR-scan)
+    // leaves an unverified factor behind, which GoTrue then rejects a new
+    // enroll() against with a friendly-name conflict — since re-fetching a
+    // QR/secret for an existing unverified factor isn't possible, clearing
+    // it first is the only way to let the candidate start over.
+    const stale = factors?.filter((factor) => factor.status === "unverified") ?? [];
+
+    for (const factor of stale) {
+      const cleanupResult = await unenrollFactor(getSupabaseBrowserClient(), factor.id);
+
+      if (cleanupResult.kind === "error") {
+        setError(cleanupResult.message);
+        return;
+      }
+    }
+
+    const result = await enrollTotp(getSupabaseBrowserClient());
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    setPendingEnrollment(result.enrollment);
+  }
+
+  async function handleVerify() {
+    if (!pendingEnrollment) {
+      return;
+    }
+
+    setError(null);
+    const result = await verifyEnrollment(getSupabaseBrowserClient(), pendingEnrollment.factorId, code);
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    setPendingEnrollment(null);
+    setCode("");
+    await refreshFactors();
+  }
+
+  async function handleUnenroll(factorId: string) {
+    setError(null);
+    const result = await unenrollFactor(getSupabaseBrowserClient(), factorId);
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    await refreshFactors();
+  }
+
+  async function handleRevokeOtherSessions() {
+    setError(null);
+    setRevokeMessage(null);
+    const result = await revokeOtherSessions(getSupabaseBrowserClient());
+
+    if (result.kind === "error") {
+      setError(result.message);
+      return;
+    }
+
+    setRevokeMessage("Other sessions have been signed out.");
+  }
+
+  const verifiedFactor = factors?.find((factor) => factor.status === "verified") ?? null;
+
+  return (
+    <section aria-labelledby="security-title" className="foundation-card">
+      <h2 id="security-title">Security</h2>
+      {error && <p role="alert">{error}</p>}
+      {revokeMessage && <p role="status">{revokeMessage}</p>}
+
+      {verifiedFactor ? (
+        <>
+          <p>Two-factor authentication is enabled.</p>
+          <button type="button" onClick={() => void handleUnenroll(verifiedFactor.id)}>
+            Turn off two-factor authentication
+          </button>
+        </>
+      ) : pendingEnrollment ? (
+        <>
+          <img
+            // supabase-js's own mfa.enroll() already returns a complete
+            // data: URI here (confirmed against installed @supabase/auth-js
+            // source — its type-doc comment saying to prepend the prefix
+            // yourself is stale), so this is used as-is, not re-wrapped.
+            src={pendingEnrollment.qrCodeSvg}
+            alt="Scan this QR code with your authenticator app"
+          />
+          <p>Or enter this code manually: {pendingEnrollment.secret}</p>
+          <label htmlFor="totp-code">Authenticator code</label>
+          <input id="totp-code" value={code} onChange={(event) => setCode(event.target.value)} />
+          <button type="button" onClick={() => void handleVerify()}>
+            Verify
+          </button>
+        </>
+      ) : (
+        <button type="button" onClick={() => void handleEnroll()}>
+          Set up two-factor authentication
+        </button>
+      )}
+
+      <button type="button" onClick={() => void handleRevokeOtherSessions()}>
+        Sign out other sessions
+      </button>
+    </section>
   );
 }
