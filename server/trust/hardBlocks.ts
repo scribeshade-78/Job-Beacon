@@ -88,7 +88,24 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
-function extractHostname(url: string): string | null {
+/**
+ * Whether description text matches any hard-block-tier content pattern
+ * (payment/fee, MLM, premature ID request, or prohibited/illegal terms).
+ * Exported so trustScore.ts's "Scam and prohibited-content signals"
+ * dimension (PRD §12.2) can score against the same content-risk vocabulary
+ * this module already defines, rather than duplicating the pattern lists.
+ */
+export function matchesHardBlockContentPatterns(text: string): boolean {
+  return (
+    matchesAny(text, PAYMENT_PATTERNS) ||
+    matchesAny(text, MLM_PATTERNS) ||
+    matchesAny(text, PREMATURE_ID_PATTERNS) ||
+    matchesAny(text, PROHIBITED_PATTERNS)
+  );
+}
+
+/** Exported for reuse by trustScore.ts — same hostname-vs-known-domain check the PRD's URL-integrity dimension also examples. */
+export function extractHostname(url: string): string | null {
   try {
     return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
   } catch {
@@ -96,7 +113,8 @@ function extractHostname(url: string): string | null {
   }
 }
 
-function hostnameMatchesDomain(hostname: string, domain: string): boolean {
+/** Exported for reuse by trustScore.ts. */
+export function hostnameMatchesDomain(hostname: string, domain: string): boolean {
   const normalizedDomain = domain.toLowerCase().replace(/^www\./, "");
   return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`);
 }
