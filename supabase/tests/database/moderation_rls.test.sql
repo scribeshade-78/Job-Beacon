@@ -30,11 +30,14 @@ select ok(
   'RLS is enabled on moderation_cases'
 );
 
--- 2. authenticated has no privileges at all
-select is_empty(
-  $$select privilege_type from information_schema.role_table_grants
-      where table_name = 'moderation_cases' and grantee = 'authenticated'$$,
-  'authenticated has no privileges on moderation_cases'
+-- 2. authenticated has exactly SELECT (R3.6: moderator access, RLS-gated — see moderator_role_rls.test.sql)
+select ok(
+  (
+    select array_agg(privilege_type::text order by privilege_type)
+    from information_schema.role_table_grants
+    where table_name = 'moderation_cases' and grantee = 'authenticated'
+  ) = array['SELECT'],
+  'authenticated has exactly SELECT on moderation_cases (R3.6 moderator grant, RLS-gated)'
 );
 
 -- 3. anon has no privileges at all
@@ -79,14 +82,12 @@ select lives_ok(
 );
 reset role;
 
--- 8. authenticated cannot select moderation_cases
+-- 8. a non-moderator authenticated user gets an empty result, not an error (R3.6: grant exists, RLS filters — this fixture's user has no user_roles row)
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-4444-1111-1111-111111111111';
-select throws_ok(
+select is_empty(
   $$select severity from moderation_cases$$,
-  '42501',
-  null,
-  'authenticated cannot SELECT moderation_cases — no privilege granted'
+  'non-moderator SELECT on moderation_cases is empty, not an error (R3.6 moderator RLS)'
 );
 reset role;
 
@@ -110,11 +111,14 @@ select ok(
   'RLS is enabled on moderation_decisions'
 );
 
--- 11. authenticated has no privileges at all
-select is_empty(
-  $$select privilege_type from information_schema.role_table_grants
-      where table_name = 'moderation_decisions' and grantee = 'authenticated'$$,
-  'authenticated has no privileges on moderation_decisions'
+-- 11. authenticated has exactly SELECT and INSERT (R3.6: moderator access, RLS-gated)
+select ok(
+  (
+    select array_agg(privilege_type::text order by privilege_type)
+    from information_schema.role_table_grants
+    where table_name = 'moderation_decisions' and grantee = 'authenticated'
+  ) = array['INSERT', 'SELECT'],
+  'authenticated has exactly SELECT and INSERT on moderation_decisions (R3.6 moderator grant, RLS-gated)'
 );
 
 -- 12. anon has no privileges at all
@@ -143,14 +147,12 @@ select throws_ok(
 );
 reset role;
 
--- 15. authenticated cannot select moderation_decisions
+-- 15. a non-moderator authenticated user gets an empty result, not an error (R3.6)
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-4444-1111-1111-111111111111';
-select throws_ok(
+select is_empty(
   $$select decision from moderation_decisions$$,
-  '42501',
-  null,
-  'authenticated cannot SELECT moderation_decisions — no privilege granted'
+  'non-moderator SELECT on moderation_decisions is empty, not an error (R3.6 moderator RLS)'
 );
 reset role;
 

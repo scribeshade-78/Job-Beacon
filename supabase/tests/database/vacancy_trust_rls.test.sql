@@ -85,11 +85,14 @@ select ok(
   'RLS is enabled on vacancy_trust_scores'
 );
 
--- 8. authenticated has no privileges at all
-select is_empty(
-  $$select privilege_type from information_schema.role_table_grants
-      where table_name = 'vacancy_trust_scores' and grantee = 'authenticated'$$,
-  'authenticated has no privileges on vacancy_trust_scores'
+-- 8. authenticated has exactly SELECT (R3.6: moderator access, RLS-gated — see moderator_role_rls.test.sql for row-visibility coverage)
+select ok(
+  (
+    select array_agg(privilege_type::text order by privilege_type)
+    from information_schema.role_table_grants
+    where table_name = 'vacancy_trust_scores' and grantee = 'authenticated'
+  ) = array['SELECT'],
+  'authenticated has exactly SELECT on vacancy_trust_scores (R3.6 moderator grant, RLS-gated)'
 );
 
 -- 9. anon has no privileges at all
@@ -117,14 +120,12 @@ select throws_ok(
 );
 reset role;
 
--- 12. authenticated cannot select vacancy_trust_scores
+-- 12. a non-moderator authenticated candidate gets an empty result, not an error (R3.6: grant exists, RLS filters)
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-3333-1111-1111-111111111111';
-select throws_ok(
+select is_empty(
   $$select status from vacancy_trust_scores$$,
-  '42501',
-  null,
-  'authenticated candidate cannot SELECT vacancy_trust_scores — no privilege granted'
+  'non-moderator candidate SELECT on vacancy_trust_scores is empty, not an error (R3.6 moderator RLS)'
 );
 reset role;
 
@@ -149,11 +150,14 @@ select ok(
   'RLS is enabled on vacancy_flags'
 );
 
--- 15. authenticated has no privileges at all
-select is_empty(
-  $$select privilege_type from information_schema.role_table_grants
-      where table_name = 'vacancy_flags' and grantee = 'authenticated'$$,
-  'authenticated has no privileges on vacancy_flags'
+-- 15. authenticated has exactly SELECT (R3.6: moderator access, RLS-gated)
+select ok(
+  (
+    select array_agg(privilege_type::text order by privilege_type)
+    from information_schema.role_table_grants
+    where table_name = 'vacancy_flags' and grantee = 'authenticated'
+  ) = array['SELECT'],
+  'authenticated has exactly SELECT on vacancy_flags (R3.6 moderator grant, RLS-gated)'
 );
 
 -- 16. anon has no privileges at all
@@ -189,14 +193,12 @@ select throws_ok(
 );
 reset role;
 
--- 20. authenticated cannot select vacancy_flags
+-- 20. a non-moderator authenticated candidate gets an empty result, not an error (R3.6)
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-3333-1111-1111-111111111111';
-select throws_ok(
+select is_empty(
   $$select reason_code from vacancy_flags$$,
-  '42501',
-  null,
-  'authenticated candidate cannot SELECT vacancy_flags — no privilege granted'
+  'non-moderator candidate SELECT on vacancy_flags is empty, not an error (R3.6 moderator RLS)'
 );
 reset role;
 
@@ -220,11 +222,14 @@ select ok(
   'RLS is enabled on vacancy_evidence'
 );
 
--- 23. authenticated has no privileges at all
-select is_empty(
-  $$select privilege_type from information_schema.role_table_grants
-      where table_name = 'vacancy_evidence' and grantee = 'authenticated'$$,
-  'authenticated has no privileges on vacancy_evidence'
+-- 23. authenticated has exactly SELECT (R3.6: moderator access, RLS-gated)
+select ok(
+  (
+    select array_agg(privilege_type::text order by privilege_type)
+    from information_schema.role_table_grants
+    where table_name = 'vacancy_evidence' and grantee = 'authenticated'
+  ) = array['SELECT'],
+  'authenticated has exactly SELECT on vacancy_evidence (R3.6 moderator grant, RLS-gated)'
 );
 
 -- 24. anon has no privileges at all
@@ -243,14 +248,12 @@ select lives_ok(
 );
 reset role;
 
--- 26. authenticated cannot select vacancy_evidence
+-- 26. a non-moderator authenticated candidate gets an empty result, not an error (R3.6)
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-3333-1111-1111-111111111111';
-select throws_ok(
+select is_empty(
   $$select evidence_type from vacancy_evidence$$,
-  '42501',
-  null,
-  'authenticated candidate cannot SELECT vacancy_evidence — no privilege granted'
+  'non-moderator candidate SELECT on vacancy_evidence is empty, not an error (R3.6 moderator RLS)'
 );
 reset role;
 
