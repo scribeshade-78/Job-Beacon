@@ -5,6 +5,7 @@ import { discoverLever, type LeverTargetConfig } from "./adapters/lever.js";
 import { discoverUsajobs, type UsajobsTargetConfig } from "./adapters/usajobs.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
 import type { DiscoveredVacancy } from "./types.js";
+import { scoreVacancy } from "../trust/scoreVacancy.js";
 
 /**
  * Greenhouse/Lever config comes from an operator-edited jsonb column with
@@ -120,6 +121,21 @@ export async function runOneIngestionJob(client: SupabaseClient): Promise<RunOne
     for (const item of discovered) {
       const result = await ingestDiscoveredVacancy(client, vacancySource.source_code, vacancySource.id, item);
       seenVacancyIds.push(result.vacancyId);
+
+      try {
+        await scoreVacancy(client, result.vacancyId);
+      } catch {
+        // Trust scoring must never block ingestion — "ingestion must remain
+        // available when trust scoring or company resolution is slow or
+        // unavailable" is a product invariant. A vacancy whose scoring
+        // fails simply keeps its current trust_status (NULL for a newly
+        // created row) rather than failing the whole ingestion job and
+        // re-running discovery/ingestion for everything already processed
+        // in this batch. No error-visibility mechanism is wired for
+        // scoring failures specifically yet — that's a real gap, not
+        // solved here; source_health_events tracks per-source sync
+        // outcomes, not per-vacancy scoring outcomes.
+      }
     }
 
     await markUnseenVacanciesExpired(client, vacancySource.id, seenVacancyIds);

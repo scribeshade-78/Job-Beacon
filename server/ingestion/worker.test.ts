@@ -8,9 +8,11 @@ vi.mock("./ingest.js", () => ({
   ingestDiscoveredVacancy: vi.fn(),
   markUnseenVacanciesExpired: vi.fn(),
 }));
+vi.mock("../trust/scoreVacancy.js", () => ({ scoreVacancy: vi.fn() }));
 
 import { discoverGreenhouse } from "./adapters/greenhouse.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
+import { scoreVacancy } from "../trust/scoreVacancy.js";
 import { runOneIngestionJob } from "./worker.js";
 
 const job = {
@@ -88,6 +90,42 @@ describe("runOneIngestionJob", () => {
     expect(result).toEqual({ processed: true, vacanciesFetched: 2 });
     expect(discoverGreenhouse).toHaveBeenCalledWith("acme", vacancySource.config);
     expect(ingestDiscoveredVacancy).toHaveBeenCalledTimes(2);
+    expect(markUnseenVacanciesExpired).toHaveBeenCalledWith(client, "target-1", ["v1", "v2"]);
+  });
+
+  it("scores every ingested vacancy right after it's ingested", async () => {
+    const discovered = [{ sourceVacancyId: "1" }, { sourceVacancyId: "2" }];
+    vi.mocked(discoverGreenhouse).mockResolvedValue(discovered as never);
+    vi.mocked(ingestDiscoveredVacancy)
+      .mockResolvedValueOnce({ vacancyId: "v1", outcome: "created" })
+      .mockResolvedValueOnce({ vacancyId: "v2", outcome: "created" });
+    vi.mocked(scoreVacancy).mockClear();
+    vi.mocked(scoreVacancy).mockResolvedValue({ status: "VERIFIED", score: 90, reasonCodes: [] });
+
+    const client = makeClient();
+    await runOneIngestionJob(client);
+
+    expect(scoreVacancy).toHaveBeenCalledTimes(2);
+    expect(scoreVacancy).toHaveBeenCalledWith(client, "v1");
+    expect(scoreVacancy).toHaveBeenCalledWith(client, "v2");
+  });
+
+  it("does not fail the job when scoring a vacancy throws — ingestion must stay available even when scoring isn't", async () => {
+    const discovered = [{ sourceVacancyId: "1" }, { sourceVacancyId: "2" }];
+    vi.mocked(discoverGreenhouse).mockResolvedValue(discovered as never);
+    vi.mocked(ingestDiscoveredVacancy)
+      .mockResolvedValueOnce({ vacancyId: "v1", outcome: "created" })
+      .mockResolvedValueOnce({ vacancyId: "v2", outcome: "created" });
+    vi.mocked(scoreVacancy).mockClear();
+    vi.mocked(scoreVacancy)
+      .mockRejectedValueOnce(new Error("scoring service unavailable"))
+      .mockResolvedValueOnce({ status: "VERIFIED", score: 90, reasonCodes: [] });
+
+    const client = makeClient();
+    const result = await runOneIngestionJob(client);
+
+    expect(result).toEqual({ processed: true, vacanciesFetched: 2 });
+    expect(scoreVacancy).toHaveBeenCalledTimes(2);
     expect(markUnseenVacanciesExpired).toHaveBeenCalledWith(client, "target-1", ["v1", "v2"]);
   });
 
