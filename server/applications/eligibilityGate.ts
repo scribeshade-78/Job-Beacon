@@ -45,8 +45,16 @@ export interface EvaluateEligibilityGatesInput {
 
 const VACANCY_TRUST_ELIGIBLE_STATUSES = new Set(["VERIFIED", "VERIFIED_INCOMPLETE"]);
 
-/** Every application_attempts.status except 'failed' — a failed attempt is the safe-to-retry case PRD §16.1's "no prior successful or active application" wording carves out. */
-const ACTIVE_ATTEMPT_STATUSES = new Set(["pending", "leased", "succeeded", "action_required"]);
+/**
+ * Every application_attempts.status except 'failed' — a failed attempt is
+ * the safe-to-retry case PRD §16.1's "no prior successful or active
+ * application" wording carves out. Exported so applicationEngine.ts (R4.3)
+ * reuses this exact domain rule instead of redefining it — the same
+ * blocking-statuses question ("is there already active work on this
+ * plan") arises both when deciding whether *planning* should proceed
+ * here, and whether *creating a new attempt* should proceed there.
+ */
+export const ACTIVE_ATTEMPT_STATUSES = new Set(["pending", "leased", "succeeded", "action_required"]);
 
 export async function evaluateEligibilityGates(
   client: SupabaseClient,
