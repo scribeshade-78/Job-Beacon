@@ -11,13 +11,15 @@ export interface GateResult {
 /**
  * PRD §16.1 names 8 gates (Source policy, Vacancy trust, Candidate
  * eligibility, Verified facts, Application support, Consent and privacy,
- * Rate and abuse controls, Idempotency). This mini-phase (R4 sequencing
- * decision, approved) wires exactly 5 of those against real repository
- * data plus 2 permanent hard-block placeholders — 7 keys total.
- * `application_support` (needs a channel/adapter capability model that
- * doesn't exist) and `rate_and_abuse_controls` (needs a rate-limiting
- * system, the same class of gap R3.7 documented for report rate-limiting)
- * are NOT included here — that's a scope boundary, not an oversight.
+ * Rate and abuse controls, Idempotency). R4.2 wires 5 of those against
+ * real repository data; the remaining 4 are permanent hard-block
+ * placeholders until their prerequisite systems exist:
+ * `role_match`/`verified_facts` need candidate_selected_roles (PRD §9.1)
+ * and extracted_facts/fact_confirmations (PRD §21.1 Resume domain);
+ * `application_support` needs a channel/adapter capability model (PRD
+ * §16.2); `rate_and_abuse_controls` needs a rate-limiting system (the
+ * same class of gap R3.7 documented for report rate-limiting). None of
+ * the four exist anywhere in this repository.
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -27,6 +29,8 @@ export interface EligibilityGates {
   idempotency: GateResult;
   role_match: GateResult;
   verified_facts: GateResult;
+  application_support: GateResult;
+  rate_and_abuse_controls: GateResult;
 }
 
 export interface EligibilityGateOutcome {
@@ -86,6 +90,13 @@ export async function evaluateEligibilityGates(
     // pass until those systems are built in a later R4 mini-phase.
     role_match: { status: "fail", reasonCode: "ROLE_TAXONOMY_NOT_IMPLEMENTED" },
     verified_facts: { status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" },
+    // Same treatment (R4.2b): no channel/adapter capability model exists
+    // (PRD §16.2 — which portal fields and attachments a given source
+    // actually supports), and no rate/abuse-limiting system exists
+    // anywhere in this repository (the same class of gap R3.7 documented
+    // for candidate report rate-limiting).
+    application_support: { status: "fail", reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED" },
+    rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");

@@ -46,13 +46,47 @@ function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
 const baseInput = { candidateId: "candidate-1", vacancyId: "vacancy-1" };
 
 describe("evaluateEligibilityGates", () => {
-  it("is never eligible even when every real gate passes, because role_match and verified_facts always hard-fail", async () => {
+  it("is never eligible even when every real gate passes, because 4 gates always hard-fail", async () => {
     const client = makeClient();
     const result = await evaluateEligibilityGates(client, baseInput);
 
     expect(result.eligible).toBe(false);
     expect(result.gates.role_match).toEqual({ status: "fail", reasonCode: "ROLE_TAXONOMY_NOT_IMPLEMENTED" });
     expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" });
+    expect(result.gates.application_support).toEqual({
+      status: "fail",
+      reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED",
+    });
+    expect(result.gates.rate_and_abuse_controls).toEqual({
+      status: "fail",
+      reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED",
+    });
+  });
+
+  describe("permanent hard-block gates", () => {
+    it("application_support always fails, regardless of every other gate's outcome", async () => {
+      const client = makeClient({
+        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED" }, error: null },
+        source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.application_support).toEqual({
+        status: "fail",
+        reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED",
+      });
+    });
+
+    it("rate_and_abuse_controls always fails, regardless of every other gate's outcome", async () => {
+      const client = makeClient({
+        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED" }, error: null },
+        source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({
+        status: "fail",
+        reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED",
+      });
+    });
   });
 
   describe("source_policy", () => {
