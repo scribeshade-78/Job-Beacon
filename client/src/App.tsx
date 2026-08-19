@@ -1,6 +1,12 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { APP_NAME } from "../../shared/app";
 import {
+  listActionRequiredEvents,
+  type ActionRequiredEvent,
+  type ActionRequiredExceptionType,
+} from "./lib/actionRequired";
+import { listApplications, type ApplicationSummary } from "./lib/applications";
+import {
   authorize,
   CONSENT_DISCLOSURE,
   getAuthorization,
@@ -138,6 +144,8 @@ export function App() {
 
         {auth.user && profileReady && (
           <>
+            <ApplicationsPanel />
+            <ActionRequiredPanel />
             <ResumesPanel candidateId={auth.user.id} />
             <ExclusionsPanel candidateId={auth.user.id} />
             <AutomationPanel candidateId={auth.user.id} />
@@ -223,6 +231,104 @@ const EXCLUSION_LABELS: Record<ExclusionCategory, string> = {
   relocation_required: "Roles requiring relocation",
   sensitive_sectors: "Sensitive sectors",
 };
+
+/**
+ * authoritative_url has no scheme constraint at the DB level and is
+ * populated from external, scraped job sources — rendering it into an
+ * href unchecked would let a malicious source-side value (e.g. a
+ * javascript: URL) execute on click. http(s)-only allowlist, same
+ * discipline as resume.ts's isSupportedMimeType.
+ */
+function safeVacancyHref(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : "#";
+}
+
+const ACTION_REQUIRED_LABELS: Record<ActionRequiredExceptionType, string> = {
+  captcha: "CAPTCHA to solve",
+  otp_or_email_code: "One-time code needed",
+  unknown_sensitive_question: "Unrecognized or sensitive question",
+  missing_verified_fact: "Missing verified information",
+  external_assessment: "External assessment or interview",
+  unsupported_portal: "Unsupported application portal",
+  payment_or_financial_request: "Payment or financial information requested",
+};
+
+function ApplicationsPanel() {
+  const [applications, setApplications] = useState<ApplicationSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listApplications(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setApplications(result.applications);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="applications-title" className="foundation-card">
+      <h2 id="applications-title">Applications</h2>
+      {error && <p role="alert">{error}</p>}
+      {applications?.length === 0 && <p>No applications yet.</p>}
+      <ul>
+        {applications?.map((application) => (
+          <li key={application.planId}>
+            <a href={safeVacancyHref(application.vacancyUrl)} target="_blank" rel="noopener noreferrer">
+              {application.vacancyTitle}
+            </a>{" "}
+            — {application.eligible ? "eligible" : "not eligible"}
+            {application.attempts.length > 0 && (
+              <ul>
+                {application.attempts.map((attempt) => (
+                  <li key={attempt.id}>
+                    {attempt.status}
+                    {attempt.lastError && `: ${attempt.lastError}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ActionRequiredPanel() {
+  const [events, setEvents] = useState<ActionRequiredEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listActionRequiredEvents(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setEvents(result.events);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="action-required-title" className="foundation-card">
+      <h2 id="action-required-title">Action Required</h2>
+      {error && <p role="alert">{error}</p>}
+      {events?.length === 0 && <p>Nothing needs your attention right now.</p>}
+      <ul>
+        {events?.map((event) => (
+          <li key={event.id}>
+            <a href={safeVacancyHref(event.vacancyUrl)} target="_blank" rel="noopener noreferrer">
+              {event.vacancyTitle}
+            </a>{" "}
+            — {ACTION_REQUIRED_LABELS[event.exceptionType]}
+            {event.expiresAt && ` (expires ${event.expiresAt})`}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 interface ResumesPanelProps {
   candidateId: string;
