@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(10);
+select plan(11);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test).
 insert into auth.users (id, email) values
@@ -43,6 +43,15 @@ select lives_ok(
     values ('dddddddd-9006-1111-1111-111111111111', 'cccccccc-9006-1111-1111-111111111111', 'IN', 'U72900MH2015PTC123456', 'Applyco Private Limited', 'Active', '2015-04-01', 'Company limited by Shares', 'Private', 5000000, 3200000, 'INR', 'Maharashtra', 'RoC-Mumbai')$$,
   'service_role can insert into company_legal_entities'
 );
+
+-- 5. a duplicate (company_id, jurisdiction, registry_identifier) is rejected
+select throws_ok(
+  $$insert into company_legal_entities (company_id, jurisdiction, registry_identifier, legal_name)
+    values ('cccccccc-9006-1111-1111-111111111111', 'IN', 'U72900MH2015PTC123456', 'Applyco Private Limited (re-lookup)')$$,
+  '23505',
+  null,
+  'A duplicate (company_id, jurisdiction, registry_identifier) is rejected — the ON CONFLICT upsert target'
+);
 reset role;
 
 -- as an authenticated candidate (not the "owner" of anything — this is
@@ -50,14 +59,14 @@ reset role;
 set local role authenticated;
 set local request.jwt.claim.sub = '11111111-9006-1111-1111-111111111111';
 
--- 5. Any authenticated candidate can select the legal entity
+-- 6. Any authenticated candidate can select the legal entity
 select results_eq(
   $$select legal_name from company_legal_entities where id = 'dddddddd-9006-1111-1111-111111111111'$$,
   $$values ('Applyco Private Limited'::text)$$,
   'Any authenticated candidate can select a company legal entity'
 );
 
--- 6. authenticated cannot INSERT — no grant exists
+-- 7. authenticated cannot INSERT — no grant exists
 select throws_ok(
   $$insert into company_legal_entities (company_id, jurisdiction, registry_identifier, legal_name)
     values ('cccccccc-9006-1111-1111-111111111111', 'IN', 'FAKE123', 'Fraud')$$,
@@ -66,7 +75,7 @@ select throws_ok(
   'authenticated cannot INSERT into company_legal_entities'
 );
 
--- 7. authenticated cannot UPDATE — no grant exists
+-- 8. authenticated cannot UPDATE — no grant exists
 select throws_ok(
   $$update company_legal_entities set legal_name = 'Fraud' where id = 'dddddddd-9006-1111-1111-111111111111'$$,
   '42501',
@@ -74,7 +83,7 @@ select throws_ok(
   'authenticated cannot UPDATE company_legal_entities'
 );
 
--- 8. authenticated cannot DELETE — no grant exists
+-- 9. authenticated cannot DELETE — no grant exists
 select throws_ok(
   $$delete from company_legal_entities where id = 'dddddddd-9006-1111-1111-111111111111'$$,
   '42501',
@@ -83,7 +92,7 @@ select throws_ok(
 );
 reset role;
 
--- 9. anon cannot select company_legal_entities
+-- 10. anon cannot select company_legal_entities
 set local role anon;
 select throws_ok(
   $$select legal_name from company_legal_entities$$,
@@ -93,7 +102,7 @@ select throws_ok(
 );
 reset role;
 
--- 10. Deleting the companies row cascades to delete its legal entities
+-- 11. Deleting the companies row cascades to delete its legal entities
 delete from companies where id = 'cccccccc-9006-1111-1111-111111111111';
 select is_empty(
   $$select id from company_legal_entities where company_id = 'cccccccc-9006-1111-1111-111111111111'$$,
