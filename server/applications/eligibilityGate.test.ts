@@ -23,10 +23,11 @@ function makeQueryBuilder(result: TableResult) {
 }
 
 const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
-  vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED" }, error: null },
+  vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
   source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
   automation_authorizations: { data: { status: "authorized" }, error: null },
   candidate_exclusions: { data: [], error: null },
+  candidate_selected_roles: { data: [], error: null },
   application_plans: { data: null, error: null },
   application_attempts: { data: [], error: null },
 };
@@ -46,12 +47,14 @@ function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
 const baseInput = { candidateId: "candidate-1", vacancyId: "vacancy-1" };
 
 describe("evaluateEligibilityGates", () => {
-  it("is never eligible even when every real gate passes, because 4 gates always hard-fail", async () => {
-    const client = makeClient();
+  it("is never eligible even when every real gate (including role_match) passes, because 3 gates always hard-fail", async () => {
+    const client = makeClient({
+      candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
+    });
     const result = await evaluateEligibilityGates(client, baseInput);
 
     expect(result.eligible).toBe(false);
-    expect(result.gates.role_match).toEqual({ status: "fail", reasonCode: "ROLE_TAXONOMY_NOT_IMPLEMENTED" });
+    expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "Backend Engineer" } });
     expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" });
     expect(result.gates.application_support).toEqual({
       status: "fail",
@@ -66,7 +69,7 @@ describe("evaluateEligibilityGates", () => {
   describe("permanent hard-block gates", () => {
     it("application_support always fails, regardless of every other gate's outcome", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED" }, error: null },
+        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
         source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
@@ -78,7 +81,7 @@ describe("evaluateEligibilityGates", () => {
 
     it("rate_and_abuse_controls always fails, regardless of every other gate's outcome", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED" }, error: null },
+        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
         source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
@@ -119,7 +122,7 @@ describe("evaluateEligibilityGates", () => {
   describe("vacancy_trust", () => {
     it("passes for VERIFIED", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED" }, error: null },
+        vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.vacancy_trust).toEqual({ status: "pass" });
@@ -127,7 +130,10 @@ describe("evaluateEligibilityGates", () => {
 
     it("passes for VERIFIED_INCOMPLETE", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED_INCOMPLETE" }, error: null },
+        vacancies: {
+          data: { source_code: "greenhouse", trust_status: "VERIFIED_INCOMPLETE", raw_title: "Backend Engineer" },
+          error: null,
+        },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.vacancy_trust).toEqual({ status: "pass" });
@@ -137,7 +143,10 @@ describe("evaluateEligibilityGates", () => {
       "fails for trust_status %s",
       async (trustStatus) => {
         const client = makeClient({
-          vacancies: { data: { source_code: "greenhouse", trust_status: trustStatus }, error: null },
+          vacancies: {
+            data: { source_code: "greenhouse", trust_status: trustStatus, raw_title: "Backend Engineer" },
+            error: null,
+          },
         });
         const result = await evaluateEligibilityGates(client, baseInput);
         expect(result.gates.vacancy_trust).toEqual({
@@ -251,6 +260,72 @@ describe("evaluateEligibilityGates", () => {
     });
   });
 
+  describe("role_match", () => {
+    it("fails when the candidate has selected no roles", async () => {
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({ status: "fail", reasonCode: "NO_ROLES_SELECTED" });
+    });
+
+    it("passes on an exact (case-insensitive) match", async () => {
+      const client = makeClient({
+        candidate_selected_roles: { data: [{ role_name: "backend engineer" }], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "backend engineer" } });
+    });
+
+    it("passes when a selected role is a substring of the vacancy's raw_title", async () => {
+      const client = makeClient({
+        vacancies: {
+          data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Senior Backend Engineer II" },
+          error: null,
+        },
+        candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "Backend Engineer" } });
+    });
+
+    it("passes when any one of several selected roles matches", async () => {
+      const client = makeClient({
+        candidate_selected_roles: {
+          data: [{ role_name: "Data Analyst" }, { role_name: "Backend Engineer" }],
+          error: null,
+        },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "Backend Engineer" } });
+    });
+
+    it("fails, with the selected roles as evidence, when none of them match", async () => {
+      const client = makeClient({
+        candidate_selected_roles: {
+          data: [{ role_name: "Data Analyst" }, { role_name: "Product Manager" }],
+          error: null,
+        },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({
+        status: "fail",
+        reasonCode: "ROLE_NOT_MATCHED",
+        detail: { selectedRoles: ["Data Analyst", "Product Manager"] },
+      });
+    });
+
+    it("does not treat a blank role name as matching every vacancy title", async () => {
+      const client = makeClient({
+        candidate_selected_roles: { data: [{ role_name: "   " }], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.role_match).toEqual({
+        status: "fail",
+        reasonCode: "ROLE_NOT_MATCHED",
+        detail: { selectedRoles: ["   "] },
+      });
+    });
+  });
+
   describe("error and not-found propagation", () => {
     it("throws when the vacancy does not exist", async () => {
       const client = makeClient({ vacancies: { data: null, error: null } });
@@ -274,6 +349,11 @@ describe("evaluateEligibilityGates", () => {
 
     it("propagates a database error from the candidate_exclusions lookup", async () => {
       const client = makeClient({ candidate_exclusions: { data: null, error: { message: "db error" } } });
+      await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
+    });
+
+    it("propagates a database error from the candidate_selected_roles lookup", async () => {
+      const client = makeClient({ candidate_selected_roles: { data: null, error: { message: "db error" } } });
       await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
     });
 

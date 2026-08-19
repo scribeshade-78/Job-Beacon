@@ -11,15 +11,18 @@ export interface GateResult {
 /**
  * PRD §16.1 names 8 gates (Source policy, Vacancy trust, Candidate
  * eligibility, Verified facts, Application support, Consent and privacy,
- * Rate and abuse controls, Idempotency). R4.2 wires 5 of those against
- * real repository data; the remaining 4 are permanent hard-block
- * placeholders until their prerequisite systems exist:
- * `role_match`/`verified_facts` need candidate_selected_roles (PRD §9.1)
- * and extracted_facts/fact_confirmations (PRD §21.1 Resume domain);
+ * Rate and abuse controls, Idempotency). R4.2 wired 5 of those against
+ * real repository data; R4.5 adds `role_match` as a 6th, now that
+ * candidate_selected_roles (PRD §9.1) exists — a minimal exact-or-substring
+ * comparison against vacancies.raw_title, deliberately not NLP/ML matching,
+ * since no normalized vacancy role taxonomy exists yet either. The
+ * remaining 3 are still permanent hard-block placeholders until their
+ * prerequisite systems exist: `verified_facts` needs
+ * extracted_facts/fact_confirmations (PRD §21.1 Resume domain);
  * `application_support` needs a channel/adapter capability model (PRD
  * §16.2); `rate_and_abuse_controls` needs a rate-limiting system (the
  * same class of gap R3.7 documented for report rate-limiting). None of
- * the four exist anywhere in this repository.
+ * the three exist anywhere in this repository.
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -64,7 +67,7 @@ export async function evaluateEligibilityGates(
 
   const { data: vacancyRow, error: vacancyError } = await client
     .from("vacancies")
-    .select("source_code, trust_status")
+    .select("source_code, trust_status, raw_title")
     .eq("id", vacancyId)
     .maybeSingle();
 
@@ -75,14 +78,15 @@ export async function evaluateEligibilityGates(
     throw new Error(`vacancies row not found for id ${vacancyId}`);
   }
 
-  const vacancy = vacancyRow as { source_code: string; trust_status: string | null };
+  const vacancy = vacancyRow as { source_code: string; trust_status: string | null; raw_title: string };
 
-  const [sourcePolicyGate, automationAuthorizationGate, candidateExclusionsGate, idempotencyGate] =
+  const [sourcePolicyGate, automationAuthorizationGate, candidateExclusionsGate, idempotencyGate, roleMatchGate] =
     await Promise.all([
       evaluateSourcePolicy(client, vacancy.source_code),
       evaluateAutomationAuthorization(client, candidateId),
       evaluateCandidateExclusions(client, candidateId),
       evaluateIdempotency(client, candidateId, vacancyId),
+      evaluateRoleMatch(client, candidateId, vacancy.raw_title),
     ]);
 
   const gates: EligibilityGates = {
@@ -91,12 +95,11 @@ export async function evaluateEligibilityGates(
     automation_authorization: automationAuthorizationGate,
     candidate_exclusions: candidateExclusionsGate,
     idempotency: idempotencyGate,
+    role_match: roleMatchGate,
     // Permanent hard-block placeholders (approved R4 sequencing decision):
-    // candidate_selected_roles/role taxonomy (PRD §9.1) and
     // extracted_facts/fact_confirmations (PRD §21.1 Resume domain) don't
-    // exist anywhere in this repository, so these two gates can never
-    // pass until those systems are built in a later R4 mini-phase.
-    role_match: { status: "fail", reasonCode: "ROLE_TAXONOMY_NOT_IMPLEMENTED" },
+    // exist anywhere in this repository, so this gate can never pass
+    // until that system is built in a later R4 mini-phase.
     verified_facts: { status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" },
     // Same treatment (R4.2b): no channel/adapter capability model exists
     // (PRD §16.2 — which portal fields and attachments a given source
@@ -199,6 +202,51 @@ async function evaluateCandidateExclusions(client: SupabaseClient, candidateId: 
   const excludedCategories = ((data ?? []) as Array<{ category: string }>).map((row) => row.category);
 
   return { status: "pass", detail: { excludedCategories } };
+}
+
+/**
+ * R4.5 minimal role taxonomy (PRD §9.1): no normalized vacancy role
+ * taxonomy or NLP/ML matching exists in this repository, so this is
+ * deliberately a plain case-insensitive substring comparison between each
+ * of the candidate's free-text candidate_selected_roles.role_name values
+ * and vacancies.raw_title — an exact match is just the substring-equals-
+ * whole-string case, so no separate exact-match branch is needed. Empty or
+ * whitespace-only role names are skipped rather than matched, since
+ * `"".includes("")` would otherwise make a blank role name match every
+ * vacancy title.
+ */
+async function evaluateRoleMatch(
+  client: SupabaseClient,
+  candidateId: string,
+  vacancyTitle: string,
+): Promise<GateResult> {
+  const { data, error } = await client
+    .from("candidate_selected_roles")
+    .select("role_name")
+    .eq("candidate_id", candidateId);
+
+  if (error) {
+    throw error;
+  }
+
+  const selectedRoles = ((data ?? []) as Array<{ role_name: string }>).map((row) => row.role_name);
+
+  if (selectedRoles.length === 0) {
+    return { status: "fail", reasonCode: "NO_ROLES_SELECTED" };
+  }
+
+  const normalizedTitle = vacancyTitle.toLowerCase();
+
+  const matchedRole = selectedRoles.find((role) => {
+    const normalizedRole = role.trim().toLowerCase();
+    return normalizedRole.length > 0 && normalizedTitle.includes(normalizedRole);
+  });
+
+  if (matchedRole) {
+    return { status: "pass", detail: { matchedRole } };
+  }
+
+  return { status: "fail", reasonCode: "ROLE_NOT_MATCHED", detail: { selectedRoles } };
 }
 
 /**

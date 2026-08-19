@@ -48,7 +48,7 @@ const ineligibleOutcome: EligibilityGateOutcome = {
     automation_authorization: { status: "pass" },
     candidate_exclusions: { status: "pass", detail: { excludedCategories: [] } },
     idempotency: { status: "pass" },
-    role_match: { status: "fail", reasonCode: "ROLE_TAXONOMY_NOT_IMPLEMENTED" },
+    role_match: { status: "fail", reasonCode: "NO_ROLES_SELECTED" },
     verified_facts: { status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" },
     application_support: { status: "fail", reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED" },
     rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
