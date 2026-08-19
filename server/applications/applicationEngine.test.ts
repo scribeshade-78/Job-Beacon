@@ -49,7 +49,7 @@ const ineligibleOutcome: EligibilityGateOutcome = {
     candidate_exclusions: { status: "pass", detail: { excludedCategories: [] } },
     idempotency: { status: "pass" },
     role_match: { status: "fail", reasonCode: "NO_ROLES_SELECTED" },
-    verified_facts: { status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" },
+    verified_facts: { status: "fail", reasonCode: "NO_FACTS_EXTRACTED" },
     application_support: { status: "fail", reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED" },
     rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
   },

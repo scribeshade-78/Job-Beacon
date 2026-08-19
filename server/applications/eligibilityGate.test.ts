@@ -5,16 +5,18 @@ type TableResult = { data: unknown; error: unknown };
 
 /**
  * A minimal fluent builder matching exactly the call shapes
- * eligibilityGate.ts uses (.select().eq()[.eq()][.maybeSingle()]).
- * .select()/.eq() are no-ops that return the same builder so any number
- * of chained calls works; the builder itself is thenable so code that
- * awaits without calling .maybeSingle() (the array-returning queries)
- * also resolves to `result`, mirroring real postgrest-js behavior.
+ * eligibilityGate.ts uses (.select().eq()[.eq()][.in()][.maybeSingle()]).
+ * .select()/.eq()/.in() are no-ops that return the same builder so any
+ * number of chained calls works; the builder itself is thenable so code
+ * that awaits without calling .maybeSingle() (the array-returning
+ * queries) also resolves to `result`, mirroring real postgrest-js
+ * behavior.
  */
 function makeQueryBuilder(result: TableResult) {
   const builder: PromiseLike<TableResult> & Record<string, unknown> = {
     select: () => builder,
     eq: () => builder,
+    in: () => builder,
     maybeSingle: async () => result,
     then: (onFulfilled: (value: TableResult) => unknown, onRejected?: (reason: unknown) => unknown) =>
       Promise.resolve(result).then(onFulfilled, onRejected),
@@ -28,6 +30,8 @@ const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   automation_authorizations: { data: { status: "authorized" }, error: null },
   candidate_exclusions: { data: [], error: null },
   candidate_selected_roles: { data: [], error: null },
+  extracted_facts: { data: [], error: null },
+  fact_confirmations: { data: [], error: null },
   application_plans: { data: null, error: null },
   application_attempts: { data: [], error: null },
 };
@@ -47,15 +51,17 @@ function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
 const baseInput = { candidateId: "candidate-1", vacancyId: "vacancy-1" };
 
 describe("evaluateEligibilityGates", () => {
-  it("is never eligible even when every real gate (including role_match) passes, because 3 gates always hard-fail", async () => {
+  it("is never eligible even when every real gate (including role_match and verified_facts) passes, because 2 gates always hard-fail", async () => {
     const client = makeClient({
       candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
+      extracted_facts: { data: [{ id: "fact-1" }], error: null },
+      fact_confirmations: { data: [{ status: "confirmed" }], error: null },
     });
     const result = await evaluateEligibilityGates(client, baseInput);
 
     expect(result.eligible).toBe(false);
     expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "Backend Engineer" } });
-    expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" });
+    expect(result.gates.verified_facts).toEqual({ status: "pass" });
     expect(result.gates.application_support).toEqual({
       status: "fail",
       reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED",
@@ -326,6 +332,41 @@ describe("evaluateEligibilityGates", () => {
     });
   });
 
+  describe("verified_facts", () => {
+    it("fails when the candidate has no extracted facts at all", async () => {
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "NO_FACTS_EXTRACTED" });
+    });
+
+    it("fails when facts exist but none are confirmed", async () => {
+      const client = makeClient({
+        extracted_facts: { data: [{ id: "fact-1" }, { id: "fact-2" }], error: null },
+        fact_confirmations: { data: [{ status: "pending" }, { status: "rejected" }], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "NO_FACTS_CONFIRMED" });
+    });
+
+    it("passes when at least one fact is confirmed", async () => {
+      const client = makeClient({
+        extracted_facts: { data: [{ id: "fact-1" }, { id: "fact-2" }], error: null },
+        fact_confirmations: { data: [{ status: "pending" }, { status: "confirmed" }], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.verified_facts).toEqual({ status: "pass" });
+    });
+
+    it("fails when facts exist but have no confirmation rows yet", async () => {
+      const client = makeClient({
+        extracted_facts: { data: [{ id: "fact-1" }], error: null },
+        fact_confirmations: { data: [], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.verified_facts).toEqual({ status: "fail", reasonCode: "NO_FACTS_CONFIRMED" });
+    });
+  });
+
   describe("error and not-found propagation", () => {
     it("throws when the vacancy does not exist", async () => {
       const client = makeClient({ vacancies: { data: null, error: null } });
@@ -354,6 +395,19 @@ describe("evaluateEligibilityGates", () => {
 
     it("propagates a database error from the candidate_selected_roles lookup", async () => {
       const client = makeClient({ candidate_selected_roles: { data: null, error: { message: "db error" } } });
+      await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
+    });
+
+    it("propagates a database error from the extracted_facts lookup", async () => {
+      const client = makeClient({ extracted_facts: { data: null, error: { message: "db error" } } });
+      await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
+    });
+
+    it("propagates a database error from the fact_confirmations lookup", async () => {
+      const client = makeClient({
+        extracted_facts: { data: [{ id: "fact-1" }], error: null },
+        fact_confirmations: { data: null, error: { message: "db error" } },
+      });
       await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
     });
 

@@ -12,17 +12,17 @@ export interface GateResult {
  * PRD §16.1 names 8 gates (Source policy, Vacancy trust, Candidate
  * eligibility, Verified facts, Application support, Consent and privacy,
  * Rate and abuse controls, Idempotency). R4.2 wired 5 of those against
- * real repository data; R4.5 adds `role_match` as a 6th, now that
- * candidate_selected_roles (PRD §9.1) exists — a minimal exact-or-substring
- * comparison against vacancies.raw_title, deliberately not NLP/ML matching,
- * since no normalized vacancy role taxonomy exists yet either. The
- * remaining 3 are still permanent hard-block placeholders until their
- * prerequisite systems exist: `verified_facts` needs
- * extracted_facts/fact_confirmations (PRD §21.1 Resume domain);
- * `application_support` needs a channel/adapter capability model (PRD
- * §16.2); `rate_and_abuse_controls` needs a rate-limiting system (the
- * same class of gap R3.7 documented for report rate-limiting). None of
- * the three exist anywhere in this repository.
+ * real repository data; R4.5 added `role_match` as a 6th (candidate_selected_roles,
+ * PRD §9.1); R4.6 adds `verified_facts` as a 7th, now that
+ * extracted_facts/fact_confirmations (PRD §21.1 Resume domain) exist — a
+ * coarse presence check (at least one confirmed fact), not yet matched
+ * against which facts a given vacancy actually requires, since no
+ * vacancy-side fact-requirement data exists yet either. The remaining 2
+ * are still permanent hard-block placeholders until their prerequisite
+ * systems exist: `application_support` needs a channel/adapter capability
+ * model (PRD §16.2); `rate_and_abuse_controls` needs a rate-limiting
+ * system (the same class of gap R3.7 documented for report
+ * rate-limiting). Neither exists anywhere in this repository.
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -80,14 +80,21 @@ export async function evaluateEligibilityGates(
 
   const vacancy = vacancyRow as { source_code: string; trust_status: string | null; raw_title: string };
 
-  const [sourcePolicyGate, automationAuthorizationGate, candidateExclusionsGate, idempotencyGate, roleMatchGate] =
-    await Promise.all([
-      evaluateSourcePolicy(client, vacancy.source_code),
-      evaluateAutomationAuthorization(client, candidateId),
-      evaluateCandidateExclusions(client, candidateId),
-      evaluateIdempotency(client, candidateId, vacancyId),
-      evaluateRoleMatch(client, candidateId, vacancy.raw_title),
-    ]);
+  const [
+    sourcePolicyGate,
+    automationAuthorizationGate,
+    candidateExclusionsGate,
+    idempotencyGate,
+    roleMatchGate,
+    verifiedFactsGate,
+  ] = await Promise.all([
+    evaluateSourcePolicy(client, vacancy.source_code),
+    evaluateAutomationAuthorization(client, candidateId),
+    evaluateCandidateExclusions(client, candidateId),
+    evaluateIdempotency(client, candidateId, vacancyId),
+    evaluateRoleMatch(client, candidateId, vacancy.raw_title),
+    evaluateVerifiedFacts(client, candidateId),
+  ]);
 
   const gates: EligibilityGates = {
     source_policy: sourcePolicyGate,
@@ -96,12 +103,9 @@ export async function evaluateEligibilityGates(
     candidate_exclusions: candidateExclusionsGate,
     idempotency: idempotencyGate,
     role_match: roleMatchGate,
+    verified_facts: verifiedFactsGate,
     // Permanent hard-block placeholders (approved R4 sequencing decision):
-    // extracted_facts/fact_confirmations (PRD §21.1 Resume domain) don't
-    // exist anywhere in this repository, so this gate can never pass
-    // until that system is built in a later R4 mini-phase.
-    verified_facts: { status: "fail", reasonCode: "FACT_VERIFICATION_NOT_IMPLEMENTED" },
-    // Same treatment (R4.2b): no channel/adapter capability model exists
+    // no channel/adapter capability model exists
     // (PRD §16.2 — which portal fields and attachments a given source
     // actually supports), and no rate/abuse-limiting system exists
     // anywhere in this repository (the same class of gap R3.7 documented
@@ -247,6 +251,54 @@ async function evaluateRoleMatch(
   }
 
   return { status: "fail", reasonCode: "ROLE_NOT_MATCHED", detail: { selectedRoles } };
+}
+
+/**
+ * R4.6 minimal fact verification (PRD §21.1 Resume domain): no
+ * fact-extraction pipeline exists yet, so this is a coarse presence
+ * check — at least one of the candidate's extracted_facts has a
+ * 'confirmed' fact_confirmations row — not yet matched against which
+ * facts a given vacancy actually requires (deferred, same "no
+ * normalized taxonomy on the other side yet" reasoning as role_match,
+ * until vacancy-side requirement data exists). Two-step query (facts,
+ * then confirmations for those fact ids) mirrors evaluateIdempotency's
+ * own shape rather than a single embedded-filter query, matching this
+ * file's existing style.
+ */
+async function evaluateVerifiedFacts(client: SupabaseClient, candidateId: string): Promise<GateResult> {
+  const { data: factRows, error: factError } = await client
+    .from("extracted_facts")
+    .select("id")
+    .eq("candidate_id", candidateId);
+
+  if (factError) {
+    throw factError;
+  }
+
+  const factIds = ((factRows ?? []) as Array<{ id: string }>).map((row) => row.id);
+
+  if (factIds.length === 0) {
+    return { status: "fail", reasonCode: "NO_FACTS_EXTRACTED" };
+  }
+
+  const { data: confirmationRows, error: confirmationError } = await client
+    .from("fact_confirmations")
+    .select("status")
+    .in("extracted_fact_id", factIds);
+
+  if (confirmationError) {
+    throw confirmationError;
+  }
+
+  const hasConfirmedFact = ((confirmationRows ?? []) as Array<{ status: string }>).some(
+    (row) => row.status === "confirmed",
+  );
+
+  if (hasConfirmedFact) {
+    return { status: "pass" };
+  }
+
+  return { status: "fail", reasonCode: "NO_FACTS_CONFIRMED" };
 }
 
 /**
