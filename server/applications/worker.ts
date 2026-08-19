@@ -1,10 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { submitApplicationAttempt } from "./submissionAdapter.js";
+import { createActionRequiredEvent } from "./actionRequired.js";
+import { ActionRequiredSubmissionError, submitApplicationAttempt } from "./submissionAdapter.js";
 
 export interface RunOneAttemptResult {
   processed: boolean;
   applicationAttemptId?: string;
-  outcome?: "succeeded" | "failed";
+  outcome?: "succeeded" | "failed" | "action_required";
   error?: string;
 }
 
@@ -23,12 +24,14 @@ interface ClaimedAttempt {
  * for this queue. Like that function, this doesn't run a persistent
  * process itself; a caller loops on this or schedules it periodically.
  *
- * submitApplicationAttempt always throws today (no channel adapter is
- * implemented yet — PRD §16.2), so in practice every real call currently
- * takes the catch branch and records a 'failed'/retry outcome. The
- * success branch exists and is evidence-tested so the recording logic is
- * proven correct ahead of the first real adapter landing, not exercised
- * by a fake happy path in production.
+ * submitApplicationAttempt always throws a plain Error today (no channel
+ * adapter is implemented yet — PRD §16.2), so in practice every real call
+ * currently takes the generic catch branch below and records a
+ * 'failed'/retry outcome, never the action_required one — no adapter
+ * exists yet that could throw ActionRequiredSubmissionError instead. Both
+ * the success and action_required branches exist and are evidence-tested
+ * so their recording logic is proven correct ahead of the first real
+ * adapter landing, not exercised by a fake happy path in production.
  */
 export async function runOneApplicationAttempt(client: SupabaseClient): Promise<RunOneAttemptResult> {
   const { data: attempts, error: claimError } = await client.rpc("claim_application_attempt");
@@ -62,6 +65,23 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
 
     return { processed: true, applicationAttemptId: attempt.id, outcome: "succeeded" };
   } catch (error) {
+    if (error instanceof ActionRequiredSubmissionError) {
+      await client.from("application_evidence").insert({
+        application_attempt_id: attempt.id,
+        evidence_type: "action_required",
+        payload: { exceptionType: error.exceptionType, ...error.payload },
+      });
+
+      await createActionRequiredEvent(client, {
+        applicationAttemptId: attempt.id,
+        exceptionType: error.exceptionType,
+        payload: error.payload,
+        expiresAt: error.expiresAt,
+      });
+
+      return { processed: true, applicationAttemptId: attempt.id, outcome: "action_required" };
+    }
+
     const message = error instanceof Error ? error.message : String(error);
 
     await client.from("application_evidence").insert({

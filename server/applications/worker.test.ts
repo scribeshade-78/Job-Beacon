@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("./submissionAdapter.js", () => ({ submitApplicationAttempt: vi.fn() }));
+vi.mock("./submissionAdapter.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./submissionAdapter.js")>();
+  return { ...actual, submitApplicationAttempt: vi.fn() };
+});
+vi.mock("./actionRequired.js", () => ({ createActionRequiredEvent: vi.fn() }));
 
-import { submitApplicationAttempt } from "./submissionAdapter.js";
+import { createActionRequiredEvent } from "./actionRequired.js";
+import { ActionRequiredSubmissionError, submitApplicationAttempt } from "./submissionAdapter.js";
 import { runOneApplicationAttempt } from "./worker.js";
 
 const claimedAttempt = {
@@ -104,6 +109,52 @@ describe("runOneApplicationAttempt", () => {
     expect(attemptsTable.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: "leased", last_error: "No submission adapter is registered" }),
     );
+  });
+
+  it("routes a named exception to createActionRequiredEvent instead of the generic retry path", async () => {
+    vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(
+      new ActionRequiredSubmissionError("captcha", { hint: "solve at portal" }, "2026-08-20T00:00:00Z"),
+    );
+    vi.mocked(createActionRequiredEvent).mockResolvedValueOnce({
+      id: "event-1",
+      applicationAttemptId: "attempt-1",
+      exceptionType: "captcha",
+      payload: { hint: "solve at portal" },
+      expiresAt: "2026-08-20T00:00:00Z",
+      resolvedAt: null,
+      createdAt: "2026-08-19T00:00:00Z",
+    });
+    const client = makeClient();
+
+    const result = await runOneApplicationAttempt(client);
+
+    expect(result).toEqual({ processed: true, applicationAttemptId: "attempt-1", outcome: "action_required" });
+
+    expect(createActionRequiredEvent).toHaveBeenCalledWith(client, {
+      applicationAttemptId: "attempt-1",
+      exceptionType: "captcha",
+      payload: { hint: "solve at portal" },
+      expiresAt: "2026-08-20T00:00:00Z",
+    });
+
+    const evidenceTable = (client.from as ReturnType<typeof vi.fn>).mock.results.find(
+      (_r, i) => (client.from as ReturnType<typeof vi.fn>).mock.calls[i][0] === "application_evidence",
+    )!.value;
+    expect(evidenceTable.insert).toHaveBeenCalledWith({
+      application_attempt_id: "attempt-1",
+      evidence_type: "action_required",
+      payload: { exceptionType: "captcha", hint: "solve at portal" },
+    });
+  });
+
+  it("propagates an error thrown by createActionRequiredEvent instead of swallowing it", async () => {
+    vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(
+      new ActionRequiredSubmissionError("otp_or_email_code", {}),
+    );
+    vi.mocked(createActionRequiredEvent).mockRejectedValueOnce(new Error("db error"));
+    const client = makeClient();
+
+    await expect(runOneApplicationAttempt(client)).rejects.toThrow("db error");
   });
 
   it("dead-letters (status: failed) once max_attempts is reached instead of rescheduling", async () => {
