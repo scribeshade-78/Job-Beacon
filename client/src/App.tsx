@@ -7,6 +7,12 @@ import {
 } from "./lib/actionRequired";
 import { listApplications, type ApplicationSummary } from "./lib/applications";
 import {
+  listSalaryBenchmarks,
+  listVerifiedCompanies,
+  type CompanyIntelligenceEntry,
+  type SalaryBenchmarkEntry,
+} from "./lib/companyIntelligence";
+import {
   authorize,
   CONSENT_DISCLOSURE,
   getAuthorization,
@@ -151,9 +157,17 @@ export function App() {
             <AutomationPanel candidateId={auth.user.id} />
           </>
         )}
-        {/* Doesn't touch candidate_profiles-referencing tables, so it
-            doesn't need to wait on profileReady. */}
-        {auth.user && <SecurityPanel />}
+        {/* companies/company_profiles/company_legal_entities/salary_benchmarks
+            are public-within-the-app reference data with no FK to
+            candidate_profiles, so — like SecurityPanel — these don't need
+            to wait on profileReady either. */}
+        {auth.user && (
+          <>
+            <SecurityPanel />
+            <CompaniesPanel />
+            <SalaryBenchmarksPanel />
+          </>
+        )}
       </main>
     );
   }
@@ -575,6 +589,86 @@ function AutomationPanel({ candidateId }: AutomationPanelProps) {
           )}
         </>
       )}
+    </section>
+  );
+}
+
+function CompaniesPanel() {
+  const [companies, setCompanies] = useState<CompanyIntelligenceEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listVerifiedCompanies(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setCompanies(result.companies);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="companies-title" className="foundation-card">
+      <h2 id="companies-title">Verified Companies</h2>
+      {error && <p role="alert">{error}</p>}
+      {companies?.length === 0 && <p>No verified company profiles yet.</p>}
+      <ul>
+        {companies?.map((company) => (
+          <li key={company.companyId}>
+            <strong>{company.displayedName}</strong>
+            {company.domain && ` — ${company.domain}`}
+            <ul>
+              {company.profile.industry && <li>Industry: {company.profile.industry}</li>}
+              {company.profile.headquartersCountry && <li>Headquarters: {company.profile.headquartersCountry}</li>}
+              {company.profile.employeeSizeRange && <li>Employees: {company.profile.employeeSizeRange}</li>}
+              {company.profile.foundedYear && <li>Founded: {company.profile.foundedYear}</li>}
+              {company.profile.publicPrivateStatus && <li>Status: {company.profile.publicPrivateStatus}</li>}
+            </ul>
+            {company.legalEntities.length > 0 && (
+              <ul>
+                {company.legalEntities.map((entity) => (
+                  <li key={entity.id}>
+                    {entity.legalName} ({entity.jurisdiction}, {entity.registryIdentifier})
+                    {entity.registrationStatus && ` — ${entity.registrationStatus}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SalaryBenchmarksPanel() {
+  const [benchmarks, setBenchmarks] = useState<SalaryBenchmarkEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listSalaryBenchmarks(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setBenchmarks(result.benchmarks);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="salary-benchmarks-title" className="foundation-card">
+      <h2 id="salary-benchmarks-title">Salary Benchmarks</h2>
+      {error && <p role="alert">{error}</p>}
+      {benchmarks?.length === 0 && <p>No salary benchmarks published yet.</p>}
+      <ul>
+        {benchmarks?.map((benchmark) => (
+          <li key={benchmark.id}>
+            {benchmark.roleLabel}
+            {benchmark.region && ` (${benchmark.region})`}: {benchmark.salaryMin ?? "?"}–{benchmark.salaryMax ?? "?"}{" "}
+            {benchmark.currency}/{benchmark.salaryInterval} — {benchmark.benchmarkSource}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
