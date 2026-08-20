@@ -21,10 +21,35 @@ export class NoConfirmedFactsError extends Error {
   }
 }
 
+/**
+ * R7-M12: thrown by verifyFactuality when a fact in a payload doesn't trace
+ * back to a confirmed extracted_facts row — formalizes an invariant
+ * generateResumePayload's own query logic already guarantees on its normal
+ * path, as an explicit, independently testable check rather than leaving it
+ * implicit, so a future change to that logic can't silently violate PRD
+ * §16.3's "never add unsupported ... data" requirement without a test
+ * catching it.
+ */
+export class FactualityViolationError extends Error {
+  constructor(public readonly extractedFactId: string) {
+    super(
+      `Fact ${extractedFactId} is not present in the candidate's confirmed facts — factuality check failed.`,
+    );
+    this.name = "FactualityViolationError";
+  }
+}
+
 export interface ResumeFactEntry {
   extractedFactId: string;
   factType: string;
   factValue: string;
+  /**
+   * R7-M12 (PRD §16.3 "select evidence relevant to the vacancy"):
+   * annotate-not-filter, per the locked design decision — every confirmed
+   * fact always stays in the payload; this only marks whether it matched.
+   * See isRelevantToVacancy's own doc comment for the matching semantics.
+   */
+  relevant: boolean;
 }
 
 export interface ResumePayload {
@@ -41,19 +66,26 @@ export interface ResumePayload {
  * candidate's confirmed facts into a flat JSON payload — a proxy for a
  * generated document, since no real generation pipeline exists yet
  * (PRD §16.2's channel adapters are the same class of not-yet-built
- * dependency). Deliberately does NOT select facts by relevance to a
- * specific vacancy (PRD §16.3's "select evidence relevant to the
- * vacancy") — no vacancy-side fact-requirement taxonomy exists in this
- * repository, the same gap eligibilityGate.ts's verified_facts gate
- * already documents as a coarse presence check rather than a real
- * requirement match. Two-step query (facts, then confirmations for
- * those fact ids) mirrors evaluateVerifiedFacts's own shape.
+ * dependency). Two-step query (facts, then confirmations for those fact
+ * ids) mirrors evaluateVerifiedFacts's own shape.
  *
  * Throws NoConfirmedFactsError — not a generic Error — when the
  * candidate has zero confirmed facts, so a caller can distinguish "ask
  * the candidate to confirm facts first" from an actual database failure.
+ *
+ * R7-M12: vacancyTitle is an optional third parameter, not a query this
+ * function makes itself — same "caller already fetched the row, pass the
+ * field down" convention as eligibilityGate.ts's evaluateRoleMatch, so this
+ * doesn't add a second vacancies query for data a caller already has.
+ * Omitting it (or passing an empty/whitespace-only string) is a legitimate
+ * call shape, not an error — every fact is simply annotated not-relevant,
+ * since there is nothing to match against.
  */
-export async function generateResumePayload(client: SupabaseClient, candidateId: string): Promise<ResumePayload> {
+export async function generateResumePayload(
+  client: SupabaseClient,
+  candidateId: string,
+  vacancyTitle?: string,
+): Promise<ResumePayload> {
   const { data: factRows, error: factError } = await client
     .from("extracted_facts")
     .select("id, fact_type, fact_value")
@@ -91,11 +123,14 @@ export async function generateResumePayload(client: SupabaseClient, candidateId:
       extractedFactId: fact.id,
       factType: fact.fact_type,
       factValue: fact.fact_value,
+      relevant: isRelevantToVacancy(fact.fact_value, vacancyTitle),
     }));
 
   if (confirmedFacts.length === 0) {
     throw new NoConfirmedFactsError(candidateId);
   }
+
+  verifyFactuality(confirmedFacts, confirmedFactIds);
 
   const outputHash = createHash("sha256").update(JSON.stringify(confirmedFacts)).digest("hex");
 
@@ -107,4 +142,46 @@ export async function generateResumePayload(client: SupabaseClient, candidateId:
     outputHash,
     generatedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * R7-M12 (PRD §16.3 "select evidence relevant to the vacancy"): deliberately
+ * the same case-insensitive substring technique as eligibilityGate.ts's
+ * evaluateRoleMatch — normalizedTitle.includes(normalizedValue) — reused
+ * rather than a second matching convention invented for this file. Matches
+ * against factValue only (the fact's actual content), not factType (a
+ * category label like "years_of_experience"), since fact_type has no fixed,
+ * PRD-defined taxonomy in this repository (same reasoning
+ * extracted_facts.sql documents for not CHECK-constraining it) and matching
+ * against an arbitrary label would be guessing, not an honest textual
+ * signal. Both sides empty/blank return false — same "a blank value
+ * matching every title" guard evaluateRoleMatch already documents — so a
+ * missing vacancyTitle (or a fact with blank factValue) is reported as
+ * not relevant, never as a false match.
+ */
+function isRelevantToVacancy(factValue: string, vacancyTitle: string | undefined): boolean {
+  const normalizedTitle = (vacancyTitle ?? "").trim().toLowerCase();
+  const normalizedValue = factValue.trim().toLowerCase();
+
+  return normalizedTitle.length > 0 && normalizedValue.length > 0 && normalizedTitle.includes(normalizedValue);
+}
+
+/**
+ * R7-M12 (PRD §16.3 "never add unsupported ... data"): an explicit,
+ * independently unit-testable assertion of the invariant
+ * generateResumePayload's own confirmedFactIds filter already guarantees on
+ * its normal path — every fact in `facts` must trace back to a confirmed
+ * extracted_facts row. Exported so a test can construct a payload that
+ * deliberately violates the invariant directly, without needing to break
+ * generateResumePayload's actual query logic to exercise the failure path.
+ * Throws on the first violation found rather than collecting all of them:
+ * one violation is already a factuality failure severe enough to reject the
+ * whole payload, so there is no case where a caller needs the full list.
+ */
+export function verifyFactuality(facts: ResumeFactEntry[], confirmedFactIds: Set<string>): void {
+  for (const fact of facts) {
+    if (!confirmedFactIds.has(fact.extractedFactId)) {
+      throw new FactualityViolationError(fact.extractedFactId);
+    }
+  }
 }

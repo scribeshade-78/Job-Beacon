@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { generateResumePayload, NoConfirmedFactsError } from "./resumeGenerator.js";
+import {
+  FactualityViolationError,
+  generateResumePayload,
+  NoConfirmedFactsError,
+  verifyFactuality,
+  type ResumeFactEntry,
+} from "./resumeGenerator.js";
 
 type TableResult = { data: unknown; error: unknown };
 
@@ -77,8 +83,8 @@ describe("generateResumePayload", () => {
 
     expect(result.candidateId).toBe(candidateId);
     expect(result.facts).toEqual([
-      { extractedFactId: "fact-1", factType: "years_of_experience", factValue: "5" },
-      { extractedFactId: "fact-2", factType: "current_title", factValue: "Backend Engineer" },
+      { extractedFactId: "fact-1", factType: "years_of_experience", factValue: "5", relevant: false },
+      { extractedFactId: "fact-2", factType: "current_title", factValue: "Backend Engineer", relevant: false },
     ]);
     expect(result.templateVersion).toBe("plain-json-v0");
     expect(result.modelVersion).toBe("verbatim-confirmed-facts-v0");
@@ -141,5 +147,106 @@ describe("generateResumePayload", () => {
   it("NoConfirmedFactsError carries the candidate id in its message", async () => {
     const client = makeClient();
     await expect(generateResumePayload(client, candidateId)).rejects.toThrow(/candidate-1/);
+  });
+});
+
+describe("generateResumePayload — vacancy relevance annotation", () => {
+  const twoFacts = [
+    { id: "fact-1", fact_type: "current_title", fact_value: "Backend Engineer" },
+    { id: "fact-2", fact_type: "location", fact_value: "Bengaluru" },
+  ];
+  const bothConfirmed = [{ extracted_fact_id: "fact-1" }, { extracted_fact_id: "fact-2" }];
+
+  it("marks a fact relevant when its factValue is a case-insensitive substring of the vacancy title", async () => {
+    const client = makeClient({
+      extracted_facts: { data: twoFacts, error: null },
+      fact_confirmations: { data: bothConfirmed, error: null },
+    });
+
+    const result = await generateResumePayload(client, candidateId, "Senior BACKEND ENGINEER II");
+
+    expect(result.facts).toEqual([
+      { extractedFactId: "fact-1", factType: "current_title", factValue: "Backend Engineer", relevant: true },
+      { extractedFactId: "fact-2", factType: "location", factValue: "Bengaluru", relevant: false },
+    ]);
+  });
+
+  it("follows evaluateRoleMatch's own substring direction: the vacancy title must include the fact value, not the reverse", async () => {
+    const client = makeClient({
+      extracted_facts: { data: [{ id: "fact-1", fact_type: "current_title", fact_value: "Senior Backend Engineer" }], error: null },
+      fact_confirmations: { data: [{ extracted_fact_id: "fact-1" }], error: null },
+    });
+
+    // The fact value is longer than the title, so the title cannot include it.
+    const result = await generateResumePayload(client, candidateId, "Backend Engineer");
+
+    expect(result.facts).toEqual([
+      { extractedFactId: "fact-1", factType: "current_title", factValue: "Senior Backend Engineer", relevant: false },
+    ]);
+  });
+
+  it("keeps every confirmed fact in the payload regardless of match, never silently filtering one out", async () => {
+    const client = makeClient({
+      extracted_facts: { data: twoFacts, error: null },
+      fact_confirmations: { data: bothConfirmed, error: null },
+    });
+
+    const result = await generateResumePayload(client, candidateId, "Backend Engineer");
+
+    expect(result.facts).toHaveLength(2);
+    expect(result.facts.map((fact) => fact.extractedFactId)).toEqual(["fact-1", "fact-2"]);
+  });
+
+  it("annotates every confirmed fact as not relevant, without dropping any, when vacancyTitle is omitted", async () => {
+    const client = makeClient({
+      extracted_facts: { data: twoFacts, error: null },
+      fact_confirmations: { data: bothConfirmed, error: null },
+    });
+
+    const result = await generateResumePayload(client, candidateId);
+
+    expect(result.facts).toHaveLength(2);
+    expect(result.facts.every((fact) => fact.relevant === false)).toBe(true);
+  });
+
+  it("treats a blank/whitespace-only vacancyTitle the same as a missing one, not as matching every fact", async () => {
+    const client = makeClient({
+      extracted_facts: { data: twoFacts, error: null },
+      fact_confirmations: { data: bothConfirmed, error: null },
+    });
+
+    const result = await generateResumePayload(client, candidateId, "   ");
+
+    expect(result.facts.every((fact) => fact.relevant === false)).toBe(true);
+  });
+});
+
+describe("verifyFactuality", () => {
+  it("passes without throwing when every fact traces to a confirmed extracted_facts id", () => {
+    const facts: ResumeFactEntry[] = [
+      { extractedFactId: "fact-1", factType: "current_title", factValue: "Backend Engineer", relevant: false },
+    ];
+    expect(() => verifyFactuality(facts, new Set(["fact-1"]))).not.toThrow();
+  });
+
+  it("rejects a deliberately constructed payload containing a fact absent from the confirmed set", () => {
+    const facts: ResumeFactEntry[] = [
+      { extractedFactId: "fact-1", factType: "current_title", factValue: "Backend Engineer", relevant: false },
+      { extractedFactId: "fact-not-confirmed", factType: "location", factValue: "Bengaluru", relevant: false },
+    ];
+    expect(() => verifyFactuality(facts, new Set(["fact-1"]))).toThrow(FactualityViolationError);
+  });
+
+  it("identifies the offending extractedFactId on the thrown error", () => {
+    const facts: ResumeFactEntry[] = [
+      { extractedFactId: "fact-unconfirmed", factType: "current_title", factValue: "Backend Engineer", relevant: false },
+    ];
+    try {
+      verifyFactuality(facts, new Set());
+      throw new Error("expected verifyFactuality to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(FactualityViolationError);
+      expect((error as FactualityViolationError).extractedFactId).toBe("fact-unconfirmed");
+    }
   });
 });
