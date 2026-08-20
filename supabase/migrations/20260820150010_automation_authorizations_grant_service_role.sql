@@ -1,0 +1,13 @@
+-- R7-M6: automation_authorizations (R1, 20260813184945) revoked all
+-- privileges then granted select/insert/update only to `authenticated` —
+-- candidate-authored, candidate-scoped by design, since at the time
+-- nothing running as service_role needed to read it. R7-M4's
+-- claim_application_attempt() cancellation sweep is the first service_role
+-- code path to actually query this table, and real-Postgres pgTAP
+-- verification (R7-M5) confirmed the resulting gap: "permission denied for
+-- table automation_authorizations". This is the minimal fix — SELECT only,
+-- matching exactly what the sweep and submissionAdapter.ts's authorization
+-- recheck (R7-M4) need and nothing more. No INSERT/UPDATE/DELETE grant:
+-- service_role has no legitimate reason to write a candidate's own
+-- consent/pause/stop record, and RLS on this table is unchanged.
+grant select on public.automation_authorizations to service_role;

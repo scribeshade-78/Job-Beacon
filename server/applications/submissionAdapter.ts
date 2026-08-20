@@ -1,14 +1,10 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ActionRequiredExceptionType } from "./actionRequired.js";
+import { resolveApplicationAdapter } from "./adapters/registry.js";
+import type { ApplicationSubmissionContext, ApplicationSubmissionResult } from "./adapters/types.js";
 
-export interface SubmissionContext {
-  applicationAttemptId: string;
-  applicationPlanId: string;
-}
-
-export interface SubmissionResult {
-  evidenceType: string;
-  payload: Record<string, unknown>;
-}
+export type SubmissionContext = ApplicationSubmissionContext;
+export type SubmissionResult = ApplicationSubmissionResult;
 
 /**
  * PRD §17's contract for a channel adapter that hits one of the seven
@@ -32,19 +28,90 @@ export class ActionRequiredSubmissionError extends Error {
 }
 
 /**
- * PRD §16.2 names 5 channels (Authorized ATS API, Permitted hosted form,
- * Employer direct API/feed, Redirect-only source, Unsupported/restricted)
- * — none has an adapter implementation anywhere in this repository, and
- * source_policies.automated_application_allowed is false for every source
- * today (R2's explicit decision), so no channel could route to a real
- * adapter even if one existed. This always throws so worker.ts's error
- * and evidence-recording path is exercised honestly against a real
- * failure, not a submission that silently pretends to succeed. Real
- * per-channel adapters (browser worker, ATS API client, etc.) are a
- * later R4 mini-phase, not built here.
+ * R7-M4: thrown when the candidate's current automation_authorizations.status
+ * is not 'authorized' at the moment submission is about to be dispatched.
+ * worker.ts routes this to a dedicated 'cancelled' outcome (see that
+ * file), never the generic retry/dead-letter path a plain Error takes and
+ * never the action_required path — this is not a submission failure and
+ * not something the candidate needs to act on to unblock (they already
+ * acted, by pausing/stopping).
  */
-export async function submitApplicationAttempt(_context: SubmissionContext): Promise<SubmissionResult> {
-  throw new Error(
-    "No submission adapter is registered for any channel yet (PRD §16.2) — application channels are not implemented.",
-  );
+export class AuthorizationWithdrawnError extends Error {
+  constructor(public readonly status: string) {
+    super(`Candidate automation authorization is "${status}", not "authorized" — submission cancelled.`);
+    this.name = "AuthorizationWithdrawnError";
+  }
+}
+
+/**
+ * PRD §16.2 names 5 channels (Authorized ATS API, Permitted hosted form,
+ * Employer direct API/feed, Redirect-only source, Unsupported/restricted).
+ * R7-M2 replaces this function's original unconditional throw with a real
+ * (if currently always-"unsupported") resolution: look up the attempt's
+ * vacancy source_code — application_attempts carries no source_code column
+ * of its own, so this goes through application_plans -> vacancies, the
+ * same two-hop shape eligibilityGate.ts's own gates already use — then
+ * dispatch through resolveApplicationAdapter (PRD §23.2's "evaluate source
+ * capabilities at runtime" requirement). Every source still resolves to
+ * unsupportedAdapter today (see registry.ts), so the practical outcome for
+ * every real caller is unchanged: a thrown error, routed by worker.ts's
+ * existing catch block to the generic retry/dead-letter path.
+ *
+ * R7-M4: also re-checks automation_authorizations immediately before
+ * dispatching to the adapter — the closest point to the actual external
+ * effect this architecture allows (see the R7-M4 migration's comment for
+ * why the primary safety boundary is claim_application_attempt's
+ * pre-lease cancellation sweep, and why this is deliberately a second,
+ * narrower layer rather than the only one). Uses the same
+ * candidate_id/vacancy_id read as the existing plan lookup — one query,
+ * not two.
+ */
+export async function submitApplicationAttempt(
+  client: SupabaseClient,
+  context: SubmissionContext,
+): Promise<SubmissionResult> {
+  const { data: plan, error: planError } = await client
+    .from("application_plans")
+    .select("vacancy_id, candidate_id")
+    .eq("id", context.applicationPlanId)
+    .single();
+
+  if (planError || !plan) {
+    throw planError ?? new Error(`application_plans row not found for id ${context.applicationPlanId}`);
+  }
+
+  const { vacancy_id: vacancyId, candidate_id: candidateId } = plan as {
+    vacancy_id: string;
+    candidate_id: string;
+  };
+
+  const { data: authorization, error: authorizationError } = await client
+    .from("automation_authorizations")
+    .select("status")
+    .eq("candidate_id", candidateId)
+    .maybeSingle();
+
+  if (authorizationError) {
+    throw authorizationError;
+  }
+
+  const authorizationStatus = (authorization as { status: string } | null)?.status ?? "not_yet_authorized";
+
+  if (authorizationStatus !== "authorized") {
+    throw new AuthorizationWithdrawnError(authorizationStatus);
+  }
+
+  const { data: vacancy, error: vacancyError } = await client
+    .from("vacancies")
+    .select("source_code")
+    .eq("id", vacancyId)
+    .single();
+
+  if (vacancyError || !vacancy) {
+    throw vacancyError ?? new Error(`vacancies row not found for id ${vacancyId}`);
+  }
+
+  const adapter = resolveApplicationAdapter((vacancy as { source_code: string }).source_code);
+
+  return adapter.submit(client, context);
 }

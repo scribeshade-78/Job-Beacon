@@ -12,6 +12,7 @@ export const APPLICATION_ATTEMPT_STATUSES = [
   "succeeded",
   "failed",
   "action_required",
+  "cancelled",
 ] as const;
 
 export type ApplicationAttemptStatus = (typeof APPLICATION_ATTEMPT_STATUSES)[number];

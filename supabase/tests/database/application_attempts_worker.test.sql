@@ -1,12 +1,20 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(9);
+select plan(17);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- application_plans/application_attempts grants/RLS this fixture also
 -- touches are covered in their own *_rls.test.sql files).
 insert into auth.users (id, email) values ('11111111-9000-1111-1111-111111111111', 'candidate-a@test.local');
 insert into candidate_profiles (id) values ('11111111-9000-1111-1111-111111111111');
+-- R7-M4: claim_application_attempt's cancellation sweep now checks
+-- automation_authorizations for every candidate whose attempt it might
+-- claim. Candidate A must be 'authorized' for tests 3-8 below (all
+-- written before R7-M4, testing ordinary leasing/retry/FIFO behavior) to
+-- keep exercising that behavior rather than having every attempt swept
+-- into 'cancelled' before it can be leased at all.
+insert into automation_authorizations (candidate_id, status, consent_version)
+values ('11111111-9000-1111-1111-111111111111', 'authorized', 'r1-v1');
 insert into source_policies (source_code, authentication_method, policy_version, countries)
 values ('greenhouse', 'none', 'r2-v1', array['US']);
 insert into companies (id, displayed_name, domain)
@@ -17,6 +25,31 @@ insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, au
 values ('eeeeeeee-9000-1111-1111-111111111111', 'greenhouse', 'dddddddd-9000-1111-1111-111111111111', 'job-worker-1', 'https://applyco.example/jobs/1', 'Worker Test Role', 'cccccccc-9000-1111-1111-111111111111');
 insert into application_plans (id, candidate_id, vacancy_id, gate_results)
 values ('ffffffff-9000-1111-1111-111111111111', '11111111-9000-1111-1111-111111111111', 'eeeeeeee-9000-1111-1111-111111111111', '{}'::jsonb);
+
+-- R7-M4 fixtures (candidates B and C, used by tests 10-15 below): inserted
+-- here, alongside candidate A's, rather than down near the tests that use
+-- them, because auth.users can only be written under the script's default
+-- connecting role (effectively superuser) — service_role has no INSERT on
+-- auth.users (real user creation goes through Auth's admin API, not raw
+-- SQL as service_role), and `set local role service_role;` below is in
+-- effect for the rest of the script after test 2.
+insert into auth.users (id, email) values ('22222222-9000-1111-1111-111111111111', 'candidate-b-paused@test.local');
+insert into candidate_profiles (id) values ('22222222-9000-1111-1111-111111111111');
+insert into automation_authorizations (candidate_id, status, consent_version)
+values ('22222222-9000-1111-1111-111111111111', 'paused', 'r1-v1');
+insert into application_plans (id, candidate_id, vacancy_id, gate_results)
+values ('ffffffff-9001-1111-1111-111111111111', '22222222-9000-1111-1111-111111111111', 'eeeeeeee-9000-1111-1111-111111111111', '{}'::jsonb);
+insert into application_attempts (id, application_plan_id)
+values ('55555555-8000-2222-2222-222222222222', 'ffffffff-9001-1111-1111-111111111111');
+
+insert into auth.users (id, email) values ('33333333-9000-1111-1111-111111111111', 'candidate-c-stopped@test.local');
+insert into candidate_profiles (id) values ('33333333-9000-1111-1111-111111111111');
+insert into automation_authorizations (candidate_id, status, consent_version)
+values ('33333333-9000-1111-1111-111111111111', 'stopped', 'r1-v1');
+insert into application_plans (id, candidate_id, vacancy_id, gate_results)
+values ('ffffffff-9002-1111-1111-111111111111', '33333333-9000-1111-1111-111111111111', 'eeeeeeee-9000-1111-1111-111111111111', '{}'::jsonb);
+insert into application_attempts (id, application_plan_id)
+values ('66666666-8000-2222-2222-222222222222', 'ffffffff-9002-1111-1111-111111111111');
 
 -- 1. anon cannot execute claim_application_attempt
 set local role anon;
@@ -99,6 +132,85 @@ select is_empty(
   $$select privilege_type from information_schema.role_table_grants
       where table_name = 'application_attempts' and grantee in ('anon', 'authenticated') and privilege_type != 'SELECT'$$,
   'Neither anon nor authenticated gained any mutation privilege on application_attempts from the RPC'
+);
+
+-- R7-M4: candidate authorization withdrawal (pause/stop) tests below,
+-- using the candidate B/C fixtures inserted up front (see above, next to
+-- candidate A's). Leftover claimable rows from tests 1-8 (candidate A's
+-- still-'pending' attempt from test 8) are forced terminal first, so every
+-- claim_application_attempt() call from here on only ever sees this file's
+-- own fixture rows — deterministic, not dependent on prior test state.
+update application_attempts set status = 'succeeded' where status in ('pending', 'leased');
+
+-- 10. the paused candidate's pending attempt is never claimed
+select is_empty(
+  $$select id from claim_application_attempt() where id = '55555555-8000-2222-2222-222222222222'::uuid$$,
+  'A pending attempt for a paused candidate is never claimed'
+);
+
+-- 11. it is cancelled by the sweep instead, with attempts left untouched
+select results_eq(
+  $$select status, attempts from application_attempts where id = '55555555-8000-2222-2222-222222222222'::uuid$$,
+  $$values ('cancelled'::text, 0)$$,
+  'The paused candidate''s attempt is cancelled by the sweep, with attempts left at 0 (never leased, never incremented)'
+);
+
+-- 12. the stopped candidate's pending attempt is never claimed
+select is_empty(
+  $$select id from claim_application_attempt() where id = '66666666-8000-2222-2222-222222222222'::uuid$$,
+  'A pending attempt for a stopped candidate is never claimed'
+);
+
+-- 13. it is cancelled by the sweep instead, with attempts left untouched
+select results_eq(
+  $$select status, attempts from application_attempts where id = '66666666-8000-2222-2222-222222222222'::uuid$$,
+  $$values ('cancelled'::text, 0)$$,
+  'The stopped candidate''s attempt is cancelled by the sweep, with attempts left at 0'
+);
+
+-- 14. re-authorizing the candidate afterward does not resurrect a
+-- cancelled attempt — 'cancelled' matches neither claim of the leasing
+-- query's WHERE clause, so it is a genuinely terminal state.
+--
+-- This UPDATE simulates the candidate's own resume() action (client/src/lib/automationAuthorization.ts),
+-- which runs as `authenticated` in production — not service_role, which
+-- (correctly) only has SELECT on automation_authorizations. Reset to the
+-- script's default role for just this one fixture mutation, then switch
+-- back to service_role, since claim_application_attempt() below still
+-- requires it.
+reset role;
+update automation_authorizations set status = 'authorized'
+  where candidate_id = '22222222-9000-1111-1111-111111111111';
+set local role service_role;
+select is_empty(
+  $$select id from claim_application_attempt() where id = '55555555-8000-2222-2222-222222222222'::uuid$$,
+  'A cancelled attempt is never claimed again, even after the candidate re-authorizes'
+);
+
+-- 15. meanwhile, an authorized candidate's pending attempt in the same
+-- batch is claimed normally — the sweep is selective, not a blanket halt.
+insert into application_attempts (id, application_plan_id)
+values ('77777777-8000-2222-2222-222222222222', 'ffffffff-9000-1111-1111-111111111111');
+select results_eq(
+  $$select id, status, attempts from claim_application_attempt()$$,
+  $$values ('77777777-8000-2222-2222-222222222222'::uuid, 'leased'::text, 1)$$,
+  'An authorized candidate''s pending attempt is claimed normally even while other candidates'' attempts are being cancelled'
+);
+
+-- 16. the CHECK constraint accepts 'cancelled' as a valid status
+select lives_ok(
+  $$insert into application_attempts (id, application_plan_id, status)
+      values ('88888888-8000-2222-2222-222222222222', 'ffffffff-9000-1111-1111-111111111111', 'cancelled')$$,
+  'application_attempts.status accepts ''cancelled'''
+);
+
+-- 17. the CHECK constraint still rejects an arbitrary invalid status
+select throws_ok(
+  $$insert into application_attempts (id, application_plan_id, status)
+      values ('99999999-8000-2222-2222-222222222222', 'ffffffff-9000-1111-1111-111111111111', 'bogus_status')$$,
+  '23514',
+  null,
+  'application_attempts.status still rejects an arbitrary invalid value'
 );
 
 reset role;

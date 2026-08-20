@@ -7,7 +7,11 @@ vi.mock("./submissionAdapter.js", async (importOriginal) => {
 vi.mock("./actionRequired.js", () => ({ createActionRequiredEvent: vi.fn() }));
 
 import { createActionRequiredEvent } from "./actionRequired.js";
-import { ActionRequiredSubmissionError, submitApplicationAttempt } from "./submissionAdapter.js";
+import {
+  ActionRequiredSubmissionError,
+  AuthorizationWithdrawnError,
+  submitApplicationAttempt,
+} from "./submissionAdapter.js";
 import { runOneApplicationAttempt } from "./worker.js";
 
 const claimedAttempt = {
@@ -155,6 +159,56 @@ describe("runOneApplicationAttempt", () => {
     const client = makeClient();
 
     await expect(runOneApplicationAttempt(client)).rejects.toThrow("db error");
+  });
+
+  describe("R7-M4: authorization withdrawn mid-flight", () => {
+    it("marks the attempt cancelled and writes no application_evidence for a paused candidate", async () => {
+      vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(new AuthorizationWithdrawnError("paused"));
+      const client = makeClient();
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result).toEqual({ processed: true, applicationAttemptId: "attempt-1", outcome: "cancelled" });
+      expect(client.from).not.toHaveBeenCalledWith("application_evidence");
+
+      const attemptsTable = (client.from as ReturnType<typeof vi.fn>).mock.results.find(
+        (_r, i) => (client.from as ReturnType<typeof vi.fn>).mock.calls[i][0] === "application_attempts",
+      )!.value;
+      expect(attemptsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      // No compensating decrement — this file's own claimedAttempt fixture already carries
+      // attempts:1 from the (mocked) claim RPC, and update() is never called with an
+      // "attempts" key at all for this outcome.
+      expect(attemptsTable.update).not.toHaveBeenCalledWith(expect.objectContaining({ attempts: expect.anything() }));
+    });
+
+    it("does the same for a stopped candidate", async () => {
+      vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(new AuthorizationWithdrawnError("stopped"));
+      const client = makeClient();
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result).toEqual({ processed: true, applicationAttemptId: "attempt-1", outcome: "cancelled" });
+    });
+
+    it("does not take the exhausted/dead-letter path even when attempts already equals max_attempts", async () => {
+      vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(new AuthorizationWithdrawnError("stopped"));
+      const rpc = vi.fn(async () => ({
+        data: [{ id: "attempt-3", application_plan_id: "plan-1", attempts: 5, max_attempts: 5 }],
+        error: null,
+      }));
+      const from = vi.fn(() => chain({ data: null, error: null }));
+      const client = { rpc, from } as unknown as Parameters<typeof runOneApplicationAttempt>[0];
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result).toEqual({ processed: true, applicationAttemptId: "attempt-3", outcome: "cancelled" });
+
+      const attemptsTable = (from as ReturnType<typeof vi.fn>).mock.results.find(
+        (_r, i) => (from as ReturnType<typeof vi.fn>).mock.calls[i][0] === "application_attempts",
+      )!.value;
+      expect(attemptsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      expect(attemptsTable.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+    });
   });
 
   it("dead-letters (status: failed) once max_attempts is reached instead of rescheduling", async () => {

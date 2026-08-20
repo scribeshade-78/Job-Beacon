@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { resolveApplicationAdapter } from "./adapters/registry.js";
+import { unsupportedAdapter } from "./adapters/unsupportedAdapter.js";
 
 export type GateStatus = "pass" | "fail";
 
@@ -13,16 +15,24 @@ export interface GateResult {
  * eligibility, Verified facts, Application support, Consent and privacy,
  * Rate and abuse controls, Idempotency). R4.2 wired 5 of those against
  * real repository data; R4.5 added `role_match` as a 6th (candidate_selected_roles,
- * PRD §9.1); R4.6 adds `verified_facts` as a 7th, now that
+ * PRD §9.1); R4.6 added `verified_facts` as a 7th, now that
  * extracted_facts/fact_confirmations (PRD §21.1 Resume domain) exist — a
  * coarse presence check (at least one confirmed fact), not yet matched
  * against which facts a given vacancy actually requires, since no
- * vacancy-side fact-requirement data exists yet either. The remaining 2
- * are still permanent hard-block placeholders until their prerequisite
- * systems exist: `application_support` needs a channel/adapter capability
- * model (PRD §16.2); `rate_and_abuse_controls` needs a rate-limiting
- * system (the same class of gap R3.7 documented for report
- * rate-limiting). Neither exists anywhere in this repository.
+ * vacancy-side fact-requirement data exists yet either. R7-M2 (R4.8) wires
+ * `application_support` as an 8th: it now checks whether
+ * resolveApplicationAdapter (PRD §23.2's runtime capability check) has a
+ * real adapter for the vacancy's source_code, rather than unconditionally
+ * failing. It still always fails today, honestly — every source_code
+ * currently resolves to unsupportedAdapter, matching
+ * source_policies.automated_application_allowed being false everywhere —
+ * but this gate will start passing on its own, with no further gate
+ * changes, once a real per-source adapter is registered.
+ * `rate_and_abuse_controls` remains a permanent hard-block placeholder:
+ * PRD §31 leaves candidate application-limit policy as an explicit open
+ * founder decision, and the founder's R7-M1 answer was pause/stop-only —
+ * no numeric quota — which this gate does not yet implement (that's a
+ * later mini-phase, not R7-M2's scope).
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -104,19 +114,40 @@ export async function evaluateEligibilityGates(
     idempotency: idempotencyGate,
     role_match: roleMatchGate,
     verified_facts: verifiedFactsGate,
-    // Permanent hard-block placeholders (approved R4 sequencing decision):
-    // no channel/adapter capability model exists
-    // (PRD §16.2 — which portal fields and attachments a given source
-    // actually supports), and no rate/abuse-limiting system exists
-    // anywhere in this repository (the same class of gap R3.7 documented
-    // for candidate report rate-limiting).
-    application_support: { status: "fail", reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED" },
+    application_support: evaluateApplicationSupport(vacancy.source_code),
+    // Permanent hard-block placeholder pending the founder's rate-limit
+    // policy decision (PRD §31) — R7-M1 approved pause/stop-only, no
+    // numeric quota, but that gate isn't implemented yet (a later
+    // mini-phase, not R7-M2's scope).
     rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");
 
   return { eligible, gates };
+}
+
+/**
+ * PRD §16.1's "application support" gate ("Portal fields and attachments
+ * are supported") / §23.2's runtime capability check, R7-M2: an honest
+ * proxy for that check is whether resolveApplicationAdapter has a real
+ * adapter for this source_code at all — no vacancy-side portal-field/
+ * attachment taxonomy exists in this repository (the same "nothing on the
+ * other side to compare against yet" gap role_match and verified_facts
+ * already document), so this cannot yet check *which* fields a source
+ * supports, only *whether* it's supported at all. Identity-compares
+ * against the unsupportedAdapter singleton rather than re-deriving
+ * "unsupported" from source_code, so this gate and the registry can never
+ * drift out of sync with each other.
+ */
+function evaluateApplicationSupport(sourceCode: string): GateResult {
+  const adapter = resolveApplicationAdapter(sourceCode);
+
+  if (adapter === unsupportedAdapter) {
+    return { status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE", detail: { sourceCode } };
+  }
+
+  return { status: "pass" };
 }
 
 function evaluateVacancyTrust(trustStatus: string | null): GateResult {

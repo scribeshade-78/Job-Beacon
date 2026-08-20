@@ -1,11 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createActionRequiredEvent } from "./actionRequired.js";
-import { ActionRequiredSubmissionError, submitApplicationAttempt } from "./submissionAdapter.js";
+import {
+  ActionRequiredSubmissionError,
+  AuthorizationWithdrawnError,
+  submitApplicationAttempt,
+} from "./submissionAdapter.js";
 
 export interface RunOneAttemptResult {
   processed: boolean;
   applicationAttemptId?: string;
-  outcome?: "succeeded" | "failed" | "action_required";
+  outcome?: "succeeded" | "failed" | "action_required" | "cancelled";
   error?: string;
 }
 
@@ -24,14 +28,17 @@ interface ClaimedAttempt {
  * for this queue. Like that function, this doesn't run a persistent
  * process itself; a caller loops on this or schedules it periodically.
  *
- * submitApplicationAttempt always throws a plain Error today (no channel
- * adapter is implemented yet — PRD §16.2), so in practice every real call
+ * submitApplicationAttempt (R7-M2) resolves a real per-source adapter, but
+ * every source_code still resolves to unsupportedAdapter today (see
+ * server/applications/adapters/registry.ts — no real per-source case
+ * exists yet), which throws a plain Error. So in practice every real call
  * currently takes the generic catch branch below and records a
  * 'failed'/retry outcome, never the action_required one — no adapter
- * exists yet that could throw ActionRequiredSubmissionError instead. Both
- * the success and action_required branches exist and are evidence-tested
- * so their recording logic is proven correct ahead of the first real
- * adapter landing, not exercised by a fake happy path in production.
+ * exists yet that could throw ActionRequiredSubmissionError instead. The
+ * success, action_required, and cancelled (R7-M4) branches all exist and
+ * are evidence-tested so their recording logic is proven correct ahead of
+ * the first real adapter landing, not exercised by a fake happy path in
+ * production.
  */
 export async function runOneApplicationAttempt(client: SupabaseClient): Promise<RunOneAttemptResult> {
   const { data: attempts, error: claimError } = await client.rpc("claim_application_attempt");
@@ -47,7 +54,7 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
   }
 
   try {
-    const result = await submitApplicationAttempt({
+    const result = await submitApplicationAttempt(client, {
       applicationAttemptId: attempt.id,
       applicationPlanId: attempt.application_plan_id,
     });
@@ -65,6 +72,26 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
 
     return { processed: true, applicationAttemptId: attempt.id, outcome: "succeeded" };
   } catch (error) {
+    if (error instanceof AuthorizationWithdrawnError) {
+      // R7-M4: no application_evidence is written — nothing happened at
+      // the adapter/portal level to have evidence about, this is purely
+      // an internal authorization-gate decision. attempts is deliberately
+      // left untouched (no compensating decrement): claim_application_attempt
+      // already incremented it for this claim, and undoing that would be
+      // a new kind of mutation with no precedent elsewhere in this
+      // codebase. The common case — a candidate paused/stopped before
+      // this claim happened at all — never reaches here in the first
+      // place, because the same migration's cancellation sweep cancels
+      // those rows before they're ever leased, so attempts is never
+      // incremented for them to begin with.
+      await client
+        .from("application_attempts")
+        .update({ status: "cancelled", updated_at: new Date().toISOString() })
+        .eq("id", attempt.id);
+
+      return { processed: true, applicationAttemptId: attempt.id, outcome: "cancelled" };
+    }
+
     if (error instanceof ActionRequiredSubmissionError) {
       await client.from("application_evidence").insert({
         application_attempt_id: attempt.id,

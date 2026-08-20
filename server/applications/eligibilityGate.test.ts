@@ -64,7 +64,8 @@ describe("evaluateEligibilityGates", () => {
     expect(result.gates.verified_facts).toEqual({ status: "pass" });
     expect(result.gates.application_support).toEqual({
       status: "fail",
-      reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED",
+      reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
+      detail: { sourceCode: "greenhouse" },
     });
     expect(result.gates.rate_and_abuse_controls).toEqual({
       status: "fail",
@@ -73,18 +74,6 @@ describe("evaluateEligibilityGates", () => {
   });
 
   describe("permanent hard-block gates", () => {
-    it("application_support always fails, regardless of every other gate's outcome", async () => {
-      const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
-        source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
-      });
-      const result = await evaluateEligibilityGates(client, baseInput);
-      expect(result.gates.application_support).toEqual({
-        status: "fail",
-        reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED",
-      });
-    });
-
     it("rate_and_abuse_controls always fails, regardless of every other gate's outcome", async () => {
       const client = makeClient({
         vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
@@ -122,6 +111,42 @@ describe("evaluateEligibilityGates", () => {
         reasonCode: "SOURCE_APPLICATION_NOT_AUTHORIZED",
         detail: { discoveryAllowed: false, automatedApplicationAllowed: false },
       });
+    });
+  });
+
+  describe("application_support", () => {
+    it("fails with NO_ADAPTER_REGISTERED_FOR_SOURCE for a source with no registered adapter", async () => {
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.application_support).toEqual({
+        status: "fail",
+        reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
+        detail: { sourceCode: "greenhouse" },
+      });
+    });
+
+    it.each(["lever", "adzuna", "usajobs", "some_future_source"])(
+      "fails the same way for every source_code today (%s) — no real adapter is registered for any of them",
+      async (sourceCode) => {
+        const client = makeClient({
+          vacancies: { data: { source_code: sourceCode, trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
+        });
+        const result = await evaluateEligibilityGates(client, baseInput);
+        expect(result.gates.application_support).toEqual({
+          status: "fail",
+          reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
+          detail: { sourceCode },
+        });
+      },
+    );
+
+    it("is independent of source_policies.automated_application_allowed", async () => {
+      const client = makeClient({
+        source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.application_support.status).toBe("fail");
+      expect(result.gates.application_support.reasonCode).toBe("NO_ADAPTER_REGISTERED_FOR_SOURCE");
     });
   });
 
