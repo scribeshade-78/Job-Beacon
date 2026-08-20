@@ -36,6 +36,8 @@ import {
   type TotpEnrollment,
   type TotpFactorSummary,
 } from "./lib/mfa";
+import { listMailboxConnections, type MailboxConnection } from "./lib/mailbox";
+import { listMessages, type MailboxMessage } from "./lib/mailboxMessages";
 import { ensureCandidateProfile } from "./lib/profile";
 import { deleteResume, getResumeSignedUrl, listResumes, uploadResume, type ResumeDocument } from "./lib/resume";
 import { revokeOtherSessions } from "./lib/session";
@@ -152,6 +154,8 @@ export function App() {
           <>
             <ApplicationsPanel />
             <ActionRequiredPanel />
+            <MailboxPanel />
+            <MessagesPanel />
             <ResumesPanel candidateId={auth.user.id} />
             <ExclusionsPanel candidateId={auth.user.id} />
             <AutomationPanel candidateId={auth.user.id} />
@@ -337,6 +341,93 @@ function ActionRequiredPanel() {
             </a>{" "}
             — {ACTION_REQUIRED_LABELS[event.exceptionType]}
             {event.expiresAt && ` (expires ${event.expiresAt})`}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+const MAILBOX_PROVIDER_LABELS: Record<MailboxConnection["provider"], string> = {
+  gmail: "Gmail",
+  outlook: "Outlook",
+};
+
+function MailboxPanel() {
+  const [connections, setConnections] = useState<MailboxConnection[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listMailboxConnections(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setConnections(result.connections);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="mailbox-title" className="foundation-card">
+      <h2 id="mailbox-title">Mailbox</h2>
+      {error && <p role="alert">{error}</p>}
+      {connections?.length === 0 && <p>No mailbox connected yet.</p>}
+      <ul>
+        {connections?.map((connection) => (
+          <li key={connection.id}>
+            {MAILBOX_PROVIDER_LABELS[connection.provider]} — {connection.status}
+            {connection.connectedAt && ` (connected ${connection.connectedAt})`}
+            {connection.revokedAt && ` (revoked ${connection.revokedAt})`}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function MessagesPanel() {
+  const [messages, setMessages] = useState<MailboxMessage[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listMessages(getSupabaseBrowserClient()).then((result) => {
+      if (result.kind === "success") {
+        setMessages(result.messages);
+      } else {
+        setError(result.message);
+      }
+    });
+  }, []);
+
+  return (
+    <section aria-labelledby="messages-title" className="foundation-card">
+      <h2 id="messages-title">Messages</h2>
+      {error && <p role="alert">{error}</p>}
+      {messages?.length === 0 && <p>No messages yet.</p>}
+      <ul>
+        {messages?.map((message) => (
+          <li key={message.id}>
+            {message.subject ?? "(no subject)"}
+            {message.sender && ` — ${message.sender}`}
+            {message.receivedAt && ` (${message.receivedAt})`}
+            {(message.classifications.length > 0 || message.interviews.length > 0 || message.actionItems.length > 0) && (
+              <ul>
+                {message.classifications.map((classification) => (
+                  <li key={classification.id}>Classified: {classification.category}</li>
+                ))}
+                {message.interviews.map((interview) => (
+                  <li key={interview.id}>
+                    Interview{interview.format && ` (${interview.format})`}
+                    {interview.scheduledAt && ` — ${interview.scheduledAt}`}
+                  </li>
+                ))}
+                {message.actionItems.map((item) => (
+                  <li key={item.id}>
+                    Action needed: {item.itemType} — {item.status}
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>
