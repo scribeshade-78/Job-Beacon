@@ -1,6 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { createActionRequiredEvent, resolveActionRequiredEvent } from "./actionRequired.js";
 
+/**
+ * R7-M15: resolveActionRequiredEvent now resolves candidate_id via
+ * application_attempts -> application_plans before checking
+ * automation_authorizations, so every test that reaches that point needs
+ * fixtures for all three tables, not just action_required_events. The
+ * application_attempts queue carries two entries in call order: the first
+ * for isCandidateAuthorized's application_plan_id lookup, the second for
+ * the actual status-transition update at the end.
+ */
+function authorizationCheckQueues(authorizationStatus: { status: string } | null) {
+  return {
+    application_attempts: [{ data: { application_plan_id: "plan-1" }, error: null }, { data: null, error: null }],
+    application_plans: [{ data: { candidate_id: "candidate-1" }, error: null }],
+    automation_authorizations: [{ data: authorizationStatus, error: null }],
+  };
+}
+
 type TableResult = { data: unknown; error: unknown };
 
 function chain(result: TableResult) {
@@ -143,7 +160,7 @@ describe("resolveActionRequiredEvent", () => {
         { data: eventRow, error: null },
         { data: resolvedRow, error: null },
       ],
-      application_attempts: [{ data: null, error: null }],
+      ...authorizationCheckQueues({ status: "authorized" }),
     });
 
     const result = await resolveActionRequiredEvent(client, { eventId: "event-1" });
@@ -156,7 +173,7 @@ describe("resolveActionRequiredEvent", () => {
     expect(updateCall.update).toHaveBeenCalledWith(expect.objectContaining({ resolved_at: expect.any(String) }));
     expect(updateCall.eq).toHaveBeenCalledWith("id", "event-1");
 
-    const [attemptCall] = callsFor(client, "application_attempts");
+    const [, attemptCall] = callsFor(client, "application_attempts");
     expect(attemptCall.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: "pending", leased_until: null }),
     );
@@ -168,14 +185,17 @@ describe("resolveActionRequiredEvent", () => {
         { data: eventRow, error: null },
         { data: eventRow, error: null },
       ],
-      application_attempts: [{ data: null, error: null }],
+      ...authorizationCheckQueues({ status: "authorized" }),
     });
 
     await resolveActionRequiredEvent(client, { eventId: "event-1" });
 
-    const [attemptCall] = callsFor(client, "application_attempts");
-    expect(attemptCall.eq).toHaveBeenNthCalledWith(1, "id", "attempt-1");
-    expect(attemptCall.eq).toHaveBeenNthCalledWith(2, "status", "action_required");
+    // application_attempts is queried twice now: [0] isCandidateAuthorized's
+    // application_plan_id lookup, [1] the actual status-transition update —
+    // the assertion below targets the latter.
+    const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+    expect(attemptUpdateCall.eq).toHaveBeenNthCalledWith(1, "id", "attempt-1");
+    expect(attemptUpdateCall.eq).toHaveBeenNthCalledWith(2, "status", "action_required");
   });
 
   it("is idempotent when the event is already resolved — returns the existing record unchanged, without touching resolved_at or the attempt", async () => {
@@ -228,9 +248,138 @@ describe("resolveActionRequiredEvent", () => {
         { data: eventRow, error: null },
         { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
       ],
-      application_attempts: [{ data: null, error: { message: "db error" } }],
+      application_attempts: [
+        { data: { application_plan_id: "plan-1" }, error: null }, // isCandidateAuthorized lookup succeeds
+        { data: null, error: { message: "db error" } }, // the actual status-transition update fails
+      ],
+      application_plans: [{ data: { candidate_id: "candidate-1" }, error: null }],
+      automation_authorizations: [{ data: { status: "authorized" }, error: null }],
     });
 
     await expect(resolveActionRequiredEvent(client, { eventId: "event-1" })).rejects.toBeTruthy();
+  });
+
+  describe("R7-M15: authorization recheck before resuming", () => {
+    it("resumes to pending and queries automation_authorizations when the candidate is authorized", async () => {
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+        ],
+        ...authorizationCheckQueues({ status: "authorized" }),
+      });
+
+      await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      expect(callsFor(client, "automation_authorizations")).toHaveLength(1);
+      const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+      expect(attemptUpdateCall.update).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "pending", leased_until: null }),
+      );
+    });
+
+    it("cancels instead of resuming when the candidate is paused", async () => {
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+        ],
+        ...authorizationCheckQueues({ status: "paused" }),
+      });
+
+      await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+      expect(attemptUpdateCall.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      expect(attemptUpdateCall.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: "pending" }));
+    });
+
+    it("cancels instead of resuming when the candidate is stopped", async () => {
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+        ],
+        ...authorizationCheckQueues({ status: "stopped" }),
+      });
+
+      await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+      expect(attemptUpdateCall.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      expect(attemptUpdateCall.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: "pending" }));
+    });
+
+    it("cancels instead of resuming when no automation_authorizations row exists for the candidate", async () => {
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+        ],
+        ...authorizationCheckQueues(null),
+      });
+
+      await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+      expect(attemptUpdateCall.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      expect(attemptUpdateCall.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: "pending" }));
+    });
+
+    it.each([
+      ["paused", { status: "paused" }],
+      ["stopped", { status: "stopped" }],
+      ["missing authorization row", null],
+    ])(
+      "never resumes to pending when the candidate is not authorized (%s)",
+      async (_label, authorizationStatus) => {
+        const client = makeClient({
+          action_required_events: [
+            { data: eventRow, error: null },
+            { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+          ],
+          ...authorizationCheckQueues(authorizationStatus),
+        });
+
+        await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+        const [, attemptUpdateCall] = callsFor(client, "application_attempts");
+        const updateArg = (attemptUpdateCall.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+          status: string;
+        };
+        expect(updateArg.status).toBe("cancelled");
+      },
+    );
+
+    it("does not touch application_evidence when the candidate is no longer authorized", async () => {
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" }, error: null },
+        ],
+        ...authorizationCheckQueues({ status: "paused" }),
+      });
+
+      await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      expect(callsFor(client, "application_evidence")).toHaveLength(0);
+    });
+
+    it("still marks the action_required_events row resolved even when the underlying attempt is cancelled, not resumed", async () => {
+      const resolvedRow = { ...eventRow, resolved_at: "2026-08-19T01:00:00Z" };
+      const client = makeClient({
+        action_required_events: [
+          { data: eventRow, error: null },
+          { data: resolvedRow, error: null },
+        ],
+        ...authorizationCheckQueues({ status: "stopped" }),
+      });
+
+      const result = await resolveActionRequiredEvent(client, { eventId: "event-1" });
+
+      expect(result.resolvedAt).toBe("2026-08-19T01:00:00Z");
+      const [, eventResolveCall] = callsFor(client, "action_required_events");
+      expect(eventResolveCall.update).toHaveBeenCalledWith(expect.objectContaining({ resolved_at: expect.any(String) }));
+    });
   });
 });
