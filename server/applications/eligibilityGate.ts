@@ -28,11 +28,17 @@ export interface GateResult {
  * source_policies.automated_application_allowed being false everywhere —
  * but this gate will start passing on its own, with no further gate
  * changes, once a real per-source adapter is registered.
- * `rate_and_abuse_controls` remains a permanent hard-block placeholder:
- * PRD §31 leaves candidate application-limit policy as an explicit open
- * founder decision, and the founder's R7-M1 answer was pause/stop-only —
- * no numeric quota — which this gate does not yet implement (that's a
- * later mini-phase, not R7-M2's scope).
+ * `rate_and_abuse_controls` was a permanent hard-block placeholder until
+ * R7-M9: PRD §31 leaves candidate application-limit policy as an explicit
+ * open founder decision, and the founder's R7-M1 answer was pause/stop-only
+ * — no numeric quota, no source-side rate limiting. R7-M9 wires this gate
+ * to that decision by deriving it from the `automation_authorization` gate
+ * (PRD §16.1's "Consent and privacy" gate, backed by automation_authorizations)
+ * rather than re-implementing or duplicating that authorization check —
+ * pause/stop is the only candidate-side "rate and abuse control" this
+ * product has, so this gate simply reflects that existing state under its
+ * own PRD-traceable name instead of being a second, independent
+ * authorization mechanism.
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -115,11 +121,9 @@ export async function evaluateEligibilityGates(
     role_match: roleMatchGate,
     verified_facts: verifiedFactsGate,
     application_support: evaluateApplicationSupport(vacancy.source_code),
-    // Permanent hard-block placeholder pending the founder's rate-limit
-    // policy decision (PRD §31) — R7-M1 approved pause/stop-only, no
-    // numeric quota, but that gate isn't implemented yet (a later
-    // mini-phase, not R7-M2's scope).
-    rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
+    // R7-M9: derived from automationAuthorizationGate, not a second query
+    // or a second authorization check — see this function's doc comment.
+    rate_and_abuse_controls: deriveRateAndAbuseControls(automationAuthorizationGate),
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");
@@ -209,6 +213,26 @@ async function evaluateAutomationAuthorization(client: SupabaseClient, candidate
     status: "fail",
     reasonCode: "AUTOMATION_NOT_AUTHORIZED",
     detail: { status: authorization?.status ?? "not_yet_authorized" },
+  };
+}
+
+/**
+ * R7-M9 (PRD §16.1 Gate 7, §31): pause/stop is the only candidate-side
+ * "rate and abuse control" this product implements, and that state already
+ * lives in automation_authorizations — the same fact automationAuthorizationGate
+ * already evaluated. Mirroring its result (same reasonCode and detail)
+ * rather than re-querying or re-deriving it keeps this a separately-named,
+ * PRD-traceable gate without creating a second authorization mechanism that
+ * could drift out of sync with the first.
+ */
+function deriveRateAndAbuseControls(automationAuthorizationGate: GateResult): GateResult {
+  if (automationAuthorizationGate.status === "pass") {
+    return { status: "pass" };
+  }
+  return {
+    status: "fail",
+    reasonCode: "AUTOMATION_NOT_AUTHORIZED",
+    detail: automationAuthorizationGate.detail,
   };
 }
 

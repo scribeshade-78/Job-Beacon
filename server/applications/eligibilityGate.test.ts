@@ -51,7 +51,7 @@ function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
 const baseInput = { candidateId: "candidate-1", vacancyId: "vacancy-1" };
 
 describe("evaluateEligibilityGates", () => {
-  it("is never eligible even when every real gate (including role_match and verified_facts) passes, because 2 gates always hard-fail", async () => {
+  it("is never eligible even when every real gate (including role_match, verified_facts and rate_and_abuse_controls) passes, because application_support still hard-fails", async () => {
     const client = makeClient({
       candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
       extracted_facts: { data: [{ id: "fact-1" }], error: null },
@@ -67,23 +67,60 @@ describe("evaluateEligibilityGates", () => {
       reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
       detail: { sourceCode: "greenhouse" },
     });
-    expect(result.gates.rate_and_abuse_controls).toEqual({
-      status: "fail",
-      reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED",
-    });
+    expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass" });
   });
 
   describe("permanent hard-block gates", () => {
-    it("rate_and_abuse_controls always fails, regardless of every other gate's outcome", async () => {
+    it("application_support fails, regardless of every other gate's outcome, because no adapter is registered for any source yet", async () => {
       const client = makeClient({
         vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
         source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.application_support).toEqual({
+        status: "fail",
+        reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
+        detail: { sourceCode: "greenhouse" },
+      });
+    });
+  });
+
+  describe("rate_and_abuse_controls", () => {
+    it("passes when automation_authorization status is authorized", async () => {
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass" });
+    });
+
+    it.each(["paused", "stopped"])("fails, mirroring automation_authorization, when status is %s", async (status) => {
+      const client = makeClient({ automation_authorizations: { data: { status }, error: null } });
+      const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.rate_and_abuse_controls).toEqual({
         status: "fail",
-        reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED",
+        reasonCode: "AUTOMATION_NOT_AUTHORIZED",
+        detail: { status },
       });
+      expect(result.gates.rate_and_abuse_controls).toEqual(result.gates.automation_authorization);
+    });
+
+    it("fails, mirroring automation_authorization, when the candidate has no authorization row", async () => {
+      const client = makeClient({ automation_authorizations: { data: null, error: null } });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({
+        status: "fail",
+        reasonCode: "AUTOMATION_NOT_AUTHORIZED",
+        detail: { status: "not_yet_authorized" },
+      });
+      expect(result.gates.rate_and_abuse_controls).toEqual(result.gates.automation_authorization);
+    });
+
+    it("queries automation_authorizations only once per evaluateEligibilityGates call", async () => {
+      const client = makeClient();
+      await evaluateEligibilityGates(client, baseInput);
+      const automationAuthorizationCalls = (client.from as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
+        (call) => call[0] === "automation_authorizations",
+      );
+      expect(automationAuthorizationCalls).toHaveLength(1);
     });
   });
 
