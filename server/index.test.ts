@@ -114,7 +114,12 @@ function makeInsertOnlyServiceClient(result: { data: unknown; error: unknown }) 
     const builder = {
       insert: chain("insert"),
       select: chain("select"),
+      update: chain("update"),
+      eq: chain("eq"),
+      in: chain("in"),
       single: (...args: unknown[]) => (calls.push({ table, method: "single", args }), result),
+      then: (onFulfilled: (value: typeof result) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve(result).then(onFulfilled, onRejected),
     };
     return builder;
   });
