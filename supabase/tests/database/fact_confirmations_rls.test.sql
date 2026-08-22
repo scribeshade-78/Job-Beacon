@@ -23,13 +23,15 @@ values (
   1024
 );
 
-insert into extracted_facts (id, candidate_id, source_document_id, fact_type, fact_value)
+insert into extracted_facts (id, candidate_id, source_document_id, fact_type, fact_value, extraction_model, extraction_prompt_version)
 values (
   'dddddddd-9003-1111-1111-111111111111',
   '11111111-9003-1111-1111-111111111111',
   'cccccccc-9003-1111-1111-111111111111',
   'years_of_experience',
-  '5'
+  '5',
+  'test-model',
+  'test-prompt-v1'
 );
 
 -- 1. RLS is enabled

@@ -1,6 +1,6 @@
 # JobBeacon — Current Repository State
 
-Snapshot as of the MP-UI2 mini-phase (2026-08-23), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
+Snapshot as of the MP-F1 mini-phase (2026-08-23), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
 
 ## Stack (verified)
 
@@ -15,8 +15,9 @@ React (Vite) frontend, Express API, Supabase (Postgres + Auth + Storage), no ORM
 | POST | `/api/vacancies/:vacancyId/reports` | bearer token |
 | GET | `/api/moderation/queue` | bearer token + moderator |
 | POST | `/api/moderation/cases/:caseId/decisions` | bearer token + moderator |
+| POST | `/api/resumes/:id/extract` | bearer token (MP-F1) |
 
-Everything else (applications, resumes, mailbox, automation authorization, exclusions, MFA, companies, salary benchmarks, action-required events) is read/written directly by the browser via the Supabase client library, scoped by RLS — not through Express.
+Everything else (applications, resumes, mailbox, automation authorization, exclusions, MFA, companies, salary benchmarks, action-required events, reading back extracted facts) is read/written directly by the browser via the Supabase client library, scoped by RLS — not through Express. The extraction *write* is the one exception: `extracted_facts` grants `INSERT` only to `service_role` (no request-scoped RLS client exists anywhere in this server — every route uses the service-role client), so it has to go through Express; ownership of the resume being extracted is verified in application code, not RLS.
 
 ## Client screens (10 routed pages + shell, MP-UI2)
 
@@ -29,7 +30,8 @@ Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resume
 | Step | Backend | UI |
 |---|---|---|
 | Resume upload + private storage | Complete | Complete (ResumesPanel) |
-| Resume extraction + fact confirmation | **Not implemented** — `extracted_facts`/`fact_confirmations` tables exist (schema+RLS only); zero writers anywhere in the repo, only two consumer files read them | None |
+| Resume extraction (MP-F1) | Complete — `POST /api/resumes/:id/extract`: ownership check, server-side download, `pdf-parse`/`mammoth` text extraction, OpenAI structured-output extraction (v0 vocabulary: `full_name`/`email`/`phone`/`location`/`current_title`/`years_of_experience`/`most_recent_employer` scalar, `skill`/`education`/`experience` repeatable), schema-validated before any insert, `extraction_model`/`extraction_prompt_version` recorded on every row | Complete — "Extract facts" button + read-only facts preview in ResumesPanel |
+| Fact confirmation (MP-F2) | **Not implemented** — `fact_confirmations` table exists (schema+RLS only); zero writers still | None |
 | Role suggestions + selection | **Not implemented** — `candidate_selected_roles` table exists (schema+RLS only); zero writers anywhere in the repo | None |
 | Automation authorization | Complete, enforced at 3 points (claim-time, submission-time, resolve-time) | Complete (AutomationPanel) |
 | Evidence / action-required views | Action-required: read surface exists (ActionRequiredPanel, unresolved events only). Evidence: RLS-readable, **no viewer exists** | Partial |
@@ -42,6 +44,20 @@ Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resume
 ## The core gap
 
 The R4/R7 application engine (eligibility gates, planning, worker lifecycle, retry/dead-letter, authorization-withdrawal safety net, action-required pause/resume) is real, tested, and correct — but nothing in the client or the Express routes ever calls `planApplication`, so no real candidate can create an `application_plan`/`application_attempt` today. `ApplicationsPanel`/`ActionRequiredPanel` are fully wired for *reading* but have nothing real to show until that entry point exists. Real ATS submission is additionally blocked on an external employer relationship (see prior session's Greenhouse integration-readiness analysis) — `resolveApplicationAdapter` has no real per-source case, `source_policies.automated_application_allowed` is `false` for every row, and no `vacancy_sources` row targets a real employer board yet.
+
+**MP-F1 does not by itself unblock `eligibilityGate.ts`'s `verified_facts` gate or `resumeGenerator.ts`'s `generateResumePayload`** — both require a *confirmed* fact (a `fact_confirmations` row with `status = 'confirmed'`), and `fact_confirmations` still has zero writers (that's MP-F2). A candidate can now have real `extracted_facts` rows after MP-F1, but every one of them is still unconfirmed, so those two gates behave exactly as before until MP-F2 lands.
+
+## Resume fact extraction (MP-F1)
+
+`POST /api/resumes/:id/extract` (`server/index.ts`, logic in `server/resumes/`): `requireAuth` → per-candidate rate limit (`express-rate-limit`, 5 requests / 15 min, keyed by `request.user.id`) → ownership check against `resume_documents` (404 for both "doesn't exist" and "not yours" — never distinguishes) → server-side Storage download → `pdf-parse`/`mammoth` text extraction (`textExtraction.ts`) → OpenAI structured-output extraction (`openaiExtraction.ts`, strict JSON schema + an independent manual validator — never trusts the API response blindly) → `extractFacts.ts` flattens the validated result into `extracted_facts` rows and inserts them in one batch (zero rows ever inserted on any failure, including a malformed-output rejection).
+
+v0 fact vocabulary (code-owned, no PRD taxonomy exists): scalar `full_name`/`email`/`phone`/`location`/`current_title`/`years_of_experience`/`most_recent_employer` (0 or 1 row each); repeatable `skill`/`education`/`experience` (0..N rows each, education/experience flattened to a single string per entry since the table has no way to group multi-field entries). "Never guess": a field the model couldn't determine gets **no row at all**, never a placeholder or a null `fact_value` (the column is `NOT NULL`).
+
+Schema: `20260823090000_extracted_facts_provenance.sql` added `extraction_model`/`extraction_prompt_version` (both `NOT NULL`, no default — safe because the table was verified empty, zero writers, before this migration). Both existing pgTAP fixtures that insert into `extracted_facts` (`extracted_facts_rls.test.sql`, `fact_confirmations_rls.test.sql`) were updated to supply them; the full `supabase test db` suite (29 files, 448 tests) passes against a fresh `supabase db reset` with this migration applied.
+
+New dependencies: `openai`, `pdf-parse` (v2 API — `new PDFParse({data}).getText()`, must `.destroy()`), `mammoth`, `express-rate-limit`. New env vars: `OPENAI_API_KEY` (required, server-only), `OPENAI_MODEL` (optional, defaults to `DEFAULT_OPENAI_MODEL` in `openaiExtraction.ts`).
+
+**No live OpenAI call has been made** — this environment has no `OPENAI_API_KEY` and no outbound network access. Everything is built against an injectable `Pick<OpenAI, "chat">` client (same DI pattern as `serviceClient` in `server/index.ts`) and tested with a mocked client. Real cost/latency/quality against the actual API is unverified until a manual smoke test is run with a real key.
 
 ## UI design system (MP-UI1 + MP-UI2)
 

@@ -48,8 +48,8 @@ set local role service_role;
 
 -- 4. service_role can insert an extracted fact
 select lives_ok(
-  $$insert into extracted_facts (id, candidate_id, source_document_id, fact_type, fact_value)
-    values ('dddddddd-9002-1111-1111-111111111111', '11111111-9002-1111-1111-111111111111', 'cccccccc-9002-1111-1111-111111111111', 'years_of_experience', '5')$$,
+  $$insert into extracted_facts (id, candidate_id, source_document_id, fact_type, fact_value, extraction_model, extraction_prompt_version)
+    values ('dddddddd-9002-1111-1111-111111111111', '11111111-9002-1111-1111-111111111111', 'cccccccc-9002-1111-1111-111111111111', 'years_of_experience', '5', 'test-model', 'test-prompt-v1')$$,
   'service_role can insert into extracted_facts'
 );
 reset role;

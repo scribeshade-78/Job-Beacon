@@ -1,8 +1,18 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { app, createApp, type CreateAppOptions } from "./index.js";
 import { APP_NAME } from "../shared/app.js";
+import type { CreateAppOptions } from "./index.js";
+
+// Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
+// these route-level tests only care about auth/ownership/rate-limit/status-
+// mapping, so the actual file bytes never need to be a real parseable document.
+vi.mock("./resumes/textExtraction.js", () => ({
+  extractResumeText: vi.fn().mockResolvedValue("Jordan Rivera, Backend Engineer"),
+  UnsupportedResumeFormatError: class UnsupportedResumeFormatError extends Error {},
+}));
+
+const { app, createApp } = await import("./index.js");
 
 let baseUrl: string;
 let server: ReturnType<typeof app.listen>;
@@ -286,6 +296,176 @@ describe("POST /api/moderation/cases/:caseId/decisions", () => {
           body: JSON.stringify(validBody),
         });
         expect(response.status).toBe(409);
+      },
+    );
+  });
+});
+
+describe("POST /api/resumes/:id/extract", () => {
+  const RESUME_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const CANDIDATE_ID = "user-123";
+
+  function makeResumeServiceClient(options: {
+    resumeCandidateId?: string | null;
+    insertResult?: { data: unknown; error: unknown };
+  } = {}) {
+    const resumeCandidateId = options.resumeCandidateId === undefined ? CANDIDATE_ID : options.resumeCandidateId;
+    const insertResult = options.insertResult ?? {
+      data: [{ id: "fact-1", fact_type: "full_name", fact_value: "Jordan Rivera" }],
+      error: null,
+    };
+
+    const from = vi.fn((table: string) => {
+      if (table === "resume_documents") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () =>
+                resumeCandidateId === null
+                  ? { data: null, error: null }
+                  : {
+                      data: {
+                        id: RESUME_ID,
+                        candidate_id: resumeCandidateId,
+                        storage_path: `${resumeCandidateId}/resume.pdf`,
+                        mime_type: "application/pdf",
+                      },
+                      error: null,
+                    },
+            }),
+          }),
+        };
+      }
+      if (table === "extracted_facts") {
+        return { insert: () => ({ select: () => insertResult }) };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const download = vi.fn().mockResolvedValue({
+      data: { arrayBuffer: async () => new TextEncoder().encode("fake pdf bytes").buffer },
+      error: null,
+    });
+
+    return { from, storage: { from: () => ({ download }) } } as never;
+  }
+
+  function makeOpenAIClient() {
+    const validExtraction = {
+      full_name: "Jordan Rivera",
+      email: null,
+      phone: null,
+      location: null,
+      current_title: null,
+      years_of_experience: null,
+      most_recent_employer: null,
+      skills: [],
+      education: [],
+      experience: [],
+    };
+    return {
+      chat: {
+        completions: {
+          create: vi.fn().mockResolvedValue({
+            choices: [{ message: { content: JSON.stringify(validExtraction) } }],
+          }),
+        },
+      },
+    } as never;
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/resumes/${RESUME_ID}/extract`, { method: "POST" });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 400 when the id is not a valid uuid", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/resumes/not-a-uuid/extract`, {
+        method: "POST",
+        headers: { Authorization: "Bearer valid-test-token" },
+      });
+      expect(response.status).toBe(400);
+    });
+  });
+
+  it("returns 404 when the resume does not exist", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeResumeServiceClient({ resumeCandidateId: null }),
+        openaiClient: makeOpenAIClient(),
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/resumes/${RESUME_ID}/extract`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it("returns 404 (not 403) when the resume belongs to a different candidate", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeResumeServiceClient({ resumeCandidateId: "someone-else" }),
+        openaiClient: makeOpenAIClient(),
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/resumes/${RESUME_ID}/extract`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it("returns 201 with the inserted facts for the owning candidate", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeResumeServiceClient(),
+        openaiClient: makeOpenAIClient(),
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/resumes/${RESUME_ID}/extract`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(201);
+        expect(await response.json()).toEqual({
+          facts: [{ id: "fact-1", factType: "full_name", factValue: "Jordan Rivera" }],
+        });
+      },
+    );
+  });
+
+  it("rate-limits the same candidate to 5 requests per window, returning 429 on the 6th", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeResumeServiceClient(),
+        openaiClient: makeOpenAIClient(),
+      },
+      async (testBaseUrl) => {
+        const request = () =>
+          fetch(`${testBaseUrl}/api/resumes/${RESUME_ID}/extract`, {
+            method: "POST",
+            headers: { Authorization: "Bearer valid-test-token" },
+          });
+
+        for (let i = 0; i < 5; i += 1) {
+          const response = await request();
+          expect(response.status).toBe(201);
+        }
+
+        const sixthResponse = await request();
+        expect(sixthResponse.status).toBe(429);
       },
     );
   });

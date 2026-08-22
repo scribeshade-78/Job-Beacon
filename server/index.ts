@@ -1,5 +1,7 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type OpenAI from "openai";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +13,8 @@ import {
 } from "./requireAuth.js";
 import { createRequireModerator, isModerator, type ModeratorChecker } from "./requireModerator.js";
 import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
+import { createOpenAIClient } from "./resumes/openaiClient.js";
+import { extractResumeFacts } from "./resumes/extractFacts.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -25,7 +29,11 @@ export interface CreateAppOptions {
   checkIsModerator?: ModeratorChecker;
   /** Injectable for tests; resolved lazily per-request otherwise (see each route) — never constructed eagerly, since SUPABASE_SERVICE_ROLE_KEY isn't set in every environment. */
   serviceClient?: SupabaseClient;
+  /** Injectable for tests; resolved lazily per-request otherwise — never constructed eagerly, since OPENAI_API_KEY isn't set in every environment. */
+  openaiClient?: Pick<OpenAI, "chat">;
 }
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = express();
@@ -56,6 +64,19 @@ export function createApp(options: CreateAppOptions = {}) {
   const requireAuth = createRequireAuth(options.verifyAccessToken);
   const requireModerator = createRequireModerator(options.checkIsModerator ?? isModerator);
   const resolveServiceClient = () => options.serviceClient ?? createSupabaseServiceRoleClient();
+  const resolveOpenAIClient = () => options.openaiClient ?? createOpenAIClient();
+
+  // Extraction calls a paid external API per request — rate-limited per
+  // authenticated candidate (not per IP), so this only ever runs after
+  // requireAuth has set request.user.
+  const extractFactsRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many extraction requests. Please try again later." },
+  });
 
   app.post("/api/vacancies/:vacancyId/reports", requireAuth, async (request: AuthenticatedRequest, response) => {
     const { category, description } = request.body ?? {};
@@ -78,6 +99,46 @@ export function createApp(options: CreateAppOptions = {}) {
       response.status(500).json({ error: message });
     }
   });
+
+  app.post(
+    "/api/resumes/:id/extract",
+    requireAuth,
+    extractFactsRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      if (!UUID_PATTERN.test(request.params.id as string)) {
+        response.status(400).json({ error: "id must be a valid resume id." });
+        return;
+      }
+
+      try {
+        const result = await extractResumeFacts(resolveServiceClient(), resolveOpenAIClient(), {
+          resumeId: request.params.id as string,
+          candidateId: request.user!.id,
+        });
+
+        switch (result.kind) {
+          case "success":
+            response.status(201).json({ facts: result.facts });
+            return;
+          case "not_found":
+            response.status(404).json({ error: "Resume not found." });
+            return;
+          case "unsupported_format":
+            response.status(422).json({ error: "This resume's file format isn't supported for extraction." });
+            return;
+          case "malformed_extraction":
+            response.status(422).json({ error: result.message });
+            return;
+          case "error":
+            response.status(500).json({ error: result.message });
+            return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
 
   app.get("/api/moderation/queue", requireAuth, requireModerator, async (_request, response) => {
     try {
