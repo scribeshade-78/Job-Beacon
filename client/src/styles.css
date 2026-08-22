@@ -1,23 +1,97 @@
-:root {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  color: #172033;
-  background: #f4f7fb;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+
+/**
+ * iOS design tokens (MP-UI1). Two status-color families exist on purpose:
+ *
+ * --color-status-* is the exact hex specified in the design brief — used
+ * for decorative surfaces (tinted badge backgrounds, dots, large icons)
+ * where WCAG only asks for visual distinction, not a contrast guarantee.
+ *
+ * --color-status-*-fg is a darkened variant of the same hue, used for any
+ * icon stroke or text that sits directly on a light/white surface. The
+ * literal spec colors measured below 3:1 (green/orange ~2.2:1, red/gray
+ * ~3.3-3.55:1) against white — verified by contrast-ratio calculation, not
+ * assumed — so they cannot carry text or small icon glyphs on their own
+ * under WCAG 2.2 AA. The *-fg variants were computed to clear 4.5:1+
+ * against white while staying in the same hue family (gray's value,
+ * #636366, is in fact Apple's own systemGray, not an invented color).
+ *
+ * Decision B (button-background contrast): white-on-#007AFF measures
+ * ~4.02:1 — passes WCAG's 3:1 non-text/UI-component threshold (so links,
+ * icons, focus rings, and brand accents stay on #007AFF) but fails 4.5:1
+ * for text-bearing solid button fills. --color-ios-blue-button (#0066d6)
+ * is a darkened button-only variant, measured at ~5.44:1 with white text.
+ * The destructive button reuses the already-computed --color-status-
+ * blocked-fg (#d6291f, ~5.00:1 with white) as its background instead of
+ * introducing a second red token.
+ */
+@theme {
+  --color-ios-blue: #007aff;
+  --color-ios-blue-button: #0066d6;
+  --color-ios-bg: #f2f2f7;
+  --color-ios-card: #ffffff;
+  --color-ios-separator: #e5e5ea;
+  --color-ios-text: #000000;
+  /* Apple's "secondary label" is #3C3C43 at 60% opacity, which measures
+     ~3.44:1 on white — below AA's 4.5:1 for normal text. Same hue, opacity
+     raised to 78% (~5.6:1), so it stays visually "secondary" but reads. */
+  --color-ios-text-secondary: rgba(60, 60, 67, 0.78);
+
+  --color-status-verified: #34c759;
+  --color-status-under-review: #ff9500;
+  --color-status-blocked: #ff3b30;
+  --color-status-action-required: #8e8e93;
+
+  --color-status-verified-fg: #1f7a37;
+  --color-status-under-review-fg: #b25f00;
+  --color-status-blocked-fg: #d6291f;
+  --color-status-action-required-fg: #636366;
+
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --radius-card: 12px;
+  --radius-control: 10px;
+
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
-* {
-  box-sizing: border-box;
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+    background: var(--color-ios-bg);
+    color: var(--color-ios-text);
+    font-family: var(--font-sans);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible keyboard focus everywhere, iOS-blue ring — required by MP-UI1's
+     hard rule regardless of which element receives focus. */
+  :focus-visible {
+    outline: 2px solid var(--color-ios-blue);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
+/* Untouched panel components (ApplicationsPanel..SecurityPanel) still
+   render className="app-shell" / "foundation-card" / "eyebrow" — these
+   selectors stay so that markup keeps working, only their token values
+   move to the iOS palette. */
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -28,15 +102,15 @@ body {
 .foundation-card {
   width: min(100%, 34rem);
   padding: 2rem;
-  border: 1px solid #d9e1ec;
-  border-radius: 1rem;
-  background: #ffffff;
-  box-shadow: 0 1rem 2.5rem rgb(23 32 51 / 8%);
+  border: 1px solid var(--color-ios-separator);
+  border-radius: var(--radius-card);
+  background: var(--color-ios-card);
+  box-shadow: var(--shadow-card);
 }
 
 .eyebrow {
   margin: 0 0 0.5rem;
-  color: #4a5b78;
+  color: var(--color-ios-text-secondary);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.12em;
@@ -50,6 +124,5 @@ h1 {
 
 .foundation-card > p:last-child {
   margin: 1rem 0 0;
-  color: #4a5b78;
+  color: var(--color-ios-text-secondary);
 }
-

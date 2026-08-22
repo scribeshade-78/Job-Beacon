@@ -1,5 +1,8 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useState, type ChangeEvent } from "react";
 import { APP_NAME } from "../../shared/app";
+import { AuthCard } from "./components/AuthCard";
+import { ConfirmationPendingScreen } from "./components/ConfirmationPendingScreen";
+import { LoadingScreen } from "./components/LoadingScreen";
 import {
   listActionRequiredEvents,
   type ActionRequiredEvent,
@@ -119,22 +122,11 @@ export function App() {
   }, [auth.status, auth.session?.access_token]);
 
   if (auth.status === "loading") {
-    return (
-      <main className="app-shell">
-        <p>Loading…</p>
-      </main>
-    );
+    return <LoadingScreen />;
   }
 
   if (auth.status === "confirmationPending") {
-    return (
-      <main className="app-shell">
-        <section aria-labelledby="app-title" className="foundation-card">
-          <h1 id="app-title">{APP_NAME}</h1>
-          <p>Check your email to confirm your account before logging in.</p>
-        </section>
-      </main>
-    );
+    return <ConfirmationPendingScreen />;
   }
 
   if (auth.status === "signedIn") {
@@ -176,71 +168,7 @@ export function App() {
     );
   }
 
-  return (
-    <main className="app-shell">
-      <section aria-labelledby="app-title" className="foundation-card">
-        <h1 id="app-title">{APP_NAME}</h1>
-        {auth.status === "error" && auth.error && <p role="alert">{auth.error}</p>}
-        <AuthForm onSignUp={auth.signUp} onSignIn={auth.signIn} />
-      </section>
-    </main>
-  );
-}
-
-interface AuthFormProps {
-  onSignUp: (email: string, password: string) => Promise<void>;
-  onSignIn: (email: string, password: string) => Promise<void>;
-}
-
-function AuthForm({ onSignUp, onSignIn }: AuthFormProps) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  async function handle(action: (email: string, password: string) => Promise<void>) {
-    setSubmitting(true);
-
-    try {
-      await action(email, password);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-  }
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <label htmlFor="email">Email</label>
-      <input
-        id="email"
-        type="email"
-        value={email}
-        onChange={(event) => setEmail(event.target.value)}
-        autoComplete="email"
-        required
-      />
-
-      <label htmlFor="password">Password</label>
-      <input
-        id="password"
-        type="password"
-        value={password}
-        onChange={(event) => setPassword(event.target.value)}
-        autoComplete="current-password"
-        required
-      />
-
-      <button type="button" disabled={submitting} onClick={() => void handle(onSignIn)}>
-        Log in
-      </button>
-      <button type="button" disabled={submitting} onClick={() => void handle(onSignUp)}>
-        Sign up
-      </button>
-    </form>
-  );
+  return <AuthCard onSignUp={auth.signUp} onSignIn={auth.signIn} error={auth.status === "error" ? auth.error : null} />;
 }
 
 const EXCLUSION_LABELS: Record<ExclusionCategory, string> = {
