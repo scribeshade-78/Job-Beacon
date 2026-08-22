@@ -1,10 +1,10 @@
 # JobBeacon — Current Repository State
 
-Snapshot as of the MP-UI1 mini-phase (2026-08-22), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
+Snapshot as of the MP-UI2 mini-phase (2026-08-23), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
 
 ## Stack (verified)
 
-React (Vite) frontend, Express API, Supabase (Postgres + Auth + Storage), no ORM currently in use for query building (raw `@supabase/supabase-js` calls throughout), additive SQL migrations under `supabase/migrations/`. No client-side router — `client/src/App.tsx` is a single 900+ line file that conditionally renders panels based on auth state.
+React (Vite) frontend, Express API, Supabase (Postgres + Auth + Storage), no ORM currently in use for query building (raw `@supabase/supabase-js` calls throughout), additive SQL migrations under `supabase/migrations/`. Client-side routing added in MP-UI2 via `wouter` (hash-based location — the Express static server has no SPA fallback route for browser-history mode, and touching `server/` was out of scope for that phase). `client/src/App.tsx` now only owns auth/session/profile state and the router; the 10 panels live as standalone components under `client/src/panels/`, rendered inside page components under `client/src/pages/` and a shared `AppShell` (sidebar + topbar).
 
 ## Express API routes (5 total — `server/index.ts`)
 
@@ -18,11 +18,11 @@ React (Vite) frontend, Express API, Supabase (Postgres + Auth + Storage), no ORM
 
 Everything else (applications, resumes, mailbox, automation authorization, exclusions, MFA, companies, salary benchmarks, action-required events) is read/written directly by the browser via the Supabase client library, scoped by RLS — not through Express.
 
-## Client screens (10 panels, one signed-in shell — no router)
+## Client screens (10 routed pages + shell, MP-UI2)
 
-ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
+Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resumes `/resumes`, Target Roles `/target-roles`, Opportunities `/opportunities`, Applications `/applications`, Responses `/responses`, Action Required `/action-required`, Company Intelligence `/companies`, Security `/security`. Same 10 panels as MP-UI1 (ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel) now render inside these pages — Responses hosts Mailbox+Messages, Company Intelligence hosts Companies+SalaryBenchmarks, Overview hosts a real AutomationPanel plus an unchanged ActionRequiredPanel widget alongside honest (non-fabricated) empty-state stats and a recent-applications placeholder. Target Roles and Opportunities are honest empty-state pages — no panel exists for either yet. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
 
-**No Opportunities/job-browse screen, no role-selection UI, and no resume fact-confirmation UI exist anywhere in the client.**
+**No Opportunities/job-browse screen, no role-selection UI, and no resume fact-confirmation UI exist anywhere in the client** (both now have labeled empty-state pages instead of being entirely absent from navigation).
 
 ## PRD journey steps — backend and UI status
 
@@ -43,6 +43,6 @@ ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPane
 
 The R4/R7 application engine (eligibility gates, planning, worker lifecycle, retry/dead-letter, authorization-withdrawal safety net, action-required pause/resume) is real, tested, and correct — but nothing in the client or the Express routes ever calls `planApplication`, so no real candidate can create an `application_plan`/`application_attempt` today. `ApplicationsPanel`/`ActionRequiredPanel` are fully wired for *reading* but have nothing real to show until that entry point exists. Real ATS submission is additionally blocked on an external employer relationship (see prior session's Greenhouse integration-readiness analysis) — `resolveApplicationAdapter` has no real per-source case, `source_policies.automated_application_allowed` is `false` for every row, and no `vacancy_sources` row targets a real employer board yet.
 
-## UI design system (MP-UI1, this mini-phase)
+## UI design system (MP-UI1 + MP-UI2)
 
-iOS-aesthetic design tokens (Tailwind v4, CSS-first `@theme`), owned-code core components (`client/src/components/ui/`: Button, Card, Input, Label, Badge, StatusBadge, Avatar, Dialog, DropdownMenu, Toast), and re-skinned auth screens (`AuthCard`, `LoadingScreen`, `ConfirmationPendingScreen`). Router + app-shell + panel migration to the new components is deferred to MP-UI2 (not started).
+iOS-aesthetic design tokens (Tailwind v4, CSS-first `@theme`), owned-code core components (`client/src/components/ui/`: Button, Card, Input, Label, Badge, StatusBadge, Avatar, Dialog, DropdownMenu, Toast, EmptyState), and re-skinned auth screens (`AuthCard`, `LoadingScreen`, `ConfirmationPendingScreen`) from MP-UI1. MP-UI2 added: `wouter` router + `AppShell` (fixed 260px desktop sidebar, 64px frosted sticky topbar, mobile hamburger drawer), `client/src/pages/` (10 route pages), extracted `client/src/panels/` (the 10 panels, moved out of `App.tsx` with logic unchanged, re-skinned onto Card/Button/StatusBadge), and 3 new `StatusBadge` variants (`automation_active/paused/stopped`) for the Automation card. `lucide-react` supplies all icons (no icon-font CDN). The legacy `.app-shell`/`.foundation-card`/`.eyebrow` CSS classes (dead once the last panel consumers were re-shelled) were removed from `styles.css`.

@@ -12,8 +12,20 @@ import { cn } from "../../lib/utils";
  * Other trust_status values that exist in the schema (PENDING, SCORING,
  * FLAGGED, SCORING_FAILED, EXPIRED) aren't given colors here — extending
  * this map for them is a follow-up decision, not something to guess at.
+ *
+ * MP-UI2 adds automation_active/paused/stopped for the Automation card's
+ * status display (data layer's AuthorizationStatus "authorized" maps to
+ * the "Active" label here). These reuse the same three colors/icons as
+ * the trust statuses above rather than inventing a second palette.
  */
-export type StatusBadgeStatus = "verified" | "under_review" | "blocked" | "action_required";
+export type StatusBadgeStatus =
+  | "verified"
+  | "under_review"
+  | "blocked"
+  | "action_required"
+  | "automation_active"
+  | "automation_paused"
+  | "automation_stopped";
 
 interface StatusConfig {
   label: string;
@@ -91,6 +103,24 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     bg: "bg-status-action-required/8",
     fg: "text-status-action-required-fg",
     Icon: PauseIcon,
+  },
+  automation_active: {
+    label: "Active",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  automation_paused: {
+    label: "Paused",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: PauseIcon,
+  },
+  automation_stopped: {
+    label: "Stopped",
+    bg: "bg-status-blocked/8",
+    fg: "text-status-blocked-fg",
+    Icon: XCircleIcon,
   },
 };
 

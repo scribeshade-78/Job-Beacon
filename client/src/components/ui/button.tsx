@@ -29,22 +29,18 @@ const SIZE_CLASSES: Record<ButtonSize, string> = {
   icon: "h-11 w-11",
 };
 
+export function buttonVariants(variant: ButtonVariant = "primary", size: ButtonSize = "default") {
+  return cn(
+    "inline-flex items-center justify-center gap-2 rounded-control font-semibold",
+    "transition-colors duration-150 disabled:cursor-not-allowed",
+    VARIANT_CLASSES[variant],
+    SIZE_CLASSES[size],
+  );
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = "primary", size = "default", type = "button", ...props }, ref) => {
-    return (
-      <button
-        ref={ref}
-        type={type}
-        className={cn(
-          "inline-flex items-center justify-center gap-2 rounded-control font-semibold",
-          "transition-colors duration-150 disabled:cursor-not-allowed",
-          VARIANT_CLASSES[variant],
-          SIZE_CLASSES[size],
-          className,
-        )}
-        {...props}
-      />
-    );
+    return <button ref={ref} type={type} className={cn(buttonVariants(variant, size), className)} {...props} />;
   },
 );
 Button.displayName = "Button";
