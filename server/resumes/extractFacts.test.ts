@@ -53,6 +53,7 @@ const RESUME_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 function makeServiceClient(options: {
   resumeDocumentsResult?: TableResult;
   extractedFactsInsertResult?: TableResult;
+  factConfirmationsInsertResult?: TableResult;
   downloadResult?: { data: unknown; error: unknown };
 } = {}) {
   const resumeDocumentsResult: TableResult = options.resumeDocumentsResult ?? {
@@ -68,12 +69,21 @@ function makeServiceClient(options: {
     data: [{ id: "fact-1", fact_type: "full_name", fact_value: "Jordan Rivera" }],
     error: null,
   };
+  const factConfirmationsInsertResult: TableResult = options.factConfirmationsInsertResult ?? {
+    data: [{}],
+    error: null,
+  };
+
+  const resultsByTable: Record<string, TableResult> = {
+    resume_documents: resumeDocumentsResult,
+    extracted_facts: extractedFactsInsertResult,
+    fact_confirmations: factConfirmationsInsertResult,
+  };
 
   const builders: Record<string, ReturnType<typeof tableBuilder>> = {};
   const from = vi.fn((table: string) => {
     if (!builders[table]) {
-      const result = table === "resume_documents" ? resumeDocumentsResult : extractedFactsInsertResult;
-      builders[table] = tableBuilder(result);
+      builders[table] = tableBuilder(resultsByTable[table]);
     }
     return builders[table];
   });
@@ -309,5 +319,47 @@ describe("extractResumeFacts", () => {
       kind: "success",
       facts: [{ id: "fact-1", factType: "full_name", factValue: "Jordan Rivera" }],
     });
+  });
+
+  it("MP-F2: inserts a pending fact_confirmations row for every extracted fact, so Confirm/Correct/Reject never target a missing row", async () => {
+    extractResumeText.mockResolvedValueOnce("resume text");
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction());
+    const { client, builders } = makeServiceClient({
+      extractedFactsInsertResult: {
+        data: [{ id: "fact-1", fact_type: "full_name", fact_value: "Jordan Rivera" }],
+        error: null,
+      },
+    });
+
+    await extractResumeFacts(client, fakeOpenAIClient, { resumeId: RESUME_ID, candidateId: CANDIDATE_ID });
+
+    const insertedConfirmations = builders.fact_confirmations.calls.find((call) => call.method === "insert")!
+      .args[0] as Array<{ extracted_fact_id: string; status: string }>;
+    expect(insertedConfirmations).toEqual([{ extracted_fact_id: "fact-1", status: "pending" }]);
+  });
+
+  it("returns error when the fact_confirmations insert fails, even though extracted_facts already committed", async () => {
+    extractResumeText.mockResolvedValueOnce("resume text");
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction());
+    const { client } = makeServiceClient({
+      factConfirmationsInsertResult: { data: null, error: { message: "insert failed" } },
+    });
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    expect(result.kind).toBe("error");
+  });
+
+  it("never inserts into fact_confirmations when there are no facts to confirm", async () => {
+    extractResumeText.mockResolvedValueOnce("resume text");
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction({ full_name: null }));
+    const { client, from } = makeServiceClient();
+
+    await extractResumeFacts(client, fakeOpenAIClient, { resumeId: RESUME_ID, candidateId: CANDIDATE_ID });
+
+    expect(from).not.toHaveBeenCalledWith("fact_confirmations");
   });
 });

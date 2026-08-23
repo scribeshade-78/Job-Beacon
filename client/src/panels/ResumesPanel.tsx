@@ -1,13 +1,22 @@
 import { useEffect, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { StatusBadge, type StatusBadgeStatus } from "../components/ui/status-badge";
 import { deleteResume, getResumeSignedUrl, listResumes, uploadResume, type ResumeDocument } from "../lib/resume";
 import { extractResumeFacts, listExtractedFacts, type ExtractedFact } from "../lib/resumeExtraction";
+import { confirmAllFacts, confirmFact, correctFact, rejectFact, reopenFact } from "../lib/factConfirmations";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
 interface ResumesPanelProps {
   candidateId: string;
 }
+
+const FACT_STATUS_BADGE: Record<ExtractedFact["confirmationStatus"], StatusBadgeStatus> = {
+  pending: "fact_pending",
+  confirmed: "fact_confirmed",
+  rejected: "fact_rejected",
+};
 
 export function ResumesPanel({ candidateId }: ResumesPanelProps) {
   const [resumes, setResumes] = useState<ResumeDocument[] | null>(null);
@@ -15,6 +24,10 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [extractingId, setExtractingId] = useState<string | null>(null);
+  const [factBusyId, setFactBusyId] = useState<string | null>(null);
+  const [bulkConfirmingResumeId, setBulkConfirmingResumeId] = useState<string | null>(null);
+  const [editingFactId, setEditingFactId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   async function refreshFacts() {
     const result = await listExtractedFacts(getSupabaseBrowserClient());
@@ -122,6 +135,100 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
     setExtractingId(null);
   }
 
+  async function handleConfirm(factId: string) {
+    setError(null);
+    setFactBusyId(factId);
+
+    const result = await confirmFact(getSupabaseBrowserClient(), factId);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refreshFacts();
+    }
+
+    setFactBusyId(null);
+  }
+
+  async function handleReject(factId: string) {
+    setError(null);
+    setFactBusyId(factId);
+
+    const result = await rejectFact(getSupabaseBrowserClient(), factId);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refreshFacts();
+    }
+
+    setFactBusyId(null);
+  }
+
+  async function handleReopen(factId: string) {
+    setError(null);
+    setFactBusyId(factId);
+
+    const result = await reopenFact(getSupabaseBrowserClient(), factId);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refreshFacts();
+    }
+
+    setFactBusyId(null);
+  }
+
+  function handleStartEdit(fact: ExtractedFact) {
+    setError(null);
+    setEditingFactId(fact.id);
+    setEditValue(fact.correctedValue ?? fact.factValue);
+  }
+
+  function handleCancelEdit() {
+    setEditingFactId(null);
+    setEditValue("");
+  }
+
+  async function handleSaveCorrection(factId: string) {
+    const trimmed = editValue.trim();
+
+    if (trimmed === "") {
+      return;
+    }
+
+    setError(null);
+    setFactBusyId(factId);
+
+    const result = await correctFact(getSupabaseBrowserClient(), factId, trimmed);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      setEditingFactId(null);
+      setEditValue("");
+      await refreshFacts();
+    }
+
+    setFactBusyId(null);
+  }
+
+  async function handleConfirmAll(resumeId: string, pendingFactIds: string[]) {
+    setError(null);
+    setBulkConfirmingResumeId(resumeId);
+
+    const result = await confirmAllFacts(getSupabaseBrowserClient(), pendingFactIds);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      await refreshFacts();
+    }
+
+    setBulkConfirmingResumeId(null);
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -145,6 +252,8 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
           {resumes?.map((resume) => {
             const facts = factsByResumeId[resume.id] ?? [];
             const extracting = extractingId === resume.id;
+            const pendingFactIds = facts.filter((fact) => fact.confirmationStatus === "pending").map((fact) => fact.id);
+            const bulkConfirming = bulkConfirmingResumeId === resume.id;
 
             return (
               <li key={resume.id} className="border-b border-ios-separator pb-3 last:border-0 last:pb-0">
@@ -177,13 +286,106 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
                 </div>
 
                 {facts.length > 0 && (
-                  <ul className="mt-2 space-y-1 rounded-control bg-ios-bg p-3 text-sm text-ios-text-secondary">
-                    {facts.map((fact) => (
-                      <li key={fact.id}>
-                        <span className="font-medium text-black">{fact.factType}:</span> {fact.factValue}
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="mt-2 space-y-2 rounded-control bg-ios-bg p-3">
+                    {pendingFactIds.length > 0 && (
+                      <Button
+                        size="sm"
+                        disabled={bulkConfirming}
+                        onClick={() => void handleConfirmAll(resume.id, pendingFactIds)}
+                      >
+                        {bulkConfirming ? "Confirming…" : `Confirm all (${pendingFactIds.length})`}
+                      </Button>
+                    )}
+
+                    <ul className="space-y-2 text-sm">
+                      {facts.map((fact) => {
+                        const factBusy = factBusyId === fact.id;
+                        const editing = editingFactId === fact.id;
+
+                        return (
+                          <li key={fact.id} className="rounded-control border border-ios-separator bg-ios-card p-2.5">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1">
+                                <span className="font-medium text-black">{fact.factType}:</span>{" "}
+                                {fact.correctedValue !== null ? (
+                                  <>
+                                    <span className="text-ios-text-secondary line-through">{fact.factValue}</span>{" "}
+                                    <span className="text-black">{fact.correctedValue}</span>
+                                  </>
+                                ) : (
+                                  <span className="text-black">{fact.factValue}</span>
+                                )}
+                              </div>
+                              <StatusBadge status={FACT_STATUS_BADGE[fact.confirmationStatus]} />
+                            </div>
+
+                            {editing ? (
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <Input
+                                  value={editValue}
+                                  onChange={(event) => setEditValue(event.target.value)}
+                                  disabled={factBusy}
+                                  className="flex-1"
+                                  aria-label={`Corrected value for ${fact.factType}`}
+                                />
+                                <Button
+                                  size="sm"
+                                  disabled={factBusy || editValue.trim() === ""}
+                                  onClick={() => void handleSaveCorrection(fact.id)}
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={factBusy}
+                                  onClick={handleCancelEdit}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            ) : (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {fact.confirmationStatus !== "confirmed" && (
+                                  <Button size="sm" disabled={factBusy} onClick={() => void handleConfirm(fact.id)}>
+                                    Confirm
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={factBusy}
+                                  onClick={() => handleStartEdit(fact)}
+                                >
+                                  Correct
+                                </Button>
+                                {fact.confirmationStatus !== "rejected" && (
+                                  <Button
+                                    size="sm"
+                                    variant="destructive"
+                                    disabled={factBusy}
+                                    onClick={() => void handleReject(fact.id)}
+                                  >
+                                    Reject
+                                  </Button>
+                                )}
+                                {fact.confirmationStatus !== "pending" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={factBusy}
+                                    onClick={() => void handleReopen(fact.id)}
+                                  >
+                                    Un-confirm
+                                  </Button>
+                                )}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
                 )}
               </li>
             );

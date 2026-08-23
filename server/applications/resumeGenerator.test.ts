@@ -221,6 +221,82 @@ describe("generateResumePayload — vacancy relevance annotation", () => {
   });
 });
 
+describe("generateResumePayload — MP-F2 corrected_value precedence", () => {
+  it("uses corrected_value over extracted_facts.fact_value when the candidate edited a confirmed fact", async () => {
+    const client = makeClient({
+      extracted_facts: {
+        data: [{ id: "fact-1", fact_type: "years_of_experience", fact_value: "5" }],
+        error: null,
+      },
+      fact_confirmations: {
+        data: [{ extracted_fact_id: "fact-1", corrected_value: "7" }],
+        error: null,
+      },
+    });
+
+    const result = await generateResumePayload(client, candidateId);
+
+    expect(result.facts).toEqual([
+      { extractedFactId: "fact-1", factType: "years_of_experience", factValue: "7", relevant: false },
+    ]);
+  });
+
+  it("falls back to extracted_facts.fact_value when corrected_value is null (confirmed as-is)", async () => {
+    const client = makeClient({
+      extracted_facts: {
+        data: [{ id: "fact-1", fact_type: "years_of_experience", fact_value: "5" }],
+        error: null,
+      },
+      fact_confirmations: {
+        data: [{ extracted_fact_id: "fact-1", corrected_value: null }],
+        error: null,
+      },
+    });
+
+    const result = await generateResumePayload(client, candidateId);
+
+    expect(result.facts[0].factValue).toBe("5");
+  });
+
+  it("never mutates extracted_facts — the corrected value only ever comes from fact_confirmations", async () => {
+    const factRows = [{ id: "fact-1", fact_type: "current_title", fact_value: "Backend Engineer" }];
+    const client = makeClient({
+      extracted_facts: { data: factRows, error: null },
+      fact_confirmations: {
+        data: [{ extracted_fact_id: "fact-1", corrected_value: "Senior Backend Engineer" }],
+        error: null,
+      },
+    });
+
+    await generateResumePayload(client, candidateId);
+
+    // The in-memory fixture row itself is untouched by generateResumePayload.
+    expect(factRows[0].fact_value).toBe("Backend Engineer");
+  });
+
+  it("matches vacancy relevance against the corrected value, not the stale extracted value", async () => {
+    const client = makeClient({
+      extracted_facts: {
+        data: [{ id: "fact-1", fact_type: "current_title", fact_value: "Some Other Title" }],
+        error: null,
+      },
+      fact_confirmations: {
+        data: [{ extracted_fact_id: "fact-1", corrected_value: "Backend Engineer" }],
+        error: null,
+      },
+    });
+
+    const result = await generateResumePayload(client, candidateId, "Senior Backend Engineer II");
+
+    expect(result.facts[0]).toEqual({
+      extractedFactId: "fact-1",
+      factType: "current_title",
+      factValue: "Backend Engineer",
+      relevant: true,
+    });
+  });
+});
+
 describe("verifyFactuality", () => {
   it("passes without throwing when every fact traces to a confirmed extracted_facts id", () => {
     const facts: ResumeFactEntry[] = [

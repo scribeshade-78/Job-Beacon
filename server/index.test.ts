@@ -339,6 +339,11 @@ describe("POST /api/resumes/:id/extract", () => {
       if (table === "extracted_facts") {
         return { insert: () => ({ select: () => insertResult }) };
       }
+      if (table === "fact_confirmations") {
+        // MP-F2: extractResumeFacts also creates a pending fact_confirmations
+        // row per fact — resolved as a plain success, not under test here.
+        return { insert: () => Promise.resolve({ data: [{}], error: null }) };
+      }
       throw new Error(`Unexpected table: ${table}`);
     });
 

@@ -17,6 +17,10 @@ import { cn } from "../../lib/utils";
  * status display (data layer's AuthorizationStatus "authorized" maps to
  * the "Active" label here). These reuse the same three colors/icons as
  * the trust statuses above rather than inventing a second palette.
+ *
+ * MP-F2 adds fact_pending/confirmed/rejected for each extracted fact's
+ * confirmation state (fact_confirmations.status) — again reusing the same
+ * three colors/icons rather than a third palette.
  */
 export type StatusBadgeStatus =
   | "verified"
@@ -25,7 +29,10 @@ export type StatusBadgeStatus =
   | "action_required"
   | "automation_active"
   | "automation_paused"
-  | "automation_stopped";
+  | "automation_stopped"
+  | "fact_pending"
+  | "fact_confirmed"
+  | "fact_rejected";
 
 interface StatusConfig {
   label: string;
@@ -118,6 +125,24 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
   },
   automation_stopped: {
     label: "Stopped",
+    bg: "bg-status-blocked/8",
+    fg: "text-status-blocked-fg",
+    Icon: XCircleIcon,
+  },
+  fact_pending: {
+    label: "Pending review",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
+  },
+  fact_confirmed: {
+    label: "Confirmed",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  fact_rejected: {
+    label: "Rejected",
     bg: "bg-status-blocked/8",
     fg: "text-status-blocked-fg",
     Icon: XCircleIcon,

@@ -200,12 +200,28 @@ export async function extractResumeFacts(
     return { kind: "error", message: "Could not save the extracted facts. Please try again." };
   }
 
-  return {
-    kind: "success",
-    facts: (insertedRows as Array<{ id: string; fact_type: string; fact_value: string }>).map((row) => ({
-      id: row.id,
-      factType: row.fact_type,
-      factValue: row.fact_value,
-    })),
-  };
+  const facts = (insertedRows as Array<{ id: string; fact_type: string; fact_value: string }>).map((row) => ({
+    id: row.id,
+    factType: row.fact_type,
+    factValue: row.fact_value,
+  }));
+
+  // MP-F2: a candidate can only ever UPDATE fact_confirmations (no INSERT
+  // grant — see that table's migration), so the pending row for each fact
+  // has to be created here, service-role-side, at extraction time. Without
+  // this, "Confirm"/"Correct"/"Reject" would silently match zero rows.
+  const { error: confirmationInsertError } = await serviceClient
+    .from("fact_confirmations")
+    .insert(facts.map((fact) => ({ extracted_fact_id: fact.id, status: "pending" })));
+
+  if (confirmationInsertError) {
+    // Same "two separate writes, throw/report on the second one's failure"
+    // precedent as reports.ts's submitVacancyReport: the extracted_facts
+    // insert above already durably committed and is not rolled back. A
+    // torn write here leaves real facts with no pending confirmation row
+    // (out of scope to reconcile this phase), not a lost extraction.
+    return { kind: "error", message: "Facts were extracted but could not be prepared for review. Please try again." };
+  }
+
+  return { kind: "success", facts };
 }

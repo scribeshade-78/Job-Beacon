@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { ConfirmationStatus } from "./factConfirmations";
 
 export interface ExtractedFact {
   id: string;
@@ -6,6 +7,10 @@ export interface ExtractedFact {
   factType: string;
   factValue: string;
   createdAt: string;
+  /** fact_confirmations.status — "pending" if MP-F2's extraction-time insert somehow didn't happen for this row (defensive default, not expected in practice). */
+  confirmationStatus: ConfirmationStatus;
+  /** null = confirmed exactly as extracted; non-null = the candidate edited it. Always null while pending/rejected. */
+  correctedValue: string | null;
 }
 
 const GENERIC_LIST_FAILURE_MESSAGE = "Could not load extracted facts. Please try again.";
@@ -20,6 +25,10 @@ export type ListExtractedFactsResult =
  * read, same as listResumes, not routed through Express. Fetches every fact
  * for the candidate (not filtered by resume) so the panel can group by
  * sourceDocumentId itself without an extra round trip per resume.
+ *
+ * Two-step query (facts, then confirmations for those fact ids) mirrors the
+ * same shape eligibilityGate.ts's evaluateVerifiedFacts and
+ * resumeGenerator.ts's generateResumePayload already use server-side.
  */
 export async function listExtractedFacts(client: Pick<SupabaseClient, "from">): Promise<ListExtractedFactsResult> {
   try {
@@ -32,15 +41,38 @@ export async function listExtractedFacts(client: Pick<SupabaseClient, "from">): 
       return { kind: "error", message: GENERIC_LIST_FAILURE_MESSAGE };
     }
 
+    const factIds = data.map((row) => row.id);
+
+    const { data: confirmationRows, error: confirmationError } =
+      factIds.length === 0
+        ? { data: [] as Array<{ extracted_fact_id: string; status: ConfirmationStatus; corrected_value: string | null }>, error: null }
+        : await client
+            .from("fact_confirmations")
+            .select("extracted_fact_id, status, corrected_value")
+            .in("extracted_fact_id", factIds);
+
+    if (confirmationError) {
+      return { kind: "error", message: GENERIC_LIST_FAILURE_MESSAGE };
+    }
+
+    const confirmationByFactId = new Map(
+      (confirmationRows ?? []).map((row) => [row.extracted_fact_id, row]),
+    );
+
     return {
       kind: "success",
-      facts: data.map((row) => ({
-        id: row.id,
-        sourceDocumentId: row.source_document_id,
-        factType: row.fact_type,
-        factValue: row.fact_value,
-        createdAt: row.created_at,
-      })),
+      facts: data.map((row) => {
+        const confirmation = confirmationByFactId.get(row.id);
+        return {
+          id: row.id,
+          sourceDocumentId: row.source_document_id,
+          factType: row.fact_type,
+          factValue: row.fact_value,
+          createdAt: row.created_at,
+          confirmationStatus: confirmation?.status ?? "pending",
+          correctedValue: confirmation?.corrected_value ?? null,
+        };
+      }),
     };
   } catch {
     return { kind: "error", message: GENERIC_LIST_FAILURE_MESSAGE };

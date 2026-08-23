@@ -105,7 +105,7 @@ export async function generateResumePayload(
 
   const { data: confirmationRows, error: confirmationError } = await client
     .from("fact_confirmations")
-    .select("extracted_fact_id")
+    .select("extracted_fact_id, corrected_value")
     .in("extracted_fact_id", factIds)
     .eq("status", "confirmed");
 
@@ -113,18 +113,29 @@ export async function generateResumePayload(
     throw confirmationError;
   }
 
-  const confirmedFactIds = new Set(
-    ((confirmationRows ?? []) as Array<{ extracted_fact_id: string }>).map((row) => row.extracted_fact_id),
+  // MP-F2: corrected_value is null when the candidate confirmed the
+  // extracted value as-is, non-null when they edited it — a resume must
+  // reflect what the candidate actually confirmed, not the raw extraction,
+  // so corrected_value (when present) wins over extracted_facts.fact_value.
+  const correctedValueByFactId = new Map(
+    ((confirmationRows ?? []) as Array<{ extracted_fact_id: string; corrected_value: string | null }>).map((row) => [
+      row.extracted_fact_id,
+      row.corrected_value,
+    ]),
   );
+  const confirmedFactIds = new Set(correctedValueByFactId.keys());
 
   const confirmedFacts: ResumeFactEntry[] = facts
     .filter((fact) => confirmedFactIds.has(fact.id))
-    .map((fact) => ({
-      extractedFactId: fact.id,
-      factType: fact.fact_type,
-      factValue: fact.fact_value,
-      relevant: isRelevantToVacancy(fact.fact_value, vacancyTitle),
-    }));
+    .map((fact) => {
+      const effectiveValue = correctedValueByFactId.get(fact.id) ?? fact.fact_value;
+      return {
+        extractedFactId: fact.id,
+        factType: fact.fact_type,
+        factValue: effectiveValue,
+        relevant: isRelevantToVacancy(effectiveValue, vacancyTitle),
+      };
+    });
 
   if (confirmedFacts.length === 0) {
     throw new NoConfirmedFactsError(candidateId);

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(14);
+select plan(17);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- resume_documents/extracted_facts grants/RLS this fixture also touches
@@ -98,7 +98,26 @@ select results_eq(
   'status reflects Candidate A''s confirmation'
 );
 
--- 9. Candidate A cannot insert — no grant exists for authenticated
+-- 9-11. Candidate A can correct their own fact — corrected_value is set
+-- and readable, while extracted_facts.fact_value stays untouched (MP-F2:
+-- a correction updates the confirmation, never the extraction provenance
+-- record). Still Candidate A's session from test 6-8, no re-auth needed.
+select lives_ok(
+  $$update fact_confirmations set corrected_value = '7' where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
+  'Candidate A can set corrected_value on their own fact confirmation'
+);
+select results_eq(
+  $$select corrected_value from fact_confirmations where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
+  $$values ('7'::text)$$,
+  'corrected_value reflects Candidate A''s correction'
+);
+select results_eq(
+  $$select fact_value from extracted_facts where id = 'dddddddd-9003-1111-1111-111111111111'$$,
+  $$values ('5'::text)$$,
+  'extracted_facts.fact_value is untouched by the correction'
+);
+
+-- 12. Candidate A cannot insert — no grant exists for authenticated
 select throws_ok(
   $$insert into fact_confirmations (extracted_fact_id, status) values ('dddddddd-9003-1111-1111-111111111111', 'pending')$$,
   '42501',
@@ -106,7 +125,7 @@ select throws_ok(
   'Candidate A cannot INSERT into fact_confirmations'
 );
 
--- 10. Candidate A cannot delete their own confirmation — no grant exists
+-- 13. Candidate A cannot delete their own confirmation — no grant exists
 select throws_ok(
   $$delete from fact_confirmations where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
   '42501',
@@ -119,26 +138,26 @@ reset role;
 set local role authenticated;
 set local request.jwt.claim.sub = '22222222-9003-1111-1111-111111111111';
 
--- 11. Candidate B cannot see Candidate A's confirmation
+-- 14. Candidate B cannot see Candidate A's confirmation
 select is_empty(
   $$select extracted_fact_id from fact_confirmations where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
   'Candidate B cannot see Candidate A''s fact confirmation'
 );
 
--- 12. Candidate B's UPDATE against Candidate A's row is filtered by RLS (zero rows, no throw)
+-- 15. Candidate B's UPDATE against Candidate A's row is filtered by RLS (zero rows, no throw)
 select lives_ok(
   $$update fact_confirmations set status = 'rejected' where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
   'UPDATE targeting Candidate A''s confirmation does not throw for Candidate B'
 );
 reset role;
--- 13. Candidate A's confirmation is unchanged after Candidate B's no-op update attempt
+-- 16. Candidate A's confirmation is unchanged after Candidate B's no-op update attempt
 select results_eq(
   $$select status from fact_confirmations where extracted_fact_id = 'dddddddd-9003-1111-1111-111111111111'$$,
   $$values ('confirmed'::text)$$,
   'Candidate A''s confirmation is unchanged after Candidate B''s no-op update attempt'
 );
 
--- 14. anon cannot select fact_confirmations
+-- 17. anon cannot select fact_confirmations
 set local role anon;
 select throws_ok(
   $$select extracted_fact_id from fact_confirmations$$,
