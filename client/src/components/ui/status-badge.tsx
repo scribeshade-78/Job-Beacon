@@ -32,7 +32,13 @@ export type StatusBadgeStatus =
   | "automation_stopped"
   | "fact_pending"
   | "fact_confirmed"
-  | "fact_rejected";
+  | "fact_rejected"
+  | "apply_not_started"
+  | "apply_queued"
+  | "apply_in_progress"
+  | "apply_action_required"
+  | "apply_completed"
+  | "apply_failed";
 
 interface StatusConfig {
   label: string;
@@ -143,6 +149,42 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
   },
   fact_rejected: {
     label: "Rejected",
+    bg: "bg-status-blocked/8",
+    fg: "text-status-blocked-fg",
+    Icon: XCircleIcon,
+  },
+  apply_not_started: {
+    label: "Not started",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
+  },
+  apply_queued: {
+    label: "Queued",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  apply_in_progress: {
+    label: "In progress",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  apply_action_required: {
+    label: "Action required",
+    bg: "bg-status-action-required/8",
+    fg: "text-status-action-required-fg",
+    Icon: PauseIcon,
+  },
+  apply_completed: {
+    label: "Completed",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  apply_failed: {
+    label: "Failed",
     bg: "bg-status-blocked/8",
     fg: "text-status-blocked-fg",
     Icon: XCircleIcon,
