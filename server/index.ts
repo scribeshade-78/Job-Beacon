@@ -53,20 +53,28 @@ export function createApp(options: CreateAppOptions = {}) {
     response.status(200).json(body);
   });
 
+  // R3.1: isModerator is included so the client can conditionally show
+  // moderator-only navigation (e.g. the /moderator route) without a
+  // separate round trip — the actual authorization boundary remains
+  // server-side (requireModerator on every moderation route below), this
+  // is a UX signal only, never trusted as an authorization decision itself.
+  const checkIsModerator = options.checkIsModerator ?? isModerator;
+
   app.get(
     "/api/me",
     createRequireAuth(options.verifyAccessToken),
-    (request: AuthenticatedRequest, response) => {
+    async (request: AuthenticatedRequest, response) => {
       response.set("Cache-Control", "no-store");
       response.set("Vary", "Authorization");
-      response.status(200).json(request.user);
+      const userIsModerator = await checkIsModerator(request.user!.id);
+      response.status(200).json({ ...request.user, isModerator: userIsModerator });
     },
   );
 
   app.use(express.json());
 
   const requireAuth = createRequireAuth(options.verifyAccessToken);
-  const requireModerator = createRequireModerator(options.checkIsModerator ?? isModerator);
+  const requireModerator = createRequireModerator(checkIsModerator);
   const requireWorkerSecret = createRequireWorkerSecret(options.workerSecret ?? process.env.WORKER_TRIGGER_SECRET);
   const resolveServiceClient = () => options.serviceClient ?? createSupabaseServiceRoleClient();
   const resolveOpenAIClient = () => options.openaiClient ?? createOpenAIClient();

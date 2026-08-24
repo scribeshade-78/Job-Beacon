@@ -10,6 +10,7 @@ import {
   LogOut,
   Menu,
   Send,
+  ShieldAlert,
   ShieldCheck,
   Target,
   User,
@@ -42,14 +43,16 @@ interface AppShellProps {
   email: string | null;
   onLogout: () => void;
   children: ReactNode;
+  /** R3.1: shown only for moderators (server-verified via /api/me's isModerator) — a UX convenience, not the authorization boundary (requireModerator on the backend is). */
+  showModeratorLink?: boolean;
 }
 
-function NavList({ onNavigate }: { onNavigate?: () => void }) {
+function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => void }) {
   const [location] = useLocation();
 
   return (
     <nav aria-label="Main" className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">
-      {NAV_ITEMS.map(({ href, label, Icon }) => {
+      {items.map(({ href, label, Icon }) => {
         const active = location === href;
 
         return (
@@ -88,8 +91,11 @@ function SidebarFooter({ email, onLogout }: { email: string | null; onLogout: ()
   );
 }
 
-export function AppShell({ email, onLogout, children }: AppShellProps) {
+export function AppShell({ email, onLogout, children, showModeratorLink }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const navItems = showModeratorLink
+    ? [...NAV_ITEMS, { href: "/moderator", label: "Moderation", Icon: ShieldAlert }]
+    : NAV_ITEMS;
 
   return (
     <div className="min-h-screen bg-ios-bg">
@@ -98,7 +104,7 @@ export function AppShell({ email, onLogout, children }: AppShellProps) {
         <div className="flex h-16 items-center px-5">
           <span className="text-lg font-bold text-black">{APP_NAME}</span>
         </div>
-        <NavList />
+        <NavList items={navItems} />
         <SidebarFooter email={email} onLogout={onLogout} />
       </aside>
 
@@ -123,7 +129,7 @@ export function AppShell({ email, onLogout, children }: AppShellProps) {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavList onNavigate={() => setDrawerOpen(false)} />
+            <NavList items={navItems} onNavigate={() => setDrawerOpen(false)} />
             <SidebarFooter email={email} onLogout={onLogout} />
           </aside>
         </div>

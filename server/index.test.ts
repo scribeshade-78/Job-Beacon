@@ -95,6 +95,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
       {
         verifyAccessToken: async (token) =>
           token === "valid-test-token" ? { id: "user-123", email: "person@example.com" } : null,
+        checkIsModerator: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -102,9 +103,27 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
         });
 
         expect(response.status).toBe(200);
-        expect(await response.json()).toEqual({ id: "user-123", email: "person@example.com" });
+        expect(await response.json()).toEqual({ id: "user-123", email: "person@example.com", isModerator: false });
         expect(response.headers.get("cache-control")).toBe("no-store");
         expect(response.headers.get("vary")).toBe("Authorization");
+      },
+    );
+  });
+
+  it("returns isModerator: true when the checker reports a moderator", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: async (token) =>
+          token === "valid-test-token" ? { id: "user-123", email: "person@example.com" } : null,
+        checkIsModerator: async () => true,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/me`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ id: "user-123", email: "person@example.com", isModerator: true });
       },
     );
   });

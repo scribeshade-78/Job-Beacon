@@ -163,8 +163,18 @@ export function useAuth() {
   };
 }
 
+/**
+ * R3.1: /api/me's response, not toAuthUser's — the raw Supabase session
+ * (toAuthUser's input) carries no app-specific role data, so isModerator
+ * can only ever come from the server. Kept as its own type rather than
+ * added to AuthUser itself, which toAuthUser still constructs without it.
+ */
+export interface VerifiedIdentity extends AuthUser {
+  isModerator: boolean;
+}
+
 export type MeResult =
-  | { kind: "success"; user: AuthUser }
+  | { kind: "success"; user: VerifiedIdentity }
   | { kind: "unauthenticated" }
   | { kind: "retryableError"; message: string };
 
@@ -221,6 +231,6 @@ export async function fetchVerifiedIdentity(
     return { kind: "retryableError", message: "Unexpected error. Please try again." };
   }
 
-  const body = (await response.json()) as AuthUser;
+  const body = (await response.json()) as VerifiedIdentity;
   return { kind: "success", user: body };
 }

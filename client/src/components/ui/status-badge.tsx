@@ -21,6 +21,14 @@ import { cn } from "../../lib/utils";
  * MP-F2 adds fact_pending/confirmed/rejected for each extracted fact's
  * confirmation state (fact_confirmations.status) — again reusing the same
  * three colors/icons rather than a third palette.
+ *
+ * R3.1 adds severity_* (moderation_cases.severity: critical/high/medium/low,
+ * mapped red/amber/blue/green by descending urgency) and moderation_* (the
+ * five moderation_decisions.decision values), reusing the same four
+ * palettes rather than a fifth/sixth one. moderation_request_info and
+ * moderation_escalated share the under_review palette (same "in progress,
+ * not yet resolved" semantic) — same "same color, different label"
+ * precedent as apply_queued/apply_in_progress below.
  */
 export type StatusBadgeStatus =
   | "verified"
@@ -38,7 +46,16 @@ export type StatusBadgeStatus =
   | "apply_in_progress"
   | "apply_action_required"
   | "apply_completed"
-  | "apply_failed";
+  | "apply_failed"
+  | "severity_critical"
+  | "severity_high"
+  | "severity_medium"
+  | "severity_low"
+  | "moderation_cleared"
+  | "moderation_flagged"
+  | "moderation_blocked"
+  | "moderation_request_info"
+  | "moderation_escalated";
 
 interface StatusConfig {
   label: string;
@@ -188,6 +205,60 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     bg: "bg-status-blocked/8",
     fg: "text-status-blocked-fg",
     Icon: XCircleIcon,
+  },
+  severity_critical: {
+    label: "Critical",
+    bg: "bg-status-blocked/8",
+    fg: "text-status-blocked-fg",
+    Icon: XCircleIcon,
+  },
+  severity_high: {
+    label: "High",
+    bg: "bg-status-action-required/8",
+    fg: "text-status-action-required-fg",
+    Icon: PauseIcon,
+  },
+  severity_medium: {
+    label: "Medium",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
+  },
+  severity_low: {
+    label: "Low",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  moderation_cleared: {
+    label: "Cleared",
+    bg: "bg-status-verified/8",
+    fg: "text-status-verified-fg",
+    Icon: CheckIcon,
+  },
+  moderation_flagged: {
+    label: "Flagged",
+    bg: "bg-status-action-required/8",
+    fg: "text-status-action-required-fg",
+    Icon: PauseIcon,
+  },
+  moderation_blocked: {
+    label: "Blocked",
+    bg: "bg-status-blocked/8",
+    fg: "text-status-blocked-fg",
+    Icon: XCircleIcon,
+  },
+  moderation_request_info: {
+    label: "Info requested",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
+  },
+  moderation_escalated: {
+    label: "Escalated",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
   },
 };
 

@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
-import { Redirect, Route, Router, Switch } from "wouter";
+import { Redirect, Route, Router, Switch, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { AppShell } from "./components/AppShell";
 import { AuthCard } from "./components/AuthCard";
 import { ConfirmationPendingScreen } from "./components/ConfirmationPendingScreen";
 import { LoadingScreen } from "./components/LoadingScreen";
-import { fetchVerifiedIdentity, useAuth, type AuthUser } from "./lib/auth";
+import { fetchVerifiedIdentity, useAuth, type VerifiedIdentity } from "./lib/auth";
 import { ensureCandidateProfile } from "./lib/profile";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 import { ActionRequiredPage } from "./pages/ActionRequiredPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
+import { ModeratorPage } from "./pages/ModeratorPage";
 import { OpportunitiesPage } from "./pages/OpportunitiesPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { ProfilePage } from "./pages/ProfilePage";
@@ -19,9 +20,92 @@ import { ResumesPage } from "./pages/ResumesPage";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TargetRolesPage } from "./pages/TargetRolesPage";
 
+interface SignedInRoutesProps {
+  candidateId: string | undefined;
+  ready: boolean;
+  email: string | null;
+  isModerator: boolean;
+  identityError: string | null;
+  profileError: string | null;
+  onLogout: () => void;
+}
+
+/**
+ * R3.1: /moderator renders bare (no AppShell) — the candidate sidebar
+ * (Resumes, Target Roles, Opportunities, ...) doesn't fit the moderator
+ * persona at all. useLocation() must run inside <Router>, which is why this
+ * is a separate component rather than a branch inside App itself.
+ */
+function SignedInRoutes({
+  candidateId,
+  ready,
+  email,
+  isModerator,
+  identityError,
+  profileError,
+  onLogout,
+}: SignedInRoutesProps) {
+  const [location] = useLocation();
+
+  if (location === "/moderator") {
+    return <ModeratorPage onLogout={onLogout} />;
+  }
+
+  return (
+    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator}>
+      {identityError && (
+        <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
+          {identityError}
+        </p>
+      )}
+      {profileError && (
+        <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
+          {profileError}
+        </p>
+      )}
+
+      <Switch>
+        <Route path="/">
+          <OverviewPage candidateId={candidateId} ready={ready} />
+        </Route>
+        <Route path="/profile">
+          <ProfilePage candidateId={candidateId} ready={ready} />
+        </Route>
+        <Route path="/resumes">
+          <ResumesPage candidateId={candidateId} ready={ready} />
+        </Route>
+        <Route path="/target-roles">
+          <TargetRolesPage candidateId={candidateId} ready={ready} />
+        </Route>
+        <Route path="/opportunities">
+          <OpportunitiesPage />
+        </Route>
+        <Route path="/applications">
+          <ApplicationsPage ready={ready} />
+        </Route>
+        <Route path="/responses">
+          <ResponsesPage ready={ready} />
+        </Route>
+        <Route path="/action-required">
+          <ActionRequiredPage ready={ready} />
+        </Route>
+        <Route path="/companies">
+          <CompanyIntelligencePage />
+        </Route>
+        <Route path="/security">
+          <SecurityPage />
+        </Route>
+        <Route>
+          <Redirect to="/" />
+        </Route>
+      </Switch>
+    </AppShell>
+  );
+}
+
 export function App() {
   const auth = useAuth();
-  const [identity, setIdentity] = useState<AuthUser | null>(null);
+  const [identity, setIdentity] = useState<VerifiedIdentity | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   // candidate_profiles is the FK target for resume_documents,
@@ -107,54 +191,15 @@ export function App() {
 
     return (
       <Router hook={useHashLocation}>
-        <AppShell email={identity?.email ?? null} onLogout={() => void auth.signOut()}>
-          {identityError && (
-            <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
-              {identityError}
-            </p>
-          )}
-          {profileError && (
-            <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
-              {profileError}
-            </p>
-          )}
-
-          <Switch>
-            <Route path="/">
-              <OverviewPage candidateId={auth.user?.id} ready={ready} />
-            </Route>
-            <Route path="/profile">
-              <ProfilePage candidateId={auth.user?.id} ready={ready} />
-            </Route>
-            <Route path="/resumes">
-              <ResumesPage candidateId={auth.user?.id} ready={ready} />
-            </Route>
-            <Route path="/target-roles">
-              <TargetRolesPage candidateId={auth.user?.id} ready={ready} />
-            </Route>
-            <Route path="/opportunities">
-              <OpportunitiesPage />
-            </Route>
-            <Route path="/applications">
-              <ApplicationsPage ready={ready} />
-            </Route>
-            <Route path="/responses">
-              <ResponsesPage ready={ready} />
-            </Route>
-            <Route path="/action-required">
-              <ActionRequiredPage ready={ready} />
-            </Route>
-            <Route path="/companies">
-              <CompanyIntelligencePage />
-            </Route>
-            <Route path="/security">
-              <SecurityPage />
-            </Route>
-            <Route>
-              <Redirect to="/" />
-            </Route>
-          </Switch>
-        </AppShell>
+        <SignedInRoutes
+          candidateId={auth.user?.id}
+          ready={ready}
+          email={identity?.email ?? null}
+          isModerator={identity?.isModerator ?? false}
+          identityError={identityError}
+          profileError={profileError}
+          onLogout={() => void auth.signOut()}
+        />
       </Router>
     );
   }
