@@ -1,43 +1,29 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getDiscoveryAdapter, hasDiscoveryAdapter } from "./adapters/registry.js";
 import { discoverAdzuna, type AdzunaTargetConfig } from "./adapters/adzuna.js";
-import { discoverGreenhouse, type GreenhouseTargetConfig } from "./adapters/greenhouse.js";
-import { discoverLever, type LeverTargetConfig } from "./adapters/lever.js";
 import { discoverUsajobs, type UsajobsTargetConfig } from "./adapters/usajobs.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
 import type { DiscoveredVacancy } from "./types.js";
 import { scoreVacancy } from "../trust/scoreVacancy.js";
 
 /**
- * Greenhouse/Lever config comes from an operator-edited jsonb column with
- * no schema enforcement at the DB layer — validating companyName here
- * turns a misconfigured target into a clear error instead of a confusing
- * NOT NULL violation surfacing later from inside ingestDiscoveredVacancy's
- * companies insert.
+ * Adapters that don't yet implement the DiscoveryAdapter interface
+ * (Adzuna, USAJOBS) are handled specially. They will be formalized in
+ * a follow-up. For now, they remain as direct function calls.
  */
-function requireCompanyName(sourceCode: string, config: Record<string, unknown>): string {
-  const companyName = config.companyName;
-
-  if (typeof companyName !== "string" || companyName.trim() === "") {
-    throw new Error(
-      `vacancy_sources.config for source "${sourceCode}" is missing a valid "companyName" string.`,
-    );
-  }
-
-  return companyName;
-}
-
 async function discoverForSource(
   sourceCode: string,
   targetKey: string,
   config: Record<string, unknown>,
 ): Promise<DiscoveredVacancy[]> {
+  // Try the new registry first (formalized adapters)
+  if (hasDiscoveryAdapter(sourceCode)) {
+    const adapter = getDiscoveryAdapter(sourceCode);
+    return adapter.discover(targetKey, config as never);
+  }
+
+  // Fallback for adapters not yet formalized (Adzuna, USAJOBS)
   switch (sourceCode) {
-    case "greenhouse":
-      requireCompanyName(sourceCode, config);
-      return discoverGreenhouse(targetKey, config as unknown as GreenhouseTargetConfig);
-    case "lever":
-      requireCompanyName(sourceCode, config);
-      return discoverLever(targetKey, config as unknown as LeverTargetConfig);
     case "usajobs":
       return discoverUsajobs(config as unknown as UsajobsTargetConfig, {
         apiKey: process.env.USAJOBS_API_KEY ?? "",

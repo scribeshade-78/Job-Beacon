@@ -1,16 +1,33 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 
-vi.mock("./adapters/greenhouse.js", () => ({ discoverGreenhouse: vi.fn() }));
-vi.mock("./adapters/lever.js", () => ({ discoverLever: vi.fn() }));
-vi.mock("./adapters/usajobs.js", () => ({ discoverUsajobs: vi.fn() }));
+vi.mock("./adapters/registry.js", () => ({
+  getDiscoveryAdapter: vi.fn(),
+  hasDiscoveryAdapter: vi.fn(),
+}));
+vi.mock("./adapters/greenhouse.js", () => ({
+  greenhouseAdapter: {
+    sourceCode: "greenhouse",
+    discover: vi.fn(),
+    validateConfig: vi.fn(),
+  },
+}));
+vi.mock("./adapters/lever.js", () => ({
+  leverAdapter: {
+    sourceCode: "lever",
+    discover: vi.fn(),
+    validateConfig: vi.fn(),
+  },
+}));
 vi.mock("./adapters/adzuna.js", () => ({ discoverAdzuna: vi.fn() }));
+vi.mock("./adapters/usajobs.js", () => ({ discoverUsajobs: vi.fn() }));
 vi.mock("./ingest.js", () => ({
   ingestDiscoveredVacancy: vi.fn(),
   markUnseenVacanciesExpired: vi.fn(),
 }));
 vi.mock("../trust/scoreVacancy.js", () => ({ scoreVacancy: vi.fn() }));
 
-import { discoverGreenhouse } from "./adapters/greenhouse.js";
+import { getDiscoveryAdapter, hasDiscoveryAdapter } from "./adapters/registry.js";
+import { greenhouseAdapter } from "./adapters/greenhouse.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
 import { scoreVacancy } from "../trust/scoreVacancy.js";
 import { runOneIngestionJob } from "./worker.js";
@@ -63,6 +80,13 @@ function makeClient(overrides: {
 }
 
 describe("runOneIngestionJob", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default mocks for registry
+    vi.mocked(hasDiscoveryAdapter).mockReturnValue(true);
+    vi.mocked(getDiscoveryAdapter).mockReturnValue(greenhouseAdapter);
+  });
+
   it("returns processed:false when the queue is empty", async () => {
     const client = makeClient({ rpcResult: { data: [], error: null } });
 
@@ -79,7 +103,7 @@ describe("runOneIngestionJob", () => {
 
   it("discovers, ingests each result, marks freshness, and completes the job on success", async () => {
     const discovered = [{ sourceVacancyId: "1" }, { sourceVacancyId: "2" }];
-    vi.mocked(discoverGreenhouse).mockResolvedValue(discovered as never);
+    vi.mocked(greenhouseAdapter.discover).mockResolvedValue(discovered as never);
     vi.mocked(ingestDiscoveredVacancy)
       .mockResolvedValueOnce({ vacancyId: "v1", outcome: "created" })
       .mockResolvedValueOnce({ vacancyId: "v2", outcome: "created" });
@@ -88,14 +112,14 @@ describe("runOneIngestionJob", () => {
     const result = await runOneIngestionJob(client);
 
     expect(result).toEqual({ processed: true, vacanciesFetched: 2 });
-    expect(discoverGreenhouse).toHaveBeenCalledWith("acme", vacancySource.config);
+    expect(greenhouseAdapter.discover).toHaveBeenCalledWith("acme", vacancySource.config);
     expect(ingestDiscoveredVacancy).toHaveBeenCalledTimes(2);
     expect(markUnseenVacanciesExpired).toHaveBeenCalledWith(client, "target-1", ["v1", "v2"]);
   });
 
   it("scores every ingested vacancy right after it's ingested", async () => {
     const discovered = [{ sourceVacancyId: "1" }, { sourceVacancyId: "2" }];
-    vi.mocked(discoverGreenhouse).mockResolvedValue(discovered as never);
+    vi.mocked(greenhouseAdapter.discover).mockResolvedValue(discovered as never);
     vi.mocked(ingestDiscoveredVacancy)
       .mockResolvedValueOnce({ vacancyId: "v1", outcome: "created" })
       .mockResolvedValueOnce({ vacancyId: "v2", outcome: "created" });
@@ -112,7 +136,7 @@ describe("runOneIngestionJob", () => {
 
   it("does not fail the job when scoring a vacancy throws — ingestion must stay available even when scoring isn't", async () => {
     const discovered = [{ sourceVacancyId: "1" }, { sourceVacancyId: "2" }];
-    vi.mocked(discoverGreenhouse).mockResolvedValue(discovered as never);
+    vi.mocked(greenhouseAdapter.discover).mockResolvedValue(discovered as never);
     vi.mocked(ingestDiscoveredVacancy)
       .mockResolvedValueOnce({ vacancyId: "v1", outcome: "created" })
       .mockResolvedValueOnce({ vacancyId: "v2", outcome: "created" });
@@ -130,28 +154,28 @@ describe("runOneIngestionJob", () => {
   });
 
   it("does not call the adapter and fails the job when discovery_allowed is false", async () => {
-    vi.mocked(discoverGreenhouse).mockClear();
+    vi.mocked(greenhouseAdapter.discover).mockClear();
     const client = makeClient({ policyResult: { data: { discovery_allowed: false, kill_switch: false }, error: null } });
 
     const result = await runOneIngestionJob(client);
 
     expect(result.processed).toBe(true);
     expect(result.error).toMatch(/not permitted/);
-    expect(discoverGreenhouse).not.toHaveBeenCalled();
+    expect(greenhouseAdapter.discover).not.toHaveBeenCalled();
   });
 
   it("does not call the adapter and fails the job when kill_switch is engaged", async () => {
-    vi.mocked(discoverGreenhouse).mockClear();
+    vi.mocked(greenhouseAdapter.discover).mockClear();
     const client = makeClient({ policyResult: { data: { discovery_allowed: true, kill_switch: true }, error: null } });
 
     const result = await runOneIngestionJob(client);
 
     expect(result.error).toMatch(/not permitted/);
-    expect(discoverGreenhouse).not.toHaveBeenCalled();
+    expect(greenhouseAdapter.discover).not.toHaveBeenCalled();
   });
 
   it("rejects a Greenhouse target with no companyName instead of letting a bad insert happen downstream", async () => {
-    vi.mocked(discoverGreenhouse).mockClear();
+    vi.mocked(greenhouseAdapter.discover).mockRejectedValue(new Error("companyName is required"));
     const client = makeClient({
       vacancySourceResult: { data: { ...vacancySource, config: {} }, error: null },
     });
@@ -159,10 +183,11 @@ describe("runOneIngestionJob", () => {
     const result = await runOneIngestionJob(client);
 
     expect(result.error).toMatch(/companyName/);
-    expect(discoverGreenhouse).not.toHaveBeenCalled();
+    expect(greenhouseAdapter.discover).toHaveBeenCalled();
   });
 
   it("throws for a source_code with no registered adapter", async () => {
+    vi.mocked(hasDiscoveryAdapter).mockReturnValueOnce(false);
     const client = makeClient({
       vacancySourceResult: { data: { ...vacancySource, source_code: "not-a-real-source" }, error: null },
       policyResult: { data: enabledPolicy, error: null },

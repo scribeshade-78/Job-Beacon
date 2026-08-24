@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { discoverLever } from "./lever.js";
+import { leverAdapter } from "./lever.js";
 
 // Fixture shaped from the real response documented at
 // https://github.com/lever/postings-api (verified directly, not invented).
@@ -30,17 +30,21 @@ function fixtureFetch(status = 200, body: unknown = fixtureResponse) {
   }) as unknown as typeof fetch;
 }
 
-describe("discoverLever", () => {
+describe("leverAdapter", () => {
+  it("has the correct sourceCode", () => {
+    expect(leverAdapter.sourceCode).toBe("lever");
+  });
+
   it("requests the correct public site-slug URL in json mode", async () => {
     const fetchImpl = fixtureFetch();
 
-    await discoverLever("acme", { companyName: "Acme Corp" }, fetchImpl);
+    await leverAdapter.discover("acme", { companyName: "Acme Corp" }, fetchImpl);
 
     expect(fetchImpl).toHaveBeenCalledWith("https://api.lever.co/v0/postings/acme?mode=json");
   });
 
   it("normalizes postings into DiscoveredVacancy shape, using the real salaryRange/workplaceType fields", async () => {
-    const result = await discoverLever("acme", { companyName: "Acme Corp", companyDomain: "acme.example" }, fixtureFetch());
+    const result = await leverAdapter.discover("acme", { companyName: "Acme Corp", companyDomain: "acme.example" }, fixtureFetch());
 
     expect(result[0]).toEqual({
       sourceVacancyId: "abc123-def456",
@@ -63,7 +67,7 @@ describe("discoverLever", () => {
   });
 
   it("leaves salary fields null when a posting has no salaryRange", async () => {
-    const result = await discoverLever("acme", { companyName: "Acme Corp" }, fixtureFetch());
+    const result = await leverAdapter.discover("acme", { companyName: "Acme Corp" }, fixtureFetch());
 
     expect(result[1]).toMatchObject({
       salaryMin: null,
@@ -76,7 +80,18 @@ describe("discoverLever", () => {
 
   it("throws a clear error on a non-2xx response", async () => {
     await expect(
-      discoverLever("nonexistent", { companyName: "Nobody" }, fixtureFetch(404, {})),
+      leverAdapter.discover("nonexistent", { companyName: "Nobody" }, fixtureFetch(404, {})),
     ).rejects.toThrow(/404/);
+  });
+
+  it("validateConfig throws when companyName is missing", () => {
+    expect(() => leverAdapter.validateConfig({ companyName: "" })).toThrow(/companyName/);
+    expect(() => leverAdapter.validateConfig({ companyName: "  " })).toThrow(/companyName/);
+    expect(() => leverAdapter.validateConfig({} as never)).toThrow(/companyName/);
+  });
+
+  it("validateConfig passes when companyName is valid", () => {
+    expect(() => leverAdapter.validateConfig({ companyName: "Acme Corp" })).not.toThrow();
+    expect(() => leverAdapter.validateConfig({ companyName: "Acme Corp", companyDomain: "acme.com" })).not.toThrow();
   });
 });
