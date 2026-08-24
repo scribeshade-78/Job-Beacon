@@ -11,6 +11,7 @@ import {
   stop,
   type Authorization,
 } from "../lib/automationAuthorization";
+import { listSelectedRoles, type SelectedRole } from "../lib/candidateSelectedRoles";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
 const AUTOMATION_STATUS_BADGE: Record<Authorization["status"], StatusBadgeStatus> = {
@@ -25,19 +26,27 @@ interface AutomationPanelProps {
 
 export function AutomationPanel({ candidateId }: AutomationPanelProps) {
   const [authorization, setAuthorization] = useState<Authorization | "notYetAuthorized" | null>(null);
+  const [selectedRoles, setSelectedRoles] = useState<SelectedRole[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    const result = await getAuthorization(getSupabaseBrowserClient());
+    const client = getSupabaseBrowserClient();
+    const [authResult, rolesResult] = await Promise.all([getAuthorization(client), listSelectedRoles(client)]);
 
-    if (result.kind === "authorized") {
-      setAuthorization(result.authorization);
-    } else if (result.kind === "notYetAuthorized") {
+    if (authResult.kind === "authorized") {
+      setAuthorization(authResult.authorization);
+    } else if (authResult.kind === "notYetAuthorized") {
       setAuthorization("notYetAuthorized");
     } else {
-      setError(result.message);
+      setError(authResult.message);
+    }
+
+    if (rolesResult.kind === "success") {
+      setSelectedRoles(rolesResult.roles);
+    } else {
+      setError(rolesResult.message);
     }
   }
 
@@ -72,6 +81,26 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
             {error}
           </p>
         )}
+
+        <div>
+          <h3 className="text-sm font-medium text-black">Selected roles</h3>
+          {selectedRoles === null ? null : selectedRoles.length === 0 ? (
+            <p className="text-sm text-ios-text-secondary">
+              No target roles selected yet — automation has nothing to act on until you select at least one.
+            </p>
+          ) : (
+            <ul className="mt-1 flex flex-wrap gap-1.5" aria-label="Selected roles">
+              {selectedRoles.map((role) => (
+                <li
+                  key={role.id}
+                  className="rounded-control bg-ios-bg px-2.5 py-1 text-sm text-black"
+                >
+                  {role.roleName}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         {authorization === "notYetAuthorized" && (
           <>
