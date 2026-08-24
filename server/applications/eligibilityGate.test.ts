@@ -17,21 +17,36 @@ type TableResult = { data: unknown; error: unknown };
 
 /**
  * A minimal fluent builder matching exactly the call shapes
- * eligibilityGate.ts uses (.select().eq()[.eq()][.in()][.maybeSingle()]).
- * .select()/.eq()/.in() are no-ops that return the same builder so any
- * number of chained calls works; the builder itself is thenable so code
- * that awaits without calling .maybeSingle() (the array-returning
- * queries) also resolves to `result`, mirroring real postgrest-js
- * behavior.
+ * eligibilityGate.ts uses (.select().eq()[.eq()][.in()][.gte()][.maybeSingle()]).
+ * .select()/.eq()/.in()/.gte() are no-ops that return the same builder so
+ * any number of chained calls works (.in and .gte are spies so MP-RC1's
+ * tests can assert on their arguments); the builder itself is thenable so
+ * code that awaits without calling .maybeSingle() (the array-returning
+ * queries) also resolves, mirroring real postgrest-js behavior.
+ *
+ * MP-RC1: application_plans is now queried two different ways within one
+ * evaluateEligibilityGates call — evaluateIdempotency's `.maybeSingle()`
+ * (single row or null) and evaluateRateAndAbuseControls's bare-await
+ * `.eq("candidate_id", ...)` (array of this candidate's plans) — from the
+ * SAME configured canned value. `.maybeSingle()` resolves the raw
+ * `result` unchanged; the bare-await path auto-wraps a non-array `data`
+ * into a single-element array (null -> [], one row -> [thatRow]) so one
+ * `application_plans` override in a test serves both shapes consistently,
+ * without every existing idempotency-focused test needing to change.
  */
 function makeQueryBuilder(result: TableResult) {
+  const arrayResult: TableResult = {
+    ...result,
+    data: result.data === null ? [] : Array.isArray(result.data) ? result.data : [result.data],
+  };
   const builder: PromiseLike<TableResult> & Record<string, unknown> = {
     select: () => builder,
     eq: () => builder,
-    in: () => builder,
+    in: vi.fn(() => builder),
+    gte: vi.fn(() => builder),
     maybeSingle: async () => result,
     then: (onFulfilled: (value: TableResult) => unknown, onRejected?: (reason: unknown) => unknown) =>
-      Promise.resolve(result).then(onFulfilled, onRejected),
+      Promise.resolve(arrayResult).then(onFulfilled, onRejected),
   } as PromiseLike<TableResult> & Record<string, unknown>;
   return builder;
 }
@@ -79,7 +94,7 @@ describe("evaluateEligibilityGates", () => {
       reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
       detail: { sourceCode: "greenhouse" },
     });
-    expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass" });
+    expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 0, limit: 25 } });
   });
 
   describe("permanent hard-block gates", () => {
@@ -97,43 +112,112 @@ describe("evaluateEligibilityGates", () => {
     });
   });
 
-  describe("rate_and_abuse_controls", () => {
-    it("passes when automation_authorization status is authorized", async () => {
+  describe("rate_and_abuse_controls (MP-RC1)", () => {
+    /** Finds the application_attempts query builder instance rateAndAbuseControls itself made — the only one whose .gte was ever called (evaluateIdempotency's own application_attempts query never calls .gte). */
+    function findRateLimitAttemptsBuilder(client: Parameters<typeof evaluateEligibilityGates>[0]) {
+      const from = client.from as unknown as { mock: { calls: unknown[][]; results: Array<{ value: unknown }> } };
+      const builders = from.mock.results
+        .filter((_r, i) => from.mock.calls[i][0] === "application_attempts")
+        .map((r) => r.value as { in: ReturnType<typeof vi.fn>; gte: ReturnType<typeof vi.fn> });
+      return builders.find((b) => b.gte.mock.calls.length > 0);
+    }
+
+    it("passes with count 0 when the candidate has never created an application_plans row", async () => {
       const client = makeClient();
       const result = await evaluateEligibilityGates(client, baseInput);
-      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass" });
+      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 0, limit: 25 } });
     });
 
-    it.each(["paused", "stopped"])("fails, mirroring automation_authorization, when status is %s", async (status) => {
-      const client = makeClient({ automation_authorizations: { data: { status }, error: null } });
+    it("passes with count 0 when the candidate has a plan but no attempts in the window", async () => {
+      const client = makeClient({
+        application_plans: { data: { id: "plan-1" }, error: null },
+        application_attempts: { data: [], error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 0, limit: 25 } });
+    });
+
+    it("passes when the attempt count is below the daily limit", async () => {
+      const attempts = Array.from({ length: 10 }, () => ({ status: "succeeded" }));
+      const client = makeClient({
+        application_plans: { data: { id: "plan-1" }, error: null },
+        application_attempts: { data: attempts, error: null },
+      });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 10, limit: 25 } });
+    });
+
+    it("fails with DAILY_APPLICATION_LIMIT_EXCEEDED once the count reaches the limit", async () => {
+      const attempts = Array.from({ length: 25 }, () => ({ status: "succeeded" }));
+      const client = makeClient({
+        application_plans: { data: { id: "plan-1" }, error: null },
+        application_attempts: { data: attempts, error: null },
+      });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.rate_and_abuse_controls).toEqual({
         status: "fail",
-        reasonCode: "AUTOMATION_NOT_AUTHORIZED",
-        detail: { status },
+        reasonCode: "DAILY_APPLICATION_LIMIT_EXCEEDED",
+        detail: { count: 25, limit: 25, windowHours: 24 },
       });
-      expect(result.gates.rate_and_abuse_controls).toEqual(result.gates.automation_authorization);
     });
 
-    it("fails, mirroring automation_authorization, when the candidate has no authorization row", async () => {
-      const client = makeClient({ automation_authorizations: { data: null, error: null } });
+    it("fails when the count exceeds the limit", async () => {
+      const attempts = Array.from({ length: 30 }, () => ({ status: "succeeded" }));
+      const client = makeClient({
+        application_plans: { data: { id: "plan-1" }, error: null },
+        application_attempts: { data: attempts, error: null },
+      });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.rate_and_abuse_controls).toEqual({
         status: "fail",
-        reasonCode: "AUTOMATION_NOT_AUTHORIZED",
-        detail: { status: "not_yet_authorized" },
+        reasonCode: "DAILY_APPLICATION_LIMIT_EXCEEDED",
+        detail: { count: 30, limit: 25, windowHours: 24 },
       });
-      expect(result.gates.rate_and_abuse_controls).toEqual(result.gates.automation_authorization);
     });
 
-    it("queries automation_authorizations only once per evaluateEligibilityGates call", async () => {
-      const client = makeClient();
+    it("scopes the attempts query to a rolling 24-hour window — attempts older than that never reach this count", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-24T12:00:00.000Z"));
+
+      try {
+        const client = makeClient({
+          application_plans: { data: { id: "plan-1" }, error: null },
+          application_attempts: { data: [], error: null },
+        });
+        await evaluateEligibilityGates(client, baseInput);
+
+        const rateLimitBuilder = findRateLimitAttemptsBuilder(client);
+        expect(rateLimitBuilder).toBeDefined();
+        expect(rateLimitBuilder!.gte).toHaveBeenCalledWith("created_at", "2026-08-23T12:00:00.000Z");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("excludes 'cancelled' from the statuses counted toward the limit", async () => {
+      const client = makeClient({
+        application_plans: { data: { id: "plan-1" }, error: null },
+        application_attempts: { data: [], error: null },
+      });
       await evaluateEligibilityGates(client, baseInput);
-      const automationAuthorizationCalls = (client.from as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
-        (call) => call[0] === "automation_authorizations",
-      );
-      expect(automationAuthorizationCalls).toHaveLength(1);
+
+      const rateLimitBuilder = findRateLimitAttemptsBuilder(client);
+      expect(rateLimitBuilder).toBeDefined();
+      const statusFilterCall = rateLimitBuilder!.in.mock.calls.find((call) => call[0] === "status");
+      expect(statusFilterCall?.[1]).toEqual(["pending", "leased", "succeeded", "failed", "action_required"]);
+      expect(statusFilterCall?.[1]).not.toContain("cancelled");
     });
+
+    it("is independent of automation_authorization — a paused candidate can still pass this gate", async () => {
+      const client = makeClient({ automation_authorizations: { data: { status: "paused" }, error: null } });
+      const result = await evaluateEligibilityGates(client, baseInput);
+      expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 0, limit: 25 } });
+      expect(result.gates.automation_authorization.status).toBe("fail");
+    });
+
+    // Database-error propagation from application_plans/application_attempts (now shared
+    // with evaluateIdempotency) is already covered by the "error and not-found propagation"
+    // describe block below — not duplicated here.
   });
 
   describe("source_policy", () => {

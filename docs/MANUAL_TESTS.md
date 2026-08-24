@@ -181,6 +181,35 @@ Status: no live environment needed to verify the gate-logic change itself — th
 2. Confirm `application_support` now passes for that source with `detail: { adapter: "<source_code>" }`
 3. Confirm `source_policies.automated_application_allowed` is also flipped to `true` for that source — `source_policy` and `application_support` are two independent gates and both must pass
 
+## MP-RC1 Rate & Abuse Controls — Verification
+
+Status: no live environment needed to verify the gate-logic change itself — `rate_and_abuse_controls` is a pure function of `application_plans`/`application_attempts` state with no external dependency. 8 net-new unit tests in `eligibilityGate.test.ts` (5 obsolete tests asserting the old automation_authorization-mirroring behavior were removed and replaced) plus a full-workspace `npm run typecheck && npm test` (561 tests, all passing) are the verification performed.
+
+**Scope note — this is an explicit policy reversal, not a bug fix.** `rate_and_abuse_controls` was previously a pure mirror of the `automation_authorization` gate, per a documented R7-M1 founder decision ("pause/stop-only, no numeric quota") that R7-M9 wired deliberately to avoid a second, independent rate-limiting mechanism. MP-RC1 supersedes that specific "no numeric quota" stance with a new founder decision: a real `MAX_DAILY_APPLICATIONS_PER_CANDIDATE = 25` cap over a rolling 24-hour window, now queried independently from `application_attempts`. `automation_authorization` remains its own unchanged, separate gate — pause/stop enforcement is unaffected; this is an *additional* independent check, not a replacement for it.
+
+### Rate limit rules (current)
+
+- Limit: **25 applications per rolling 24 hours**, per candidate, across every vacancy (not per-vacancy)
+- Counted statuses: `pending`, `leased`, `succeeded`, `failed`, `action_required` — every status except `cancelled` (an R7-M4 cancellation means automation was paused/stopped before submission ever reached a portal, so nothing was actually attempted)
+- Window: rolling — `now - 24h`, not a fixed calendar day
+- Fails at `count >= 25` (reaching the limit blocks the next attempt, not just exceeding it)
+
+### Pre-checks
+
+- [ ] At least one candidate has 25+ `application_attempts` rows (via their `application_plans`) with `created_at` inside the last 24 hours
+
+### Test steps
+
+1. Query `evaluateEligibilityGates` (or run the full worker batch) for a candidate with 0 prior attempts — confirm `rate_and_abuse_controls` returns `{ status: "pass", detail: { count: 0, limit: 25 } }`
+2. Confirm a candidate with 1–24 attempts in the last 24h still passes, with `count` reflecting the real number
+3. Confirm a candidate with 25+ attempts in the last 24h fails with `{ status: "fail", reasonCode: "DAILY_APPLICATION_LIMIT_EXCEEDED", detail: { count, limit: 25, windowHours: 24 } }`
+4. Confirm attempts older than 24 hours don't count — a candidate with 30 attempts from 2 days ago and 0 from today should pass
+
+### Known-expected behavior (NOT bugs)
+
+- A `paused`/`stopped` candidate can still *pass* `rate_and_abuse_controls` (it's independent now) — they're still blocked overall via the separate `automation_authorization` gate, so overall eligibility is unaffected
+- `cancelled` attempts never count toward the limit, even if there are many of them
+
 ## Future phases (placeholders)
 
 - MP-W2 (or similar): continuous daemon/polling mode + `SIGINT`/`SIGTERM` graceful shutdown, deferred out of MP-W1's scope

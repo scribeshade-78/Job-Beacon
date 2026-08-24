@@ -28,16 +28,18 @@ export interface GateResult {
  * but this gate will start passing on its own, with no further gate
  * changes, once a real per-source adapter is registered.
  * `rate_and_abuse_controls` was a permanent hard-block placeholder until
- * R7-M9: PRD §31 leaves candidate application-limit policy as an explicit
- * open founder decision, and the founder's R7-M1 answer was pause/stop-only
- * — no numeric quota, no source-side rate limiting. R7-M9 wires this gate
- * to that decision by deriving it from the `automation_authorization` gate
- * (PRD §16.1's "Consent and privacy" gate, backed by automation_authorizations)
- * rather than re-implementing or duplicating that authorization check —
- * pause/stop is the only candidate-side "rate and abuse control" this
- * product has, so this gate simply reflects that existing state under its
- * own PRD-traceable name instead of being a second, independent
- * authorization mechanism.
+ * R7-M9, which wired it as a pure mirror of the `automation_authorization`
+ * gate — PRD §31 had left candidate application-limit policy as an
+ * explicit open founder decision, and the founder's R7-M1 answer at the
+ * time was pause/stop-only, no numeric quota. MP-RC1 supersedes that
+ * specific "no numeric quota" stance with an explicit founder decision to
+ * add one: `evaluateRateAndAbuseControls` now independently enforces
+ * MAX_DAILY_APPLICATIONS_PER_CANDIDATE over a rolling window, querying
+ * application_attempts directly rather than deriving from
+ * automation_authorization. `automation_authorization` remains its own,
+ * separate gate below (pause/stop enforcement is unaffected by this
+ * change) — this gate is now a second, genuinely independent check
+ * alongside it, not instead of it.
  */
 export interface EligibilityGates {
   source_policy: GateResult;
@@ -103,6 +105,7 @@ export async function evaluateEligibilityGates(
     idempotencyGate,
     roleMatchGate,
     verifiedFactsGate,
+    rateAndAbuseControlsGate,
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
@@ -110,6 +113,7 @@ export async function evaluateEligibilityGates(
     evaluateIdempotency(client, candidateId, vacancyId),
     evaluateRoleMatch(client, candidateId, vacancy.raw_title),
     evaluateVerifiedFacts(client, candidateId),
+    evaluateRateAndAbuseControls(client, candidateId),
   ]);
 
   const gates: EligibilityGates = {
@@ -121,9 +125,7 @@ export async function evaluateEligibilityGates(
     role_match: roleMatchGate,
     verified_facts: verifiedFactsGate,
     application_support: evaluateApplicationSupport(vacancy, candidateId),
-    // R7-M9: derived from automationAuthorizationGate, not a second query
-    // or a second authorization check — see this function's doc comment.
-    rate_and_abuse_controls: deriveRateAndAbuseControls(automationAuthorizationGate),
+    rate_and_abuse_controls: rateAndAbuseControlsGate,
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");
@@ -232,24 +234,73 @@ async function evaluateAutomationAuthorization(client: SupabaseClient, candidate
   };
 }
 
+/** MP-RC1: founder-set daily submission cap and its rolling window — see EligibilityGates' doc comment for why this supersedes R7-M1's "no numeric quota" stance. */
+const MAX_DAILY_APPLICATIONS_PER_CANDIDATE = 25;
+const RATE_LIMIT_WINDOW_HOURS = 24;
+
 /**
- * R7-M9 (PRD §16.1 Gate 7, §31): pause/stop is the only candidate-side
- * "rate and abuse control" this product implements, and that state already
- * lives in automation_authorizations — the same fact automationAuthorizationGate
- * already evaluated. Mirroring its result (same reasonCode and detail)
- * rather than re-querying or re-deriving it keeps this a separately-named,
- * PRD-traceable gate without creating a second authorization mechanism that
- * could drift out of sync with the first.
+ * 'cancelled' (R7-M4: the candidate paused/stopped automation before
+ * submission ever reached a portal — nothing was actually attempted) is
+ * the only status excluded from the velocity count. Every other status —
+ * including 'failed' — still represents a real attempt that was made,
+ * which is what a rate/abuse control is meant to bound.
  */
-function deriveRateAndAbuseControls(automationAuthorizationGate: GateResult): GateResult {
-  if (automationAuthorizationGate.status === "pass") {
-    return { status: "pass" };
+const ATTEMPT_STATUSES_COUNTED_TOWARD_RATE_LIMIT = ["pending", "leased", "succeeded", "failed", "action_required"];
+
+/**
+ * MP-RC1 (PRD §16.1 Gate 7, §31): a genuinely independent numeric velocity
+ * check, no longer derived from automation_authorization (see
+ * EligibilityGates' doc comment for the R7-M1 -> MP-RC1 history).
+ * application_attempts carries no candidate_id column of its own (only
+ * reachable via application_plans.candidate_id — see that table's
+ * migration), so this is a two-hop query: every plan id this candidate
+ * has, then every counted-status attempt on those plans created within
+ * the rolling window. Same "plan -> attempts" shape as evaluateIdempotency,
+ * widened from one plan to all of this candidate's plans. The status and
+ * time-window filters run server-side (not fetched-then-filtered in JS)
+ * so this stays a single bounded query regardless of the candidate's total
+ * history size.
+ */
+async function evaluateRateAndAbuseControls(client: SupabaseClient, candidateId: string): Promise<GateResult> {
+  const { data: planRows, error: planError } = await client
+    .from("application_plans")
+    .select("id")
+    .eq("candidate_id", candidateId);
+
+  if (planError) {
+    throw planError;
   }
-  return {
-    status: "fail",
-    reasonCode: "AUTOMATION_NOT_AUTHORIZED",
-    detail: automationAuthorizationGate.detail,
-  };
+
+  const planIds = ((planRows ?? []) as Array<{ id: string }>).map((row) => row.id);
+
+  if (planIds.length === 0) {
+    return { status: "pass", detail: { count: 0, limit: MAX_DAILY_APPLICATIONS_PER_CANDIDATE } };
+  }
+
+  const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+
+  const { data: attemptRows, error: attemptError } = await client
+    .from("application_attempts")
+    .select("id")
+    .in("application_plan_id", planIds)
+    .in("status", ATTEMPT_STATUSES_COUNTED_TOWARD_RATE_LIMIT)
+    .gte("created_at", windowStart);
+
+  if (attemptError) {
+    throw attemptError;
+  }
+
+  const count = (attemptRows ?? []).length;
+
+  if (count >= MAX_DAILY_APPLICATIONS_PER_CANDIDATE) {
+    return {
+      status: "fail",
+      reasonCode: "DAILY_APPLICATION_LIMIT_EXCEEDED",
+      detail: { count, limit: MAX_DAILY_APPLICATIONS_PER_CANDIDATE, windowHours: RATE_LIMIT_WINDOW_HOURS },
+    };
+  }
+
+  return { status: "pass", detail: { count, limit: MAX_DAILY_APPLICATIONS_PER_CANDIDATE } };
 }
 
 /**
