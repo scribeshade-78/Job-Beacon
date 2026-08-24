@@ -80,6 +80,32 @@ This is an OpenAI account billing/quota exhaustion, not a code or database bug �
 
 ---
 
+## MP-R1 Target Roles Manual Verification (DEFERRED — no live environment in this session)
+
+Status: not yet run against a live environment — same blocker as the MP-F1/MP-F2 smoke test above (no local Supabase/browser access in this session). 25 new unit tests (`roleTaxonomy.test.ts`, `roleSuggestions.test.ts`, `candidateSelectedRoles.test.ts`) and a full-workspace `npm run typecheck && npm test` (543 tests, all passing) are the only verification performed so far.
+
+### Pre-checks
+
+- [ ] Candidate has at least one resume with confirmed `current_title` and/or `skill` facts (MP-F2 confirmation flow — suggestions require confirmed facts, per-fact `pending`/`rejected` rows are ignored)
+
+### Test steps
+
+1. Navigate to Target Roles (`/#/target-roles`)
+2. Confirm the page loads with "Selected roles", "Search roles", and suggestion sections (only tiers — Primary/Strong/Related — with matches render; empty tiers are omitted, not shown empty)
+3. Search for a role (e.g. "engineer") — confirm matching taxonomy entries appear with an Add button
+4. Click Add on a search result — confirm it moves to "Selected roles" and drops out of the search results and suggestion lists
+5. Click Add on a suggested role — confirm the same move-on-select behavior
+6. Click Remove on a selected role — confirm it disappears from "Selected roles" and reappears in search/suggestions if still eligible
+7. Reload the page — confirm selected roles persist (`candidate_selected_roles` is the source of truth, not local component state)
+8. Re-add a role already selected (e.g. two quick clicks) — confirm no duplicate row and no error surfaces (23505 idempotency, same pattern as exclusions)
+
+### Known-expected behavior (NOT bugs)
+
+- No suggestions render until the candidate has at least one confirmed `current_title` or `skill` fact
+- A candidate with confirmed skills but no confirmed title can still get Related-tier suggestions (skill-only matching — see `roleSuggestions.ts` comment)
+
+---
+
 ## Regression Tests (after every mini-phase)
 
 ### Auth
@@ -95,6 +121,7 @@ This is an OpenAI account billing/quota exhaustion, not a code or database bug �
 ### Panels (data phases)
 
 - [ ] Resumes upload/view/delete
+- [ ] Target roles search/select/remove persists (MP-R1)
 - [ ] Automation authorize/pause/resume/stop
 - [ ] Exclusions persist
 - [ ] MFA section renders
@@ -109,5 +136,4 @@ This is an OpenAI account billing/quota exhaustion, not a code or database bug �
 
 ## Future phases (placeholders)
 
-- MP-R1: Role selection test
 - MP-W1: Worker entrypoint (idempotency critical — never submit same application twice)

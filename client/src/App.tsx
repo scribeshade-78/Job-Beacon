@@ -130,7 +130,7 @@ export function App() {
               <ResumesPage candidateId={auth.user?.id} ready={ready} />
             </Route>
             <Route path="/target-roles">
-              <TargetRolesPage />
+              <TargetRolesPage candidateId={auth.user?.id} ready={ready} />
             </Route>
             <Route path="/opportunities">
               <OpportunitiesPage />

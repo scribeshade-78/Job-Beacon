@@ -1,6 +1,6 @@
 # JobBeacon — Current Repository State
 
-Snapshot as of the MP-F2 mini-phase (2026-08-24), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
+Snapshot as of the MP-R1 mini-phase (2026-08-24), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
 
 ## Stack (verified)
 
@@ -21,9 +21,9 @@ Everything else (applications, resumes, mailbox, automation authorization, exclu
 
 ## Client screens (10 routed pages + shell, MP-UI2)
 
-Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resumes `/resumes`, Target Roles `/target-roles`, Opportunities `/opportunities`, Applications `/applications`, Responses `/responses`, Action Required `/action-required`, Company Intelligence `/companies`, Security `/security`. Same 10 panels as MP-UI1 (ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel) now render inside these pages — Responses hosts Mailbox+Messages, Company Intelligence hosts Companies+SalaryBenchmarks, Overview hosts a real AutomationPanel plus an unchanged ActionRequiredPanel widget alongside honest (non-fabricated) empty-state stats and a recent-applications placeholder. Target Roles and Opportunities are honest empty-state pages — no panel exists for either yet. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
+Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resumes `/resumes`, Target Roles `/target-roles`, Opportunities `/opportunities`, Applications `/applications`, Responses `/responses`, Action Required `/action-required`, Company Intelligence `/companies`, Security `/security`. Same 10 panels as MP-UI1 (ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel) plus MP-R1's new `TargetRolesPanel` now render inside these pages — Responses hosts Mailbox+Messages, Company Intelligence hosts Companies+SalaryBenchmarks, Overview hosts a real AutomationPanel plus an unchanged ActionRequiredPanel widget alongside honest (non-fabricated) empty-state stats and a recent-applications placeholder. Opportunities remains an honest empty-state page — no panel exists for it yet. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
 
-**No Opportunities/job-browse screen and no role-selection UI exist anywhere in the client** (both have labeled empty-state pages instead of being entirely absent from navigation). Resume fact-confirmation UI shipped in MP-F2 (see below).
+**No Opportunities/job-browse screen exists anywhere in the client** (an honest empty-state page instead of being entirely absent from navigation). Resume fact-confirmation UI shipped in MP-F2, role suggestion/selection UI shipped in MP-R1 (see below).
 
 ## PRD journey steps — backend and UI status
 
@@ -32,7 +32,7 @@ Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resume
 | Resume upload + private storage | Complete | Complete (ResumesPanel) |
 | Resume extraction (MP-F1) | Complete — `POST /api/resumes/:id/extract`: ownership check, server-side download, `pdf-parse`/`mammoth` text extraction, OpenAI structured-output extraction (v0 vocabulary: `full_name`/`email`/`phone`/`location`/`current_title`/`years_of_experience`/`most_recent_employer` scalar, `skill`/`education`/`experience` repeatable), schema-validated before any insert, `extraction_model`/`extraction_prompt_version` recorded on every row | Complete — "Extract facts" button + read-only facts preview in ResumesPanel |
 | Fact confirmation (MP-F2) | Complete — candidate-scoped RLS `UPDATE` on `fact_confirmations` (confirm/correct/reject/reopen), pending rows created at extraction time (service-role) | Complete — Confirm/Correct/Reject/Un-confirm per fact + bulk "Confirm all" in ResumesPanel |
-| Role suggestions + selection | **Not implemented** — `candidate_selected_roles` table exists (schema+RLS only); zero writers anywhere in the repo | None |
+| Role suggestions + selection (MP-R1) | Complete — client-only, no server route (`candidate_selected_roles` direct-RLS writes, same shape as exclusions/automation) | Complete — search + tiered suggestions + selected-roles list in `TargetRolesPanel` |
 | Automation authorization | Complete, enforced at 3 points (claim-time, submission-time, resolve-time) | Complete (AutomationPanel) |
 | Evidence / action-required views | Action-required: read surface exists (ActionRequiredPanel, unresolved events only). Evidence: RLS-readable, **no viewer exists** | Partial |
 | Application planning (`planApplication`) / worker (`runOneApplicationAttempt`) | Built and unit-tested | **No UI trigger, no route, no cron/worker entrypoint anywhere** — unreachable by a real candidate today |
@@ -78,6 +78,20 @@ Closes the gap MP-F1 left open: `extracted_facts` rows existed but nothing ever 
 **Known limitation — re-extraction creates duplicate pending facts.** Clicking "Extract facts" again on a resume that already has confirmed facts inserts a *new* set of `extracted_facts` rows (and new pending `fact_confirmations` for them); it does not touch or supersede the previously confirmed rows. Both the old confirmed facts and the new pending ones then coexist and both are visible/usable by consumers (`resumeGenerator.ts` includes every *confirmed* fact regardless of which extraction it came from) — there is no dedup, no "supersedes" link, and no UI grouping by extraction run. Reconciling duplicate/stale facts across re-extractions is deferred to a later phase.
 
 **No live OpenAI or Supabase-RLS smoke test has been run for MP-F2** — see `docs/MANUAL_TESTS.md`'s combined MP-F1+MP-F2 smoke test (still the blocking first manual step; unit tests (518 passing) and TypeScript are the only verification performed so far). The `fact_confirmations_rls.test.sql` pgTAP suite was last run and passing in the prior MP-F2 session (per that session's record) — not re-run in this session since no local Supabase/Docker instance was available.
+
+## Role suggestions + selection (MP-R1)
+
+Closes the gap MP-F2 left open on the PRD-journey table: `candidate_selected_roles` (schema+RLS since `20260819090000`) had zero writers anywhere in the repo. No normalized role taxonomy existed in this repository before this phase — three separate migrations (`automation_authorizations`, `candidate_selected_roles`, and `eligibilityGate.ts`'s `role_match` gate comment) independently documented the gap as deliberately deferred; `role_name` is still plain text with no CHECK constraint, matched against `vacancies.raw_title` by case-insensitive substring in `eligibilityGate.ts` — unchanged by this phase.
+
+**Taxonomy** (`client/src/lib/roleTaxonomy.ts`): a static, curated list of 30 entries across 8 categories (Engineering, Data, Product, Design, Marketing, Sales, Operations, Customer/Support), each with `id`/`title`/`category`/`aliases`/`skills`. This is a client-side curation layer only, not a DB-enforced enum — selecting an entry writes its `title` as `candidate_selected_roles.role_name`, so a candidate can still hand-enter/correct any free-text role name that already exists via direct table access (unchanged, matches the migration's stated design). `searchRoles(query)` does case-insensitive substring matching against title and aliases.
+
+**Suggestion engine** (`client/src/lib/roleSuggestions.ts`): `suggestRoles(facts)` filters strictly to `confirmationStatus === "confirmed"` facts (MP-F2's gate — pending/rejected facts are not a reliable signal) and resolves each fact's effective value as `correctedValue ?? factValue`, same rule `resumeGenerator.ts` uses. Primary tier: confirmed `current_title` substring-matches a taxonomy title/alias. Strong tier: same category as a Primary match with ≥2 shared confirmed `skill` facts. Related tier: same category with 1 shared skill, or a different category with ≥2 shared skills (this branch also fires with zero Primary matches — a candidate with confirmed skills but no confirmed title still gets skill-only Related suggestions). Stretch tier is deferred in code comments — no approved signal source (years-of-experience heuristic vs. per-entry seniority tag) yet.
+
+**Data access** (`client/src/lib/candidateSelectedRoles.ts`): `listSelectedRoles`/`selectRole`/`removeRole`, direct-`Supabase`-client writes scoped by `auth.uid() = candidate_id` RLS, same shape and 23505-idempotent-insert pattern as `exclusions.ts` — no Express route needed.
+
+**UI** (`client/src/panels/TargetRolesPanel.tsx`, mounted via `TargetRolesPage`/`App.tsx` now passing `candidateId`/`ready` like every other data-backed page): selected-roles list with Remove, a search box over the taxonomy with Add, and suggestion sections grouped by tier (only tiers with matches render — an empty tier is omitted, not shown empty). Already-selected roles are filtered out of both search results and suggestions.
+
+**No live Supabase-RLS or browser smoke test has been run for MP-R1** — see `docs/MANUAL_TESTS.md`'s new MP-R1 section (same environment blocker as the still-outstanding MP-F1+MP-F2 smoke test). 25 new unit tests plus a full-workspace `npm run typecheck && npm test` (543 tests, all passing) are the only verification performed so far.
 
 ## UI design system (MP-UI1 + MP-UI2)
 
