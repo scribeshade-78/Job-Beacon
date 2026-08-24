@@ -1,10 +1,17 @@
 import { CompaniesPanel } from "../panels/CompaniesPanel";
+import { CompanyReviewsPanel } from "../panels/CompanyReviewsPanel";
 import { SalaryBenchmarksPanel } from "../panels/SalaryBenchmarksPanel";
 
-export function CompanyIntelligencePage() {
+interface CompanyIntelligencePageProps {
+  candidateId: string | undefined;
+  ready: boolean;
+}
+
+export function CompanyIntelligencePage({ candidateId, ready }: CompanyIntelligencePageProps) {
   return (
     <div className="space-y-6">
       <CompaniesPanel />
+      {ready && candidateId && <CompanyReviewsPanel candidateId={candidateId} />}
       <SalaryBenchmarksPanel />
     </div>
   );

@@ -90,7 +90,7 @@ function SignedInRoutes({
           <ActionRequiredPage ready={ready} />
         </Route>
         <Route path="/companies">
-          <CompanyIntelligencePage />
+          <CompanyIntelligencePage candidateId={candidateId} ready={ready} />
         </Route>
         <Route path="/security">
           <SecurityPage />
