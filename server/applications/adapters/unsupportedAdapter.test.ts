@@ -17,4 +17,17 @@ describe("unsupportedAdapter", () => {
       unsupportedAdapter.submit(client, { applicationAttemptId: "attempt-42", applicationPlanId: "plan-1" }),
     ).rejects.toThrow(/attempt-42/);
   });
+
+  it("reports isAutomatedSubmissionSupported: false (MP-A1 capability model)", () => {
+    expect(unsupportedAdapter.isAutomatedSubmissionSupported).toBe(false);
+  });
+
+  it("validateSupport always reports unsupported with the NO_ADAPTER_REGISTERED_FOR_SOURCE reason code, regardless of context", () => {
+    const result = unsupportedAdapter.validateSupport({
+      vacancy: { sourceCode: "greenhouse", trustStatus: "VERIFIED", rawTitle: "Backend Engineer" },
+      candidateId: "candidate-1",
+    });
+
+    expect(result).toEqual({ supported: false, reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" });
+  });
 });

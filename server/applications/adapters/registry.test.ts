@@ -15,4 +15,15 @@ describe("resolveApplicationAdapter", () => {
     const second = resolveApplicationAdapter("greenhouse");
     expect(first).toBe(second);
   });
+
+  it("the resolved fallback reports isAutomatedSubmissionSupported: false for any unregistered source_code (MP-A1)", () => {
+    const adapter = resolveApplicationAdapter("greenhouse");
+    expect(adapter.isAutomatedSubmissionSupported).toBe(false);
+    expect(
+      adapter.validateSupport({
+        vacancy: { sourceCode: "greenhouse", trustStatus: "VERIFIED", rawTitle: "Backend Engineer" },
+        candidateId: "candidate-1",
+      }),
+    ).toEqual({ supported: false, reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" });
+  });
 });

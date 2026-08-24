@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveApplicationAdapter } from "./adapters/registry.js";
-import { unsupportedAdapter } from "./adapters/unsupportedAdapter.js";
 
 export type GateStatus = "pass" | "fail";
 
@@ -121,7 +120,7 @@ export async function evaluateEligibilityGates(
     idempotency: idempotencyGate,
     role_match: roleMatchGate,
     verified_facts: verifiedFactsGate,
-    application_support: evaluateApplicationSupport(vacancy.source_code),
+    application_support: evaluateApplicationSupport(vacancy, candidateId),
     // R7-M9: derived from automationAuthorizationGate, not a second query
     // or a second authorization check — see this function's doc comment.
     rate_and_abuse_controls: deriveRateAndAbuseControls(automationAuthorizationGate),
@@ -134,25 +133,41 @@ export async function evaluateEligibilityGates(
 
 /**
  * PRD §16.1's "application support" gate ("Portal fields and attachments
- * are supported") / §23.2's runtime capability check, R7-M2: an honest
- * proxy for that check is whether resolveApplicationAdapter has a real
- * adapter for this source_code at all — no vacancy-side portal-field/
+ * are supported") / §23.2's runtime capability check, R7-M2, wired to the
+ * adapter's own capability model by MP-A1: no vacancy-side portal-field/
  * attachment taxonomy exists in this repository (the same "nothing on the
  * other side to compare against yet" gap role_match and verified_facts
  * already document), so this cannot yet check *which* fields a source
- * supports, only *whether* it's supported at all. Identity-compares
- * against the unsupportedAdapter singleton rather than re-deriving
- * "unsupported" from source_code, so this gate and the registry can never
- * drift out of sync with each other.
+ * supports, only *whether* it's supported at all. Resolves the adapter for
+ * this vacancy's source_code and asks it directly via validateSupport() —
+ * the adapter is the single source of truth for its own capability, so
+ * this gate no longer identity-compares against the unsupportedAdapter
+ * singleton (MP-A1 replaces that ad hoc check with the real interface
+ * method it existed ahead of). Reason code defaults to
+ * NO_ADAPTER_REGISTERED_FOR_SOURCE — unchanged from R7-M2 — when an
+ * adapter doesn't supply its own; unsupportedAdapter always supplies that
+ * exact code today, so behavior is identical to before this change for
+ * every real source_code, which still has no registered adapter.
  */
-function evaluateApplicationSupport(sourceCode: string): GateResult {
-  const adapter = resolveApplicationAdapter(sourceCode);
+function evaluateApplicationSupport(
+  vacancy: { source_code: string; trust_status: string | null; raw_title: string },
+  candidateId: string,
+): GateResult {
+  const adapter = resolveApplicationAdapter(vacancy.source_code);
+  const validation = adapter.validateSupport({
+    vacancy: { sourceCode: vacancy.source_code, trustStatus: vacancy.trust_status, rawTitle: vacancy.raw_title },
+    candidateId,
+  });
 
-  if (adapter === unsupportedAdapter) {
-    return { status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE", detail: { sourceCode } };
+  if (!validation.supported) {
+    return {
+      status: "fail",
+      reasonCode: validation.reasonCode ?? "NO_ADAPTER_REGISTERED_FOR_SOURCE",
+      detail: { sourceCode: vacancy.source_code },
+    };
   }
 
-  return { status: "pass" };
+  return { status: "pass", detail: { adapter: adapter.sourceCode } };
 }
 
 function evaluateVacancyTrust(trustStatus: string | null): GateResult {

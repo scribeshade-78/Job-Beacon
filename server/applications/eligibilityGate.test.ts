@@ -1,4 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+
+// Spies on the real resolveApplicationAdapter (default behavior unchanged
+// for every existing test below) so exactly one test can inject a fake
+// "supported" adapter to exercise the application_support gate's pass
+// path — no real per-source adapter exists yet to test that path against.
+vi.mock("./adapters/registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./adapters/registry.js")>();
+  return { ...actual, resolveApplicationAdapter: vi.fn(actual.resolveApplicationAdapter) };
+});
+
+import { resolveApplicationAdapter } from "./adapters/registry.js";
+import type { ApplicationAdapter } from "./adapters/types.js";
 import { evaluateEligibilityGates } from "./eligibilityGate.js";
 
 type TableResult = { data: unknown; error: unknown };
@@ -184,6 +196,62 @@ describe("evaluateEligibilityGates", () => {
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.application_support.status).toBe("fail");
       expect(result.gates.application_support.reasonCode).toBe("NO_ADAPTER_REGISTERED_FOR_SOURCE");
+    });
+
+    it("passes when the resolved adapter's validateSupport reports itself supported (MP-A1)", async () => {
+      const fakeSupportedAdapter: ApplicationAdapter = {
+        sourceCode: "greenhouse",
+        displayName: "Greenhouse (test double)",
+        isAutomatedSubmissionSupported: true,
+        validateSupport: () => ({ supported: true }),
+        submit: vi.fn(),
+      };
+      vi.mocked(resolveApplicationAdapter).mockReturnValueOnce(fakeSupportedAdapter);
+
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+
+      expect(result.gates.application_support).toEqual({ status: "pass", detail: { adapter: "greenhouse" } });
+    });
+
+    it("uses the adapter's own reasonCode when validateSupport reports unsupported with a specific one", async () => {
+      const fakeAdapter: ApplicationAdapter = {
+        sourceCode: "greenhouse",
+        displayName: "Greenhouse (test double)",
+        isAutomatedSubmissionSupported: false,
+        validateSupport: () => ({ supported: false, reasonCode: "MISSING_EMPLOYER_CREDENTIALS" }),
+        submit: vi.fn(),
+      };
+      vi.mocked(resolveApplicationAdapter).mockReturnValueOnce(fakeAdapter);
+
+      const client = makeClient();
+      const result = await evaluateEligibilityGates(client, baseInput);
+
+      expect(result.gates.application_support).toEqual({
+        status: "fail",
+        reasonCode: "MISSING_EMPLOYER_CREDENTIALS",
+        detail: { sourceCode: "greenhouse" },
+      });
+    });
+
+    it("passes candidateId and the vacancy fields through to validateSupport", async () => {
+      const validateSupport = vi.fn().mockReturnValue({ supported: true });
+      const fakeAdapter: ApplicationAdapter = {
+        sourceCode: "greenhouse",
+        displayName: "Greenhouse (test double)",
+        isAutomatedSubmissionSupported: true,
+        validateSupport,
+        submit: vi.fn(),
+      };
+      vi.mocked(resolveApplicationAdapter).mockReturnValueOnce(fakeAdapter);
+
+      const client = makeClient();
+      await evaluateEligibilityGates(client, baseInput);
+
+      expect(validateSupport).toHaveBeenCalledWith({
+        vacancy: { sourceCode: "greenhouse", trustStatus: "VERIFIED", rawTitle: "Backend Engineer" },
+        candidateId: "candidate-1",
+      });
     });
   });
 

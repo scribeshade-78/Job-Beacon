@@ -160,10 +160,28 @@ Status: not yet run against a live environment — same blocker as MP-F1/MP-F2/M
 
 ### Known-expected behavior (NOT bugs)
 
-- `plansEligible` will be 0 in this environment today — `application_support` and `rate_and_abuse_controls` gates are documented permanent-until-a-real-adapter placeholders (see `eligibilityGate.ts`), so no real candidate can be eligible yet regardless of this phase
+- `plansEligible` will be 0 in this environment today — `rate_and_abuse_controls` is a documented permanent placeholder, and `application_support` (MP-A1, see below) is a real capability check that simply has no adapter registered as supported yet — either way, no real candidate can be eligible yet regardless of this phase
 - The batch plans every active-candidate x verified-vacancy pair (no pre-filter) — `role_match` and the other gates decide eligibility inside `planApplication`, not a separate query filter in the runner
 - A single candidate/vacancy pair failing to plan (e.g. a bad row) is logged to console and recorded in `planningFailures`, not a batch-ending crash
+
+## MP-A1 Application Adapter Capability Model — Verification
+
+Status: no live environment needed to verify the gate-logic change itself — the `application_support` gate is a pure function of `vacancies`/adapter state with no external dependency, and its behavior is unchanged for every real source today (still fails with `NO_ADAPTER_REGISTERED_FOR_SOURCE`). 8 new unit tests (2 in `unsupportedAdapter.test.ts`, 1 in `registry.test.ts`, 3 in `eligibilityGate.test.ts` covering the pass/custom-reason-code/context-forwarding paths via a mocked adapter double, plus the existing MP-W1/prior suites re-verified unchanged) and a full-workspace `npm run typecheck && npm test` (558 tests, all passing) are the verification performed.
+
+**Scope note**: this phase extends the existing `ApplicationAdapter` interface (from R7-M2) with `sourceCode`/`displayName`/`isAutomatedSubmissionSupported`/`validateSupport()` — it does **not** register any source as actually supported. `resolveApplicationAdapter` still resolves every real `source_code` (`greenhouse`, `lever`, `adzuna`, `usajobs`, anything else) to `unsupportedAdapter`, matching `source_policies.automated_application_allowed = false` for every row. The `application_support` gate's reason code (`NO_ADAPTER_REGISTERED_FOR_SOURCE`) is unchanged from R7-M2 — confirmed byte-identical behavior for every existing test.
+
+### Regression check (no live environment needed)
+
+- [ ] `npm test -- server/applications` — confirm all adapter/gate/worker/runner suites still pass
+- [ ] Confirm `result.gates.application_support` for a real vacancy (any `source_code`) still returns `{ status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE", detail: { sourceCode } }` — no observable behavior change for any real candidate
+
+### When a real adapter is registered (future phase)
+
+1. Add a `case "<source_code>":` to `server/applications/adapters/registry.ts` returning an object satisfying `ApplicationAdapter` with `isAutomatedSubmissionSupported: true`
+2. Confirm `application_support` now passes for that source with `detail: { adapter: "<source_code>" }`
+3. Confirm `source_policies.automated_application_allowed` is also flipped to `true` for that source — `source_policy` and `application_support` are two independent gates and both must pass
 
 ## Future phases (placeholders)
 
 - MP-W2 (or similar): continuous daemon/polling mode + `SIGINT`/`SIGTERM` graceful shutdown, deferred out of MP-W1's scope
+- First real per-source submission adapter (e.g. Greenhouse), once an authorized employer relationship and credentials exist — MP-A1 built the capability model this depends on, but registers none

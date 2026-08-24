@@ -24,8 +24,22 @@ import type { ApplicationAdapter } from "./types.js";
  * true for every vacancy from that source, not a resumable one-off) —
  * conflating the two is a UX decision about the Action-Required queue this
  * mini-phase doesn't make unilaterally.
+ *
+ * MP-A1: sourceCode/displayName here describe this shared fallback object
+ * itself, not any one real source_code (it's returned for every
+ * unregistered source_code, per registry.ts's default case) —
+ * isAutomatedSubmissionSupported is unconditionally false and
+ * validateSupport() always reports unsupported, regardless of the vacancy/
+ * candidate context passed in, since this object represents "no real
+ * adapter exists," not a real channel with its own eligibility nuance.
  */
 export const unsupportedAdapter: ApplicationAdapter = {
+  sourceCode: "unsupported",
+  displayName: "Unsupported source",
+  isAutomatedSubmissionSupported: false,
+  validateSupport() {
+    return { supported: false, reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" };
+  },
   async submit(_client, context) {
     throw new Error(
       `No application adapter is registered for this vacancy's source (application attempt ${context.applicationAttemptId}) — PRD §16.2 channels are not implemented for any source yet.`,
