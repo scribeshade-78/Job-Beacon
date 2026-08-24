@@ -78,11 +78,29 @@ This is an OpenAI account billing/quota exhaustion, not a code or database bug �
 
 **Net result of this session's 3 runs:** the entire extraction pipeline is now verified working end-to-end up to and including the OpenAI API call itself (auth, resume ownership check, storage download, PDF text extraction) — the two real bugs found (`SUPABASE_SERVICE_ROLE_KEY`/`OPENAI_API_KEY` misconfigured in `.env`, and the missing `resume_documents` service-role grant) are both fixed. The only remaining blocker to a full pass is OpenAI account credits, which is an external, non-code dependency.
 
+### API+DB-level run 4 — 2026-08-24 21:20 IST (MP-F2 + MP-R1 PASS; MP-F1's live OpenAI call still not exercised — quota confirmed still exhausted, founder instruction to skip it this run)
+
+Ran with a fresh local stack (`supabase start`, `node --env-file-if-exists=.env --import=tsx server/index.ts` without `--watch`, same stable-process pattern as run 3). Founder confirmed at the start of this run that the OpenAI account quota from run 3 is still exhausted and instructed skipping the live `POST /api/resumes/:id/extract` call entirely rather than spending another attempt on a known-429. A disposable script (`node --import=tsx`, deleted after the run — never committed) exercised every other step against the real local Postgres/Auth instance using `@supabase/supabase-js`, with two synthetic candidates (`smoketest.a.*@jobbeacon.test`, `smoketest.b.*@jobbeacon.test`) for the RLS boundary check:
+
+- [x] Candidate auth + `candidate_profiles` row (both candidates, each via their own authenticated RLS client) — pass
+- [x] `resume_documents` row insert (candidate A, own RLS) — pass
+- [x] MP-F1 rows seeded directly (service-role) in the exact shape `extractFacts.ts`'s `toFactRows`/insert produce (`current_title` + 3 `skill` facts, `extraction_model`/`extraction_prompt_version` populated, matching `fact_confirmations` pending rows created) — **live OpenAI call itself still not exercised this run**, so extraction quality/latency/malformed-output handling remain unverified since run 3
+- [x] MP-F2 confirm (`current_title` → `confirmed`) — pass
+- [x] MP-F2 correct + confirm (`skill` "React" → `corrected_value: "React.js"`, `confirmed`) — pass
+- [x] MP-F2 confirm remaining facts as-is — pass
+- [x] RLS: candidate B `UPDATE` on candidate A's `fact_confirmations` row — 0 rows affected, no error (correctly blocked by `fact_confirmations_update_own`'s `USING`/`WITH CHECK`, not a Postgres exception) — pass
+- [x] RLS: candidate B `SELECT` on candidate A's `fact_confirmations` row — 0 rows returned (correctly blocked by `fact_confirmations_select_own`) — pass
+- [x] MP-R1 integration: fetched candidate A's facts joined with `fact_confirmations` (own RLS), shaped as the client's `ExtractedFact[]` (`confirmationStatus`/`correctedValue` from the confirmation row), and ran the real `suggestRoles()` from `client/src/lib/roleSuggestions.ts` directly against them — returned `{ software-engineer: primary, frontend-engineer: related, fullstack-engineer: related }`, consistent with a confirmed `current_title` of "Software Engineer" plus 3 confirmed skills (TypeScript/React.js/PostgreSQL) — pass
+
+**Bug found and fixed this run:** the script's own cleanup step (`admin.auth.admin.deleteUser`) silently left candidate A's user and all 4 seeded `extracted_facts` rows behind — `fact_confirmations.extracted_fact_id references public.extracted_facts (id)` has no `on delete cascade` (unlike `extracted_facts.candidate_id`, which does cascade from `candidate_profiles`), so deleting the auth user could not cascade through the still-referenced `extracted_facts` rows and the delete call returned an error the script didn't check. Not a schema bug — `fact_confirmations` is deliberately immutable-audit-trail-shaped elsewhere in this repo (see that migration's own comment on why deletion isn't a candidate-facing capability) — just a test-script gap, since a real candidate never deletes their own `extracted_facts` this way. Verified via `listUsers()`/a leftover-row query, then manually deleted `fact_confirmations` → `extracted_facts` → the auth user in that order; confirmed zero residue afterward. Test script and its cleanup/verify follow-ups were disposable, never committed (`git status` clean before and after this run).
+
+**Still not verified:** live OpenAI extraction quality, latency, malformed-output handling, and the 6th-click/15-min rate limit (all require the actual `/extract` call, blocked on the same external quota issue as run 3) — a real browser pass (UI badges, F12 console) is also still outstanding, same gap as every prior run.
+
 ---
 
-## MP-R1 Target Roles Manual Verification (DEFERRED — no live environment in this session)
+## MP-R1 Target Roles Manual Verification (browser UI pass still DEFERRED)
 
-Status: not yet run against a live environment — same blocker as the MP-F1/MP-F2 smoke test above (no local Supabase/browser access in this session). 25 new unit tests (`roleTaxonomy.test.ts`, `roleSuggestions.test.ts`, `candidateSelectedRoles.test.ts`) and a full-workspace `npm run typecheck && npm test` (543 tests, all passing) are the only verification performed so far.
+Status: `suggestRoles()` itself is now verified against real confirmed facts from a live local Postgres instance — see API+DB-level run 4 above (candidate with a confirmed `current_title` + 3 confirmed skills correctly produced primary/related tiers). The browser UI pass below (search/select/remove/persist through `TargetRolesPanel.tsx`) is still not run. 25 unit tests (`roleTaxonomy.test.ts`, `roleSuggestions.test.ts`, `candidateSelectedRoles.test.ts`) and a full-workspace `npm run typecheck && npm test` (543 tests, all passing) remain the verification for the panel/persistence behavior specifically.
 
 ### Pre-checks
 
