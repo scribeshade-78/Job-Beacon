@@ -9,7 +9,7 @@ import type OpenAI from "openai";
  * repeatable (0..N rows each) since extracted_facts has no unique
  * constraint on (candidate_id, fact_type).
  */
-export const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
+export const DEFAULT_OPENAI_MODEL = "openai/gpt-4o-mini";
 export const EXTRACTION_PROMPT_VERSION = "resume-extraction-v1";
 
 export interface RawEducationEntry {
@@ -219,7 +219,7 @@ export function isValidRawExtractionResult(value: unknown): value is RawExtracti
 export async function runResumeFactExtraction(
   openaiClient: Pick<OpenAI, "chat">,
   resumeText: string,
-  model: string = process.env.OPENAI_MODEL ?? DEFAULT_OPENAI_MODEL,
+  model: string = process.env.OPENAI_MODEL ?? process.env.OPENROUTER_MODEL ?? DEFAULT_OPENAI_MODEL,
 ): Promise<RawExtractionResult> {
   const completion = await openaiClient.chat.completions.create({
     model,
