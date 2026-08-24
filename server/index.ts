@@ -212,7 +212,8 @@ export function createApp(options: CreateAppOptions = {}) {
       response.status(200).json(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      response.status(500).json({ error: message });
+      console.error("Worker run failed:", message);
+      response.status(500).json({ error: "Failed to run application batch" });
     }
   });
 

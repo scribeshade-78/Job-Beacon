@@ -549,7 +549,7 @@ describe("POST /api/worker/run", () => {
         headers: { Authorization: "Bearer correct-secret" },
       });
       expect(response.status).toBe(500);
-      expect(await response.json()).toEqual({ error: "db unreachable" });
+      expect(await response.json()).toEqual({ error: "Failed to run application batch" });
     });
   });
 });
