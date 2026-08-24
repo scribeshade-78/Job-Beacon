@@ -1,9 +1,8 @@
 import type { DiscoveryAdapter, DiscoveryAdapterRegistry } from "./types.js";
 import { greenhouseAdapter } from "./greenhouse.js";
 import { leverAdapter } from "./lever.js";
-// Import other adapters when they are formalized:
-// import { adzunaAdapter } from "./adzuna.js";
-// import { usajobsAdapter } from "./usajobs.js";
+import { adzunaAdapter } from "./adzuna.js";
+import { usajobsAdapter } from "./usajobs.js";
 
 /**
  * Registry of all registered discovery adapters.
@@ -17,8 +16,8 @@ import { leverAdapter } from "./lever.js";
 const ADAPTERS: readonly DiscoveryAdapter[] = [
   greenhouseAdapter,
   leverAdapter,
-  // adzunaAdapter,
-  // usajobsAdapter,
+  adzunaAdapter,
+  usajobsAdapter,
 ] as const;
 
 /**

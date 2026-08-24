@@ -1,4 +1,5 @@
 import type { DiscoveredVacancy, FetchImpl } from "../types.js";
+import type { DiscoveryAdapter, DiscoveryAdapterConfig } from "./types.js";
 
 /**
  * USAJOBS Search API (PRD §10.2 [S5]).
@@ -18,7 +19,7 @@ import type { DiscoveredVacancy, FetchImpl } from "../types.js";
  * provider gives you) — USAJOBS discovery is keyword/location driven, not
  * per-employer like Greenhouse/Lever.
  */
-export interface UsajobsTargetConfig {
+export interface UsajobsTargetConfig extends DiscoveryAdapterConfig {
   keyword?: string;
   locationName?: string;
 }
@@ -116,3 +117,46 @@ export async function discoverUsajobs(
     };
   });
 }
+
+const USAJOBS_SOURCE_CODE = "usajobs" as const;
+
+/**
+ * MP-A2.1: formalizes the pre-existing discoverUsajobs (above, unchanged)
+ * as a DiscoveryAdapter for the registry. Credentials aren't part of
+ * per-target config (a saved-search keyword/location has no employer to
+ * own an API key) — read from process.env at call time, same lazy-env-read
+ * pattern as openaiClient.ts, and same "throws inside discovery, not a
+ * separate pre-check" behavior worker.ts's old switch already had.
+ * targetKey is unused here — see discoverUsajobs's own doc comment on why
+ * it's a saved-search label, not a value the API call consumes.
+ */
+const usajobsAdapter: DiscoveryAdapter<UsajobsTargetConfig> = {
+  sourceCode: USAJOBS_SOURCE_CODE,
+
+  async discover(
+    _targetKey: string,
+    config: UsajobsTargetConfig,
+    fetchImpl: FetchImpl = fetch,
+  ): Promise<DiscoveredVacancy[]> {
+    this.validateConfig(config);
+
+    return discoverUsajobs(
+      config,
+      {
+        apiKey: process.env.USAJOBS_API_KEY ?? "",
+        userAgent: process.env.USAJOBS_USER_AGENT ?? "",
+      },
+      fetchImpl,
+    );
+  },
+
+  validateConfig(_config: UsajobsTargetConfig): void {
+    // No required target-level fields — keyword/locationName are both
+    // optional query params (USAJOBS discovery is keyword/location driven,
+    // not per-employer, so there's nothing to fail fast on here).
+    // Credential validation happens inside discoverUsajobs itself, at
+    // discover() time, unchanged from before this phase.
+  },
+};
+
+export { usajobsAdapter, USAJOBS_SOURCE_CODE };

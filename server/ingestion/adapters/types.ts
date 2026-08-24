@@ -5,8 +5,13 @@ import type { DiscoveredVacancy, FetchImpl } from "../types.js";
  * Each adapter defines its own config shape.
  */
 export interface DiscoveryAdapterConfig {
-  /** Human-readable name of the company/employer for this target. */
-  companyName: string;
+  /**
+   * Human-readable name of the company/employer for this target. Optional:
+   * only meaningful for single-employer sources (Greenhouse, Lever); a
+   * multi-employer aggregator (Adzuna, USAJOBS) has no target-level company
+   * name at all — it comes from each result instead.
+   */
+  companyName?: string;
   /** Optional company domain for verification/enrichment. */
   companyDomain?: string;
   /** Adapter-specific extra config (e.g., Adzuna country code, USAJOBS category). */

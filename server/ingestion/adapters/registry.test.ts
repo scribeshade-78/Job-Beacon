@@ -7,6 +7,8 @@ import {
 } from "./registry.js";
 import { greenhouseAdapter } from "./greenhouse.js";
 import { leverAdapter } from "./lever.js";
+import { adzunaAdapter } from "./adzuna.js";
+import { usajobsAdapter } from "./usajobs.js";
 
 describe("discoveryAdapterRegistry", () => {
   it("contains the greenhouse adapter", () => {
@@ -19,9 +21,17 @@ describe("discoveryAdapterRegistry", () => {
     expect(discoveryAdapterRegistry.get("lever")).toBe(leverAdapter);
   });
 
+  it("contains the adzuna adapter (MP-A2.1)", () => {
+    expect(discoveryAdapterRegistry.has("adzuna")).toBe(true);
+    expect(discoveryAdapterRegistry.get("adzuna")).toBe(adzunaAdapter);
+  });
+
+  it("contains the usajobs adapter (MP-A2.1)", () => {
+    expect(discoveryAdapterRegistry.has("usajobs")).toBe(true);
+    expect(discoveryAdapterRegistry.get("usajobs")).toBe(usajobsAdapter);
+  });
+
   it("does not contain unregistered source codes", () => {
-    expect(discoveryAdapterRegistry.has("adzuna")).toBe(false);
-    expect(discoveryAdapterRegistry.has("usajobs")).toBe(false);
     expect(discoveryAdapterRegistry.has("not-a-real-source")).toBe(false);
   });
 
@@ -29,7 +39,9 @@ describe("discoveryAdapterRegistry", () => {
     const codes = getRegisteredSourceCodes();
     expect(codes).toContain("greenhouse");
     expect(codes).toContain("lever");
-    expect(codes.length).toBe(2);
+    expect(codes).toContain("adzuna");
+    expect(codes).toContain("usajobs");
+    expect(codes.length).toBe(4);
   });
 });
 
@@ -44,8 +56,17 @@ describe("getDiscoveryAdapter", () => {
     expect(adapter).toBe(leverAdapter);
   });
 
+  it("returns the adzuna adapter for 'adzuna' (MP-A2.1)", () => {
+    const adapter = getDiscoveryAdapter("adzuna");
+    expect(adapter).toBe(adzunaAdapter);
+  });
+
+  it("returns the usajobs adapter for 'usajobs' (MP-A2.1)", () => {
+    const adapter = getDiscoveryAdapter("usajobs");
+    expect(adapter).toBe(usajobsAdapter);
+  });
+
   it("throws for unregistered source code", () => {
-    expect(() => getDiscoveryAdapter("adzuna")).toThrow(/No discovery adapter registered/);
     expect(() => getDiscoveryAdapter("not-a-real-source")).toThrow(/No discovery adapter registered/);
   });
 });
@@ -54,11 +75,11 @@ describe("hasDiscoveryAdapter", () => {
   it("returns true for registered source codes", () => {
     expect(hasDiscoveryAdapter("greenhouse")).toBe(true);
     expect(hasDiscoveryAdapter("lever")).toBe(true);
+    expect(hasDiscoveryAdapter("adzuna")).toBe(true);
+    expect(hasDiscoveryAdapter("usajobs")).toBe(true);
   });
 
   it("returns false for unregistered source codes", () => {
-    expect(hasDiscoveryAdapter("adzuna")).toBe(false);
-    expect(hasDiscoveryAdapter("usajobs")).toBe(false);
     expect(hasDiscoveryAdapter("not-a-real-source")).toBe(false);
   });
 });

@@ -1,42 +1,21 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getDiscoveryAdapter, hasDiscoveryAdapter } from "./adapters/registry.js";
-import { discoverAdzuna, type AdzunaTargetConfig } from "./adapters/adzuna.js";
-import { discoverUsajobs, type UsajobsTargetConfig } from "./adapters/usajobs.js";
+import { getDiscoveryAdapter } from "./adapters/registry.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
 import type { DiscoveredVacancy } from "./types.js";
 import { scoreVacancy } from "../trust/scoreVacancy.js";
 
 /**
- * Adapters that don't yet implement the DiscoveryAdapter interface
- * (Adzuna, USAJOBS) are handled specially. They will be formalized in
- * a follow-up. For now, they remain as direct function calls.
+ * MP-A2.1: every discovery adapter is now registry-formalized (Greenhouse,
+ * Lever, Adzuna, USAJOBS) — getDiscoveryAdapter itself throws
+ * `No discovery adapter registered for source_code "..."` for an unknown
+ * one, so no separate fallback/switch is needed here anymore.
  */
 async function discoverForSource(
   sourceCode: string,
   targetKey: string,
   config: Record<string, unknown>,
 ): Promise<DiscoveredVacancy[]> {
-  // Try the new registry first (formalized adapters)
-  if (hasDiscoveryAdapter(sourceCode)) {
-    const adapter = getDiscoveryAdapter(sourceCode);
-    return adapter.discover(targetKey, config as never);
-  }
-
-  // Fallback for adapters not yet formalized (Adzuna, USAJOBS)
-  switch (sourceCode) {
-    case "usajobs":
-      return discoverUsajobs(config as unknown as UsajobsTargetConfig, {
-        apiKey: process.env.USAJOBS_API_KEY ?? "",
-        userAgent: process.env.USAJOBS_USER_AGENT ?? "",
-      });
-    case "adzuna":
-      return discoverAdzuna(targetKey, config as unknown as AdzunaTargetConfig, {
-        appId: process.env.ADZUNA_APP_ID ?? "",
-        appKey: process.env.ADZUNA_APP_KEY ?? "",
-      });
-    default:
-      throw new Error(`No discovery adapter registered for source_code "${sourceCode}".`);
-  }
+  return getDiscoveryAdapter(sourceCode).discover(targetKey, config as never);
 }
 
 export interface RunOneJobResult {

@@ -2,7 +2,6 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("./adapters/registry.js", () => ({
   getDiscoveryAdapter: vi.fn(),
-  hasDiscoveryAdapter: vi.fn(),
 }));
 vi.mock("./adapters/greenhouse.js", () => ({
   greenhouseAdapter: {
@@ -18,15 +17,13 @@ vi.mock("./adapters/lever.js", () => ({
     validateConfig: vi.fn(),
   },
 }));
-vi.mock("./adapters/adzuna.js", () => ({ discoverAdzuna: vi.fn() }));
-vi.mock("./adapters/usajobs.js", () => ({ discoverUsajobs: vi.fn() }));
 vi.mock("./ingest.js", () => ({
   ingestDiscoveredVacancy: vi.fn(),
   markUnseenVacanciesExpired: vi.fn(),
 }));
 vi.mock("../trust/scoreVacancy.js", () => ({ scoreVacancy: vi.fn() }));
 
-import { getDiscoveryAdapter, hasDiscoveryAdapter } from "./adapters/registry.js";
+import { getDiscoveryAdapter } from "./adapters/registry.js";
 import { greenhouseAdapter } from "./adapters/greenhouse.js";
 import { ingestDiscoveredVacancy, markUnseenVacanciesExpired } from "./ingest.js";
 import { scoreVacancy } from "../trust/scoreVacancy.js";
@@ -82,8 +79,7 @@ function makeClient(overrides: {
 describe("runOneIngestionJob", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Default mocks for registry
-    vi.mocked(hasDiscoveryAdapter).mockReturnValue(true);
+    // Default mock for registry
     vi.mocked(getDiscoveryAdapter).mockReturnValue(greenhouseAdapter);
   });
 
@@ -187,7 +183,9 @@ describe("runOneIngestionJob", () => {
   });
 
   it("throws for a source_code with no registered adapter", async () => {
-    vi.mocked(hasDiscoveryAdapter).mockReturnValueOnce(false);
+    vi.mocked(getDiscoveryAdapter).mockImplementationOnce((sourceCode: string) => {
+      throw new Error(`No discovery adapter registered for source_code "${sourceCode}".`);
+    });
     const client = makeClient({
       vacancySourceResult: { data: { ...vacancySource, source_code: "not-a-real-source" }, error: null },
       policyResult: { data: enabledPolicy, error: null },

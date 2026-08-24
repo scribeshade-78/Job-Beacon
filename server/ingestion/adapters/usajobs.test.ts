@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { discoverUsajobs } from "./usajobs.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { discoverUsajobs, usajobsAdapter } from "./usajobs.js";
 
 // Fixture shaped from the corroborated (not primary-source-verified, see
 // the adapter's verification note) SearchResult.SearchResultItems[].
@@ -106,5 +106,50 @@ describe("discoverUsajobs", () => {
     await expect(
       discoverUsajobs({}, credentials, fixtureFetch(500, {})),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe("usajobsAdapter (MP-A2.1 registry wrapper)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("has the expected sourceCode", () => {
+    expect(usajobsAdapter.sourceCode).toBe("usajobs");
+  });
+
+  it("validateConfig accepts any config — no required target-level fields", () => {
+    expect(() => usajobsAdapter.validateConfig({})).not.toThrow();
+    expect(() => usajobsAdapter.validateConfig({ keyword: "engineer" })).not.toThrow();
+  });
+
+  it("reads credentials from process.env and delegates to discoverUsajobs", async () => {
+    vi.stubEnv("USAJOBS_API_KEY", "env-key");
+    vi.stubEnv("USAJOBS_USER_AGENT", "env@example.com");
+    const fetchImpl = fixtureFetch();
+
+    await usajobsAdapter.discover("saved-search-label", { keyword: "engineer" }, fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://data.usajobs.gov/api/search?Keyword=engineer",
+      {
+        headers: {
+          Host: "data.usajobs.gov",
+          "User-Agent": "env@example.com",
+          "Authorization-Key": "env-key",
+        },
+      },
+    );
+  });
+
+  it("throws when env credentials are missing — same behavior as before this phase", async () => {
+    vi.stubEnv("USAJOBS_API_KEY", "");
+    vi.stubEnv("USAJOBS_USER_AGENT", "");
+    const fetchImpl = fixtureFetch();
+
+    await expect(usajobsAdapter.discover("saved-search-label", { keyword: "engineer" }, fetchImpl)).rejects.toThrow(
+      /Authorization-Key/,
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

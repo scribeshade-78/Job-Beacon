@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { discoverAdzuna } from "./adzuna.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { discoverAdzuna, adzunaAdapter } from "./adzuna.js";
 
 // Fixture shaped from the real response documented at
 // https://developer.adzuna.com/docs/search (verified directly, not invented).
@@ -87,5 +87,42 @@ describe("discoverAdzuna", () => {
 
   it("throws a clear error on a non-2xx response", async () => {
     await expect(discoverAdzuna("gb", {}, credentials, fixtureFetch(401, {}))).rejects.toThrow(/401/);
+  });
+});
+
+describe("adzunaAdapter (MP-A2.1 registry wrapper)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("has the expected sourceCode", () => {
+    expect(adzunaAdapter.sourceCode).toBe("adzuna");
+  });
+
+  it("validateConfig accepts any config — no required target-level fields", () => {
+    expect(() => adzunaAdapter.validateConfig({})).not.toThrow();
+    expect(() => adzunaAdapter.validateConfig({ what: "developer" })).not.toThrow();
+  });
+
+  it("reads credentials from process.env and delegates to discoverAdzuna, targetKey as countryCode", async () => {
+    vi.stubEnv("ADZUNA_APP_ID", "env-app-id");
+    vi.stubEnv("ADZUNA_APP_KEY", "env-app-key");
+    const fetchImpl = fixtureFetch();
+
+    await adzunaAdapter.discover("gb", { what: "developer" }, fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.adzuna.com/v1/api/jobs/gb/search/1?app_id=env-app-id&app_key=env-app-key&what=developer",
+      { headers: { Accept: "application/json" } },
+    );
+  });
+
+  it("throws when env credentials are missing — same behavior as before this phase", async () => {
+    vi.stubEnv("ADZUNA_APP_ID", "");
+    vi.stubEnv("ADZUNA_APP_KEY", "");
+    const fetchImpl = fixtureFetch();
+
+    await expect(adzunaAdapter.discover("gb", {}, fetchImpl)).rejects.toThrow(/app_id and app_key/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
