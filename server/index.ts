@@ -12,9 +12,11 @@ import {
   type AuthenticatedRequest,
 } from "./requireAuth.js";
 import { createRequireModerator, isModerator, type ModeratorChecker } from "./requireModerator.js";
+import { createRequireWorkerSecret } from "./requireWorkerSecret.js";
 import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
 import { createOpenAIClient } from "./resumes/openaiClient.js";
 import { extractResumeFacts } from "./resumes/extractFacts.js";
+import { runApplicationBatch } from "./applications/runner.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -31,6 +33,8 @@ export interface CreateAppOptions {
   serviceClient?: SupabaseClient;
   /** Injectable for tests; resolved lazily per-request otherwise — never constructed eagerly, since OPENAI_API_KEY isn't set in every environment. */
   openaiClient?: Pick<OpenAI, "chat">;
+  /** Injectable for tests; defaults to process.env.WORKER_TRIGGER_SECRET (MP-W2) — undefined means the route is unreachable (500), not open. */
+  workerSecret?: string;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -63,6 +67,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   const requireAuth = createRequireAuth(options.verifyAccessToken);
   const requireModerator = createRequireModerator(options.checkIsModerator ?? isModerator);
+  const requireWorkerSecret = createRequireWorkerSecret(options.workerSecret ?? process.env.WORKER_TRIGGER_SECRET);
   const resolveServiceClient = () => options.serviceClient ?? createSupabaseServiceRoleClient();
   const resolveOpenAIClient = () => options.openaiClient ?? createOpenAIClient();
 
@@ -192,6 +197,24 @@ export function createApp(options: CreateAppOptions = {}) {
       }
     },
   );
+
+  // MP-W2: triggers the MP-W1 batch entrypoint (same runApplicationBatch
+  // npm run worker:applications already calls) over HTTP, for an external
+  // scheduler (cron) rather than a signed-in candidate/moderator — see
+  // requireWorkerSecret.ts for why this isn't requireAuth/requireModerator
+  // or the raw service-role key. runApplicationBatch's own idempotency
+  // (getOrCreatePlan) and leasing (claim_application_attempt's FOR UPDATE
+  // SKIP LOCKED) already make overlapping/concurrent triggers safe, so no
+  // additional "already running" guard is added here.
+  app.post("/api/worker/run", requireWorkerSecret, async (_request, response) => {
+    try {
+      const result = await runApplicationBatch(resolveServiceClient());
+      response.status(200).json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
 
   const clientBuildPath = path.resolve(process.cwd(), "dist/client");
 

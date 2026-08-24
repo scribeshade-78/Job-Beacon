@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { APP_NAME } from "../shared/app.js";
 import type { CreateAppOptions } from "./index.js";
+import { runApplicationBatch } from "./applications/runner.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
 // these route-level tests only care about auth/ownership/rate-limit/status-
@@ -10,6 +11,14 @@ import type { CreateAppOptions } from "./index.js";
 vi.mock("./resumes/textExtraction.js", () => ({
   extractResumeText: vi.fn().mockResolvedValue("Jordan Rivera, Backend Engineer"),
   UnsupportedResumeFormatError: class UnsupportedResumeFormatError extends Error {},
+}));
+
+// POST /api/worker/run calls runApplicationBatch directly (same "import the
+// function, only the client is injectable" shape as extractResumeFacts) —
+// its own internals are covered by server/applications/runner.test.ts, so
+// these route-level tests only care about auth-gating and response wiring.
+vi.mock("./applications/runner.js", () => ({
+  runApplicationBatch: vi.fn(),
 }));
 
 const { app, createApp } = await import("./index.js");
@@ -473,5 +482,74 @@ describe("POST /api/resumes/:id/extract", () => {
         expect(sixthResponse.status).toBe(429);
       },
     );
+  });
+});
+
+describe("POST /api/worker/run", () => {
+  const mockRunApplicationBatch = vi.mocked(runApplicationBatch);
+  const batchResult = {
+    candidateIds: ["candidate-1"],
+    vacancyIds: ["vacancy-1"],
+    plansEvaluated: 1,
+    plansEligible: 0,
+    planningFailures: [],
+    attemptsProcessed: 0,
+  };
+
+  it("returns 500 without calling runApplicationBatch when no secret is configured", async () => {
+    await withTestServer({ workerSecret: undefined }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/run`, {
+        method: "POST",
+        headers: { Authorization: "Bearer anything" },
+      });
+      expect(response.status).toBe(500);
+      expect(mockRunApplicationBatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for a missing header without calling runApplicationBatch", async () => {
+    await withTestServer({ workerSecret: "correct-secret" }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/run`, { method: "POST" });
+      expect(response.status).toBe(401);
+      expect(mockRunApplicationBatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for the wrong secret without calling runApplicationBatch", async () => {
+    await withTestServer({ workerSecret: "correct-secret" }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/run`, {
+        method: "POST",
+        headers: { Authorization: "Bearer wrong-secret" },
+      });
+      expect(response.status).toBe(401);
+      expect(mockRunApplicationBatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the batch result for the correct secret", async () => {
+    mockRunApplicationBatch.mockResolvedValueOnce(batchResult);
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/run`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret" },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(batchResult);
+      expect(mockRunApplicationBatch).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("returns 500 when runApplicationBatch throws", async () => {
+    mockRunApplicationBatch.mockRejectedValueOnce(new Error("db unreachable"));
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/run`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret" },
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "db unreachable" });
+    });
   });
 });

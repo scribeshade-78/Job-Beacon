@@ -198,6 +198,23 @@ Status: not yet run against a live environment — same blocker as MP-F1/MP-F2/M
 - The batch plans every active-candidate x verified-vacancy pair (no pre-filter) — `role_match` and the other gates decide eligibility inside `planApplication`, not a separate query filter in the runner
 - A single candidate/vacancy pair failing to plan (e.g. a bad row) is logged to console and recorded in `planningFailures`, not a batch-ending crash
 
+## MP-W2 Worker HTTP Trigger — Verification
+
+Status: no live environment needed to verify the route/middleware logic itself — `POST /api/worker/run` and its `requireWorkerSecret` gate are pure functions of the request/config with no external dependency beyond the already-tested `runApplicationBatch` (MP-W1) it calls. 12 new unit tests (7 in `requireWorkerSecret.test.ts` covering unconfigured/missing/malformed/wrong/correct-secret paths, timing-safe comparison across different-length secrets, and that the secret is never logged; 5 in `index.test.ts` covering the same auth-gating at the route level plus the 200/500 response wiring around a mocked `runApplicationBatch`) and a full-workspace `npm run typecheck && npm test` (573 tests, all passing) are the verification performed.
+
+**Scope note**: gives the MP-W1 batch entrypoint (`runApplicationBatch`) an HTTP invocation path for an external scheduler (cron), alongside the existing `npm run worker:applications` CLI (unchanged, still works standalone). Protected by a dedicated `WORKER_TRIGGER_SECRET` (bearer token, `crypto.timingSafeEqual` comparison) rather than `requireAuth`/`requireModerator` (both need a real signed-in Supabase session, which a scheduler has none of) or the raw `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS on every table — too large a blast radius to put in an external cron system's headers/logs for a route that only needs to trigger one function). No new "already running" lock was added: `runApplicationBatch`'s own idempotent plan creation and `claim_application_attempt`'s `FOR UPDATE SKIP LOCKED` leasing already make overlapping/concurrent triggers safe (verified by inspection, not a new mechanism this phase built). Secret-only auth — no moderator/admin-session alternate path, per explicit founder decision for this phase.
+
+### Regression check (no live environment needed)
+
+- [ ] `npm test -- server/requireWorkerSecret.test.ts server/index.test.ts` — confirm all pass
+- [ ] Confirm `WORKER_TRIGGER_SECRET` unset → `POST /api/worker/run` returns 500 regardless of any header (fails closed, not open)
+- [ ] Confirm a request with no/wrong `Authorization` header → 401, `runApplicationBatch` never invoked
+
+### Live verification (deferred — needs a running server + real `WORKER_TRIGGER_SECRET`, not run this session)
+
+- [ ] Start the server with `WORKER_TRIGGER_SECRET` set, `curl -X POST http://127.0.0.1:5000/api/worker/run -H "Authorization: Bearer <secret>"` → confirm `200` with the same summary shape `npm run worker:applications` already prints
+- [ ] Confirm a second immediate call (simulating overlapping cron ticks) doesn't double-plan or double-claim — no new application_plans duplicate rows, no attempt claimed twice
+
 ## MP-A1 Application Adapter Capability Model — Verification
 
 Status: no live environment needed to verify the gate-logic change itself — the `application_support` gate is a pure function of `vacancies`/adapter state with no external dependency, and its behavior is unchanged for every real source today (still fails with `NO_ADAPTER_REGISTERED_FOR_SOURCE`). 8 new unit tests (2 in `unsupportedAdapter.test.ts`, 1 in `registry.test.ts`, 3 in `eligibilityGate.test.ts` covering the pass/custom-reason-code/context-forwarding paths via a mocked adapter double, plus the existing MP-W1/prior suites re-verified unchanged) and a full-workspace `npm run typecheck && npm test` (558 tests, all passing) are the verification performed.
