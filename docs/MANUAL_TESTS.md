@@ -126,6 +126,10 @@ Status: not yet run against a live environment — same blocker as the MP-F1/MP-
 - [ ] Exclusions persist
 - [ ] MFA section renders
 
+### Worker (server-side, no UI)
+
+- [ ] `npm run worker:applications` completes and exits 0 (MP-W1)
+
 ### Known-expected console errors (NOT bugs)
 
 - POST candidate_profiles 409 after login = idempotent design
@@ -134,6 +138,32 @@ Status: not yet run against a live environment — same blocker as the MP-F1/MP-
 
 ---
 
+## MP-W1 Application Worker Manual Verification (DEFERRED — no live environment in this session)
+
+Status: not yet run against a live environment — same blocker as MP-F1/MP-F2/MP-R1 above (no local Supabase/dev-server access in this session). 9 new unit tests (`server/applications/runner.test.ts`, all mocked) and a full-workspace `npm run typecheck && npm test` (552 tests, all passing) are the only verification performed so far.
+
+**Scope note**: this phase ships single-pass batch mode only (`npm run worker:applications`), meant to be invoked by an external scheduler (cron). Continuous daemon/polling mode and `SIGINT`/`SIGTERM` graceful shutdown were explicitly deferred to a later scheduling/deployment phase — no such pattern exists anywhere in this repo yet (confirmed by inspection: `server/ingestion/worker.ts` only exports a single claim-and-process function, not a daemon loop, and there is no `SIGINT`/`SIGTERM` handling anywhere in `server/`).
+
+### Pre-checks
+
+- [ ] At least one candidate has `automation_authorizations.status = 'authorized'` and at least one `candidate_selected_roles` row
+- [ ] At least one `vacancies` row has `trust_status` of `VERIFIED` or `VERIFIED_INCOMPLETE`
+- [ ] `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are set (the CLI uses the service-role client, same as every other server-side worker)
+
+### Test steps
+
+1. Run `npm run worker:applications`
+2. Confirm it prints a `[applications:cli] batch complete` summary (`candidateIds`, `vacancyIds`, `plansEvaluated`, `plansEligible`, `planningFailures`, `attemptsProcessed`) and exits with code 0
+3. Query `application_plans` — confirm one row per (authorized candidate, verified vacancy) pair that didn't already have one
+4. Re-run the same command — confirm no duplicate `application_plans` rows are created (idempotent `getOrCreatePlan`, unchanged from R4.3) and `plansEvaluated` still reflects every pair (re-evaluated, not re-inserted)
+5. If any plan came out eligible, confirm exactly one `application_attempts` row exists for it and `attemptsProcessed` in the printed summary reflects the drain
+
+### Known-expected behavior (NOT bugs)
+
+- `plansEligible` will be 0 in this environment today — `application_support` and `rate_and_abuse_controls` gates are documented permanent-until-a-real-adapter placeholders (see `eligibilityGate.ts`), so no real candidate can be eligible yet regardless of this phase
+- The batch plans every active-candidate x verified-vacancy pair (no pre-filter) — `role_match` and the other gates decide eligibility inside `planApplication`, not a separate query filter in the runner
+- A single candidate/vacancy pair failing to plan (e.g. a bad row) is logged to console and recorded in `planningFailures`, not a batch-ending crash
+
 ## Future phases (placeholders)
 
-- MP-W1: Worker entrypoint (idempotency critical — never submit same application twice)
+- MP-W2 (or similar): continuous daemon/polling mode + `SIGINT`/`SIGTERM` graceful shutdown, deferred out of MP-W1's scope

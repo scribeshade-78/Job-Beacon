@@ -10,6 +10,7 @@
     "dev": "concurrently --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\"",
     "dev:client": "vite --config vite.config.ts",
     "dev:server": "node --env-file-if-exists=.env --import=tsx --watch server/index.ts",
+    "worker:applications": "node --env-file-if-exists=.env --import=tsx server/applications/cli.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "vitest run",
     "build": "npm run build:client && npm run build:server",

@@ -62,7 +62,8 @@ export interface EvaluateEligibilityGatesInput {
   vacancyId: string;
 }
 
-const VACANCY_TRUST_ELIGIBLE_STATUSES = new Set(["VERIFIED", "VERIFIED_INCOMPLETE"]);
+/** Exported so runner.ts (MP-W1) queries the same eligible-trust-status set this gate checks, instead of redefining it. */
+export const VACANCY_TRUST_ELIGIBLE_STATUSES = new Set(["VERIFIED", "VERIFIED_INCOMPLETE"]);
 
 /**
  * Every application_attempts.status except 'failed' — a failed attempt is
