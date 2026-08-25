@@ -4,7 +4,9 @@ import {
   exchangeGoogleAuthCode,
   fetchGoogleEmailAddress,
   GoogleOAuthError,
+  GoogleRefreshTokenInvalidError,
   readGoogleOAuthConfig,
+  refreshGoogleAccessToken,
   revokeGoogleToken,
   type FetchImpl,
 } from "./oauth.js";
@@ -83,6 +85,34 @@ describe("fetchGoogleEmailAddress", () => {
   it("throws GoogleOAuthError when the response has no email", async () => {
     const fetchImpl = mockFetch({ ok: true, json: async () => ({}) });
     await expect(fetchGoogleEmailAddress("at", fetchImpl)).rejects.toBeInstanceOf(GoogleOAuthError);
+  });
+});
+
+describe("refreshGoogleAccessToken", () => {
+  it("returns a new access token and expiry on success", async () => {
+    const fetchImpl = mockFetch({ ok: true, json: async () => ({ access_token: "new-at", expires_in: 3600 }) });
+
+    const result = await refreshGoogleAccessToken(CONFIG, "rt", fetchImpl);
+
+    expect(result.accessToken).toBe("new-at");
+    expect(result.expiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("throws GoogleRefreshTokenInvalidError on invalid_grant", async () => {
+    const fetchImpl = mockFetch({ ok: false, status: 400, json: async () => ({ error: "invalid_grant" }) });
+    await expect(refreshGoogleAccessToken(CONFIG, "rt", fetchImpl)).rejects.toBeInstanceOf(GoogleRefreshTokenInvalidError);
+  });
+
+  it("throws a plain GoogleOAuthError (not the invalid-grant subtype) for other failures", async () => {
+    const fetchImpl = mockFetch({ ok: false, status: 500, json: async () => ({ error: "server_error" }) });
+    const promise = refreshGoogleAccessToken(CONFIG, "rt", fetchImpl);
+    await expect(promise).rejects.toBeInstanceOf(GoogleOAuthError);
+    await expect(promise).rejects.not.toBeInstanceOf(GoogleRefreshTokenInvalidError);
+  });
+
+  it("throws GoogleOAuthError when the response has no access_token", async () => {
+    const fetchImpl = mockFetch({ ok: true, json: async () => ({ expires_in: 3600 }) });
+    await expect(refreshGoogleAccessToken(CONFIG, "rt", fetchImpl)).rejects.toBeInstanceOf(GoogleOAuthError);
   });
 });
 

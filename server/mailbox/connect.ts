@@ -7,6 +7,7 @@ import {
   revokeGoogleToken,
   type FetchImpl,
   type GoogleOAuthConfig,
+  type StoredMailboxTokenBundle,
 } from "./oauth.js";
 import { createOAuthState, verifyOAuthState } from "./oauthState.js";
 import { decryptMailboxSecret, encryptMailboxSecret } from "./tokenCrypto.js";
@@ -23,12 +24,6 @@ export function startMailboxConnect(
 }
 
 export class InvalidOAuthStateError extends Error {}
-
-interface StoredTokenBundle {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-}
 
 /**
  * candidate_id comes only from the verified `state` param (never from
@@ -55,7 +50,7 @@ export async function completeMailboxConnect(
   const tokens = await exchangeGoogleAuthCode(config, input.code, fetchImpl);
   const emailAddress = await fetchGoogleEmailAddress(tokens.accessToken, fetchImpl);
 
-  const bundle: StoredTokenBundle = {
+  const bundle: StoredMailboxTokenBundle = {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
     expiresAt: tokens.expiresAt,
@@ -126,7 +121,7 @@ export async function disconnectMailboxConnection(
 
   if (row.secret_manager_key) {
     try {
-      const bundle = JSON.parse(decryptMailboxSecret(encryptionKey, row.secret_manager_key)) as StoredTokenBundle;
+      const bundle = JSON.parse(decryptMailboxSecret(encryptionKey, row.secret_manager_key)) as StoredMailboxTokenBundle;
       await revokeGoogleToken(bundle.accessToken, fetchImpl);
     } catch {
       // Best-effort — see revokeGoogleToken's own comment; the local revoke below proceeds regardless.

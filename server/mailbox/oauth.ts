@@ -61,6 +61,13 @@ export interface GoogleTokenBundle {
 
 export class GoogleOAuthError extends Error {}
 
+/** Shape of the JSON stored (encrypted) in mailbox_connections.secret_manager_key — shared by connect.ts (writes it) and poll.ts (reads/refreshes it). */
+export interface StoredMailboxTokenBundle {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
 export async function exchangeGoogleAuthCode(
   config: GoogleOAuthConfig,
   code: string,
@@ -120,6 +127,56 @@ export async function fetchGoogleEmailAddress(accessToken: string, fetchImpl: Fe
   }
 
   return body.email;
+}
+
+/** invalid_grant means the refresh token itself is dead (candidate revoked access outside our flow, or it expired) — retrying can never succeed; the caller must treat this as terminal, not backed off. */
+export class GoogleRefreshTokenInvalidError extends GoogleOAuthError {}
+
+export interface RefreshedGoogleAccessToken {
+  accessToken: string;
+  expiresAt: number;
+}
+
+export async function refreshGoogleAccessToken(
+  config: GoogleOAuthConfig,
+  refreshToken: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<RefreshedGoogleAccessToken> {
+  const response = await fetchImpl(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!response.ok) {
+    let errorCode: string | undefined;
+
+    try {
+      const errorBody = (await response.json()) as { error?: string };
+      errorCode = errorBody.error;
+    } catch {
+      // Response body wasn't usable JSON — fall through to the generic (retryable) error below.
+    }
+
+    if (errorCode === "invalid_grant") {
+      throw new GoogleRefreshTokenInvalidError("Google rejected the refresh token (invalid_grant).");
+    }
+
+    throw new GoogleOAuthError(`Google token refresh failed: HTTP ${response.status}`);
+  }
+
+  const body = (await response.json()) as { access_token?: string; expires_in?: number };
+
+  if (!body.access_token || typeof body.expires_in !== "number") {
+    throw new GoogleOAuthError("Google token refresh response missing access_token or expires_in.");
+  }
+
+  return { accessToken: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
 }
 
 /**
