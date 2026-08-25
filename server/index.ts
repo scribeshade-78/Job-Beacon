@@ -25,6 +25,15 @@ import {
   MODERATION_DECISIONS,
   type ModerationDecisionValue,
 } from "./moderation/decisions.js";
+import {
+  startMailboxConnect,
+  completeMailboxConnect,
+  disconnectMailboxConnection,
+  InvalidOAuthStateError,
+  MailboxConnectionNotFoundError,
+} from "./mailbox/connect.js";
+import { readGoogleOAuthConfig, type GoogleOAuthConfig } from "./mailbox/oauth.js";
+import { readMailboxEncryptionKey } from "./mailbox/tokenCrypto.js";
 
 export interface CreateAppOptions {
   verifyAccessToken?: AccessTokenVerifier;
@@ -35,6 +44,14 @@ export interface CreateAppOptions {
   openaiClient?: Pick<OpenAI, "chat">;
   /** Injectable for tests; defaults to process.env.WORKER_TRIGGER_SECRET (MP-W2) — undefined means the route is unreachable (500), not open. */
   workerSecret?: string;
+  /** Injectable for tests; resolved lazily per-request otherwise via readGoogleOAuthConfig() — undefined env vars mean the route 500s rather than silently misconfiguring the OAuth flow. */
+  googleOAuthConfig?: GoogleOAuthConfig;
+  /** Injectable for tests; defaults to process.env.MAILBOX_OAUTH_STATE_SECRET (R6.1) — signs/verifies the callback's `state` param. */
+  mailboxOAuthStateSecret?: string;
+  /** Injectable for tests; resolved lazily via readMailboxEncryptionKey() otherwise (R6.1) — the AES-256-GCM key mailbox OAuth tokens are encrypted under before storage. */
+  mailboxEncryptionKey?: Buffer;
+  /** Injectable for tests; defaults to process.env.CLIENT_APP_URL (R6.1) — base origin the OAuth callback redirects back to. Empty string is a valid default: in production the server serves the client from the same origin, so a relative redirect is correct. */
+  mailboxClientAppUrl?: string;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -78,6 +95,16 @@ export function createApp(options: CreateAppOptions = {}) {
   const requireWorkerSecret = createRequireWorkerSecret(options.workerSecret ?? process.env.WORKER_TRIGGER_SECRET);
   const resolveServiceClient = () => options.serviceClient ?? createSupabaseServiceRoleClient();
   const resolveOpenAIClient = () => options.openaiClient ?? createOpenAIClient();
+  const resolveGoogleOAuthConfig = () => options.googleOAuthConfig ?? readGoogleOAuthConfig();
+  const resolveMailboxEncryptionKey = () => options.mailboxEncryptionKey ?? readMailboxEncryptionKey();
+  const resolveMailboxOAuthStateSecret = () => {
+    const secret = options.mailboxOAuthStateSecret ?? process.env.MAILBOX_OAUTH_STATE_SECRET;
+    if (!secret) {
+      throw new Error("Missing MAILBOX_OAUTH_STATE_SECRET.");
+    }
+    return secret;
+  };
+  const mailboxClientAppUrl = options.mailboxClientAppUrl ?? process.env.CLIENT_APP_URL ?? "";
 
   // Extraction calls a paid external API per request — rate-limited per
   // authenticated candidate (not per IP), so this only ever runs after
@@ -198,6 +225,81 @@ export function createApp(options: CreateAppOptions = {}) {
       } catch (error) {
         if (error instanceof ReviewerSeparationError) {
           response.status(409).json({ error: error.message });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // R6.1: starts the Gmail connect handshake — mints a signed `state` and
+  // hands back the Google consent URL for the client to navigate to.
+  app.post("/api/mailbox/connect/start", requireAuth, (request: AuthenticatedRequest, response) => {
+    try {
+      const { authorizeUrl } = startMailboxConnect(
+        request.user!.id,
+        resolveGoogleOAuthConfig(),
+        resolveMailboxOAuthStateSecret(),
+      );
+      response.status(200).json({ authorizeUrl });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  // R6.1: Google redirects the browser here directly — a top-level
+  // navigation, so it carries no Authorization header and can't go through
+  // requireAuth. Identity is instead proven by the signed `state` param
+  // (see oauthState.ts). Always ends in a redirect, success or failure —
+  // there's no JSON client waiting on this response.
+  app.get("/api/mailbox/oauth/callback", async (request, response) => {
+    const redirectTo = (status: "connected" | "error") => `${mailboxClientAppUrl}/?mailbox=${status}#/responses`;
+
+    const { code, state, error: oauthError } = request.query;
+
+    if (typeof oauthError === "string" || typeof code !== "string" || typeof state !== "string") {
+      response.redirect(redirectTo("error"));
+      return;
+    }
+
+    try {
+      await completeMailboxConnect(
+        resolveServiceClient(),
+        resolveGoogleOAuthConfig(),
+        resolveMailboxOAuthStateSecret(),
+        resolveMailboxEncryptionKey(),
+        { code, state },
+      );
+      response.redirect(redirectTo("connected"));
+    } catch (error) {
+      if (!(error instanceof InvalidOAuthStateError)) {
+        console.error("Mailbox OAuth callback failed:", error instanceof Error ? error.message : error);
+      }
+      response.redirect(redirectTo("error"));
+    }
+  });
+
+  app.post(
+    "/api/mailbox/:id/disconnect",
+    requireAuth,
+    async (request: AuthenticatedRequest, response) => {
+      if (!UUID_PATTERN.test(request.params.id as string)) {
+        response.status(400).json({ error: "id must be a valid mailbox connection id." });
+        return;
+      }
+
+      try {
+        const result = await disconnectMailboxConnection(
+          resolveServiceClient(),
+          { connectionId: request.params.id as string, candidateId: request.user!.id },
+          resolveMailboxEncryptionKey(),
+        );
+        response.status(200).json(result);
+      } catch (error) {
+        if (error instanceof MailboxConnectionNotFoundError) {
+          response.status(404).json({ error: error.message });
           return;
         }
         const message = error instanceof Error ? error.message : String(error);

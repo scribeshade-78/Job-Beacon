@@ -12,6 +12,7 @@ export interface MailboxConnection {
   id: string;
   provider: MailboxProvider;
   status: MailboxConnectionStatus;
+  emailAddress: string | null;
   connectedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
@@ -21,6 +22,7 @@ interface MailboxConnectionRow {
   id: string;
   provider: MailboxProvider;
   status: MailboxConnectionStatus;
+  email_address: string | null;
   connected_at: string | null;
   revoked_at: string | null;
   created_at: string;
@@ -45,7 +47,7 @@ export async function listMailboxConnections(
   try {
     const { data, error } = await client
       .from("mailbox_connections")
-      .select("id, provider, status, connected_at, revoked_at, created_at")
+      .select("id, provider, status, email_address, connected_at, revoked_at, created_at")
       .order("created_at", { ascending: false });
 
     if (error || !data) {
@@ -60,6 +62,7 @@ export async function listMailboxConnections(
         id: row.id,
         provider: row.provider,
         status: row.status,
+        emailAddress: row.email_address,
         connectedAt: row.connected_at,
         revokedAt: row.revoked_at,
         createdAt: row.created_at,
@@ -68,4 +71,64 @@ export async function listMailboxConnections(
   } catch {
     return { kind: "error", message: GENERIC_FAILURE_MESSAGE };
   }
+}
+
+/**
+ * R6.1: mailbox_connections grants candidates SELECT only (see its
+ * migration) — connecting/disconnecting completes via a server-side
+ * Express route under service_role, same "server route, not a direct
+ * Supabase call" shape as moderation.ts's getModerationQueue.
+ */
+export type StartMailboxConnectResult = { kind: "success"; authorizeUrl: string } | { kind: "error"; message: string };
+
+const GENERIC_CONNECT_FAILURE_MESSAGE = "Could not start connecting your mailbox. Please try again.";
+
+export async function startMailboxConnect(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<StartMailboxConnectResult> {
+  let response: Response;
+
+  try {
+    response = await fetchImpl("/api/mailbox/connect/start", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    return { kind: "error", message: "Network error contacting the server." };
+  }
+
+  if (!response.ok) {
+    return { kind: "error", message: GENERIC_CONNECT_FAILURE_MESSAGE };
+  }
+
+  const body = (await response.json()) as { authorizeUrl: string };
+  return { kind: "success", authorizeUrl: body.authorizeUrl };
+}
+
+const GENERIC_DISCONNECT_FAILURE_MESSAGE = "Could not disconnect this mailbox. Please try again.";
+
+export type DisconnectMailboxResult = { kind: "success" } | { kind: "error"; message: string };
+
+export async function disconnectMailboxConnection(
+  connectionId: string,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DisconnectMailboxResult> {
+  let response: Response;
+
+  try {
+    response = await fetchImpl(`/api/mailbox/${connectionId}/disconnect`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    return { kind: "error", message: "Network error contacting the server." };
+  }
+
+  if (!response.ok) {
+    return { kind: "error", message: GENERIC_DISCONNECT_FAILURE_MESSAGE };
+  }
+
+  return { kind: "success" };
 }
