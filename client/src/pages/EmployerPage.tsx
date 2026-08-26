@@ -8,6 +8,14 @@ import { Label } from "../components/ui/label";
 import { StatusBadge, type StatusBadgeStatus } from "../components/ui/status-badge";
 import { listMyEmployerClaims, submitEmployerClaim, type EmployerClaim } from "../lib/employer";
 import { listCompaniesForReview, type ReviewableCompany } from "../lib/companyReviews";
+import {
+  listMyCompanyFactCorrections,
+  submitCompanyFactCorrection,
+  CORRECTABLE_FIELDS,
+  CORRECTABLE_FIELD_LABELS,
+  type CompanyFactCorrection,
+  type CorrectableField,
+} from "../lib/companyFactCorrections";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
 interface EmployerPageProps {
@@ -17,6 +25,12 @@ interface EmployerPageProps {
 const CLAIM_STATUS_BADGE: Record<EmployerClaim["status"], StatusBadgeStatus> = {
   pending: "under_review",
   verified: "verified",
+  rejected: "fact_rejected",
+};
+
+const CORRECTION_STATUS_BADGE: Record<CompanyFactCorrection["status"], StatusBadgeStatus> = {
+  pending: "under_review",
+  approved: "verified",
   rejected: "fact_rejected",
 };
 
@@ -36,6 +50,13 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const [corrections, setCorrections] = useState<CompanyFactCorrection[] | null>(null);
+  const [correctionCompanyId, setCorrectionCompanyId] = useState("");
+  const [fieldName, setFieldName] = useState<CorrectableField | "">("");
+  const [proposedValue, setProposedValue] = useState("");
+  const [correctionEvidence, setCorrectionEvidence] = useState("");
+  const [correctionBusy, setCorrectionBusy] = useState(false);
+
   async function refreshClaims() {
     const result = await listMyEmployerClaims(getSupabaseBrowserClient());
 
@@ -46,8 +67,19 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
     }
   }
 
+  async function refreshCorrections() {
+    const result = await listMyCompanyFactCorrections(getSupabaseBrowserClient());
+
+    if (result.kind === "success") {
+      setCorrections(result.corrections);
+    } else {
+      setError(result.message);
+    }
+  }
+
   useEffect(() => {
     void refreshClaims();
+    void refreshCorrections();
 
     listCompaniesForReview(getSupabaseBrowserClient()).then((result) => {
       if (result.kind === "success") {
@@ -94,11 +126,58 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
     setBusy(false);
   }
 
+  async function handleSubmitCorrection(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setNotice(null);
+
+    if (correctionCompanyId === "" || fieldName === "" || proposedValue.trim() === "") {
+      setError("Company, field, and new value are required.");
+      return;
+    }
+
+    setCorrectionBusy(true);
+
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      setError("You must be signed in to submit a correction.");
+      setCorrectionBusy(false);
+      return;
+    }
+
+    const result = await submitCompanyFactCorrection(
+      correctionCompanyId,
+      fieldName,
+      proposedValue.trim(),
+      correctionEvidence,
+      accessToken,
+    );
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      setNotice("Correction submitted. A moderator will review it before it takes effect.");
+      setFieldName("");
+      setProposedValue("");
+      setCorrectionEvidence("");
+      await refreshCorrections();
+    }
+
+    setCorrectionBusy(false);
+  }
+
   // A claim can be resubmitted after rejection (unique(user_id, company_id)
   // upserts the same row) but not while already pending/verified — no
   // point offering the form for a company already in flight.
   const claimedCompanyIds = new Set((claims ?? []).filter((claim) => claim.status !== "rejected").map((claim) => claim.companyId));
   const claimableCompanies = (companies ?? []).filter((company) => !claimedCompanyIds.has(company.id));
+
+  // Corrections require §20.2's "verified employer" gate — a pending or
+  // rejected claim doesn't authorize correcting a company's facts, only a
+  // successful moderator decision on the claim itself does.
+  const verifiedCompanyIds = new Set((claims ?? []).filter((claim) => claim.status === "verified").map((claim) => claim.companyId));
+  const verifiedCompanies = (companies ?? []).filter((company) => verifiedCompanyIds.has(company.id));
 
   return (
     <div className="min-h-screen bg-ios-bg">
@@ -220,6 +299,110 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
             )}
           </CardContent>
         </Card>
+
+        {verifiedCompanies.length > 0 && (
+          <>
+            <Card>
+              <CardHeader>
+                <CardTitle id="corrections-title">Your fact corrections</CardTitle>
+              </CardHeader>
+              <CardContent aria-labelledby="corrections-title">
+                {corrections?.length === 0 && (
+                  <p className="text-sm text-ios-text-secondary">No corrections submitted yet.</p>
+                )}
+                <ul className="space-y-2">
+                  {corrections?.map((correction) => {
+                    const company = companies?.find((c) => c.id === correction.companyId);
+                    return (
+                      <li
+                        key={correction.id}
+                        className="flex items-center justify-between gap-2 rounded-control border border-ios-separator p-3 text-sm text-black"
+                      >
+                        <span>
+                          {company?.displayedName ?? correction.companyId} —{" "}
+                          {CORRECTABLE_FIELD_LABELS[correction.fieldName]}: {correction.proposedValue}
+                        </span>
+                        <StatusBadge status={CORRECTION_STATUS_BADGE[correction.status]} />
+                      </li>
+                    );
+                  })}
+                </ul>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle id="correction-form-title">Correct a company fact</CardTitle>
+              </CardHeader>
+              <CardContent aria-labelledby="correction-form-title">
+                <form onSubmit={handleSubmitCorrection} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="correctionCompany">Company</Label>
+                    <select
+                      id="correctionCompany"
+                      value={correctionCompanyId}
+                      onChange={(event) => setCorrectionCompanyId(event.target.value)}
+                      disabled={correctionBusy}
+                      className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <option value="">Select a company…</option>
+                      {verifiedCompanies.map((company) => (
+                        <option key={company.id} value={company.id}>
+                          {company.displayedName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="fieldName">Field</Label>
+                    <select
+                      id="fieldName"
+                      value={fieldName}
+                      onChange={(event) => setFieldName(event.target.value as CorrectableField | "")}
+                      disabled={correctionBusy}
+                      className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <option value="">Select a field…</option>
+                      {CORRECTABLE_FIELDS.map((field) => (
+                        <option key={field} value={field}>
+                          {CORRECTABLE_FIELD_LABELS[field]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="proposedValue">New value</Label>
+                    <Input
+                      id="proposedValue"
+                      value={proposedValue}
+                      onChange={(event) => setProposedValue(event.target.value)}
+                      disabled={correctionBusy}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="correctionEvidence">Evidence (optional)</Label>
+                    <textarea
+                      id="correctionEvidence"
+                      value={correctionEvidence}
+                      onChange={(event) => setCorrectionEvidence(event.target.value)}
+                      disabled={correctionBusy}
+                      rows={3}
+                      placeholder="A source for this correction — a press release, an official filing, your careers page, etc."
+                      className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black placeholder:text-ios-text-secondary focus-visible:border-ios-blue disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                  </div>
+
+                  <Button type="submit" disabled={correctionBusy}>
+                    {correctionBusy ? "Submitting…" : "Submit correction"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </main>
     </div>
   );

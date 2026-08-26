@@ -34,7 +34,13 @@ import {
 } from "./mailbox/connect.js";
 import { readGoogleOAuthConfig, type GoogleOAuthConfig } from "./mailbox/oauth.js";
 import { readMailboxEncryptionKey } from "./mailbox/tokenCrypto.js";
-import { hasVerifiedEmployerClaim, type HasVerifiedEmployerClaimChecker } from "./requireEmployer.js";
+import {
+  createRequireEmployerOf,
+  hasVerifiedEmployerClaim,
+  isVerifiedEmployerOf,
+  type EmployerChecker,
+  type HasVerifiedEmployerClaimChecker,
+} from "./requireEmployer.js";
 import {
   submitEmployerClaim,
   getEmployerClaimsQueue,
@@ -43,6 +49,17 @@ import {
   EMPLOYER_CLAIM_DECISIONS,
   type EmployerClaimDecisionValue,
 } from "./employer/claims.js";
+import {
+  submitCompanyFactCorrection,
+  getCompanyFactCorrectionsQueue,
+  submitCorrectionDecision,
+  isCorrectableField,
+  InvalidProposedValueError,
+  UnverifiedEmployerError,
+  CorrectionNotFoundError,
+  CORRECTION_DECISIONS,
+  type CorrectionDecisionValue,
+} from "./employer/corrections.js";
 
 export interface CreateAppOptions {
   verifyAccessToken?: AccessTokenVerifier;
@@ -63,6 +80,8 @@ export interface CreateAppOptions {
   mailboxClientAppUrl?: string;
   /** Injectable for tests (R5.4a) — same "server-verified UX signal only" role as checkIsModerator. */
   checkHasVerifiedEmployerClaim?: HasVerifiedEmployerClaimChecker;
+  /** Injectable for tests (R5.4b) — the real per-company authorization boundary requireEmployerOf enforces. */
+  checkIsVerifiedEmployer?: EmployerChecker;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -108,6 +127,13 @@ export function createApp(options: CreateAppOptions = {}) {
 
   const requireAuth = createRequireAuth(options.verifyAccessToken);
   const requireModerator = createRequireModerator(checkIsModerator);
+  // R5.4b: requireEmployerOf's first real consumer — companyId comes from
+  // the route param, same shape as requireModerator's global check but
+  // scoped per-company.
+  const requireEmployerOfCompanyParam = createRequireEmployerOf(
+    (request) => request.params.companyId as string | undefined,
+    options.checkIsVerifiedEmployer ?? isVerifiedEmployerOf,
+  );
   const requireWorkerSecret = createRequireWorkerSecret(options.workerSecret ?? process.env.WORKER_TRIGGER_SECRET);
   const resolveServiceClient = () => options.serviceClient ?? createSupabaseServiceRoleClient();
   const resolveOpenAIClient = () => options.openaiClient ?? createOpenAIClient();
@@ -402,6 +428,96 @@ export function createApp(options: CreateAppOptions = {}) {
         });
         response.status(201).json(result);
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // R5.4b: requireEmployerOfCompanyParam's first route — companyId comes
+  // from the URL, so both the "does a verified claim exist" check and the
+  // AAL2 check happen before any body parsing/validation below runs.
+  app.post(
+    "/api/employer/companies/:companyId/corrections",
+    requireAuth,
+    requireEmployerOfCompanyParam,
+    async (request: AuthenticatedRequest, response) => {
+      const { fieldName, proposedValue, evidence } = request.body ?? {};
+
+      if (typeof fieldName !== "string" || !isCorrectableField(fieldName)) {
+        response.status(400).json({ error: "fieldName must be one of the correctable fields." });
+        return;
+      }
+
+      if (typeof proposedValue !== "string" || proposedValue.trim() === "") {
+        response.status(400).json({ error: "proposedValue is required" });
+        return;
+      }
+
+      try {
+        const result = await submitCompanyFactCorrection(resolveServiceClient(), {
+          userId: request.user!.id,
+          companyId: request.params.companyId as string,
+          fieldName,
+          proposedValue,
+          evidence: typeof evidence === "string" ? evidence : undefined,
+        });
+        response.status(201).json(result);
+      } catch (error) {
+        if (error instanceof InvalidProposedValueError) {
+          response.status(400).json({ error: error.message });
+          return;
+        }
+        if (error instanceof UnverifiedEmployerError) {
+          response.status(403).json({ error: error.message });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  app.get("/api/moderation/company-corrections", requireAuth, requireModerator, async (_request, response) => {
+    try {
+      const queue = await getCompanyFactCorrectionsQueue(resolveServiceClient());
+      response.status(200).json(queue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.post(
+    "/api/moderation/company-corrections/:correctionId/decision",
+    requireAuth,
+    requireModerator,
+    async (request: AuthenticatedRequest, response) => {
+      const { decision, rationale } = request.body ?? {};
+
+      if (!CORRECTION_DECISIONS.includes(decision)) {
+        response.status(400).json({ error: `decision must be one of: ${CORRECTION_DECISIONS.join(", ")}` });
+        return;
+      }
+
+      if (typeof rationale !== "string" || rationale.trim() === "") {
+        response.status(400).json({ error: "rationale is required" });
+        return;
+      }
+
+      try {
+        const result = await submitCorrectionDecision(resolveServiceClient(), {
+          correctionId: request.params.correctionId as string,
+          reviewerId: request.user!.id,
+          decision: decision as CorrectionDecisionValue,
+          rationale,
+        });
+        response.status(201).json(result);
+      } catch (error) {
+        if (error instanceof CorrectionNotFoundError) {
+          response.status(404).json({ error: error.message });
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         response.status(500).json({ error: message });
       }
