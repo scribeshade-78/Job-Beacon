@@ -13,6 +13,7 @@ import {
   type ModerationQueueEntry,
 } from "../lib/moderation";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { EmployerClaimsQueuePanel } from "../panels/EmployerClaimsQueuePanel";
 
 interface ModeratorPageProps {
   onLogout: () => void;
@@ -59,7 +60,10 @@ async function getAccessToken(): Promise<string | null> {
   return data.session?.access_token ?? null;
 }
 
+type ModeratorTab = "vacancies" | "employerClaims";
+
 export function ModeratorPage({ onLogout }: ModeratorPageProps) {
+  const [tab, setTab] = useState<ModeratorTab>("vacancies");
   const [queue, setQueue] = useState<ModerationQueueEntry[] | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [rationale, setRationale] = useState("");
@@ -160,6 +164,24 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
         </button>
       </header>
 
+      <div className="mx-auto flex max-w-[1200px] gap-2 px-6 pt-6">
+        <Button variant={tab === "vacancies" ? "primary" : "secondary"} size="sm" onClick={() => setTab("vacancies")}>
+          Vacancy queue
+        </Button>
+        <Button
+          variant={tab === "employerClaims" ? "primary" : "secondary"}
+          size="sm"
+          onClick={() => setTab("employerClaims")}
+        >
+          Employer claims
+        </Button>
+      </div>
+
+      {tab === "employerClaims" ? (
+        <main className="mx-auto max-w-[1200px] p-6">
+          <EmployerClaimsQueuePanel />
+        </main>
+      ) : (
       <main className="mx-auto grid max-w-[1200px] gap-6 p-6 lg:grid-cols-[380px_1fr]">
         <Card>
           <CardHeader>
@@ -265,6 +287,7 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
           </CardContent>
         </Card>
       </main>
+      )}
     </div>
   );
 }

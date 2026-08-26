@@ -7,6 +7,7 @@ import {
   FileText,
   Inbox,
   LayoutDashboard,
+  Landmark,
   LogOut,
   Menu,
   Send,
@@ -36,6 +37,10 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/responses", label: "Responses", Icon: Inbox },
   { href: "/action-required", label: "Action Required", Icon: AlertCircle },
   { href: "/companies", label: "Company Intelligence", Icon: Building2 },
+  // R5.4a: unconditional (unlike the moderator link below) — submitting a
+  // claim is how a candidate becomes an employer, so this can't be gated
+  // on already being one.
+  { href: "/employer", label: "Employer", Icon: Landmark },
   { href: "/security", label: "Security", Icon: ShieldCheck },
 ];
 

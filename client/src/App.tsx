@@ -11,6 +11,7 @@ import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 import { ActionRequiredPage } from "./pages/ActionRequiredPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
+import { EmployerPage } from "./pages/EmployerPage";
 import { ModeratorPage } from "./pages/ModeratorPage";
 import { OpportunitiesPage } from "./pages/OpportunitiesPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -49,6 +50,15 @@ function SignedInRoutes({
 
   if (location === "/moderator") {
     return <ModeratorPage onLogout={onLogout} />;
+  }
+
+  // R5.4a: renders bare, no candidate AppShell — same reasoning /moderator
+  // already uses (the candidate sidebar doesn't fit this persona either).
+  // Reachable by any signed-in user regardless of isEmployer: submitting a
+  // claim is how a candidate becomes one, so this can't be gated on
+  // already being verified.
+  if (location === "/employer") {
+    return <EmployerPage onLogout={onLogout} />;
   }
 
   return (

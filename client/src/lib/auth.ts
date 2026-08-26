@@ -171,6 +171,8 @@ export function useAuth() {
  */
 export interface VerifiedIdentity extends AuthUser {
   isModerator: boolean;
+  /** R5.4a: any *verified* employer_claims row — a UX signal only, same caveat isModerator carries (the real per-company boundary is server-side requireEmployerOf). */
+  isEmployer: boolean;
 }
 
 export type MeResult =

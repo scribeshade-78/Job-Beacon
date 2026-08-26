@@ -94,8 +94,9 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
     await withTestServer(
       {
         verifyAccessToken: async (token) =>
-          token === "valid-test-token" ? { id: "user-123", email: "person@example.com" } : null,
+          token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
         checkIsModerator: async () => false,
+        checkHasVerifiedEmployerClaim: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -103,7 +104,13 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
         });
 
         expect(response.status).toBe(200);
-        expect(await response.json()).toEqual({ id: "user-123", email: "person@example.com", isModerator: false });
+        expect(await response.json()).toEqual({
+          id: "user-123",
+          email: "person@example.com",
+          aal: "aal1",
+          isModerator: false,
+          isEmployer: false,
+        });
         expect(response.headers.get("cache-control")).toBe("no-store");
         expect(response.headers.get("vary")).toBe("Authorization");
       },
@@ -114,8 +121,9 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
     await withTestServer(
       {
         verifyAccessToken: async (token) =>
-          token === "valid-test-token" ? { id: "user-123", email: "person@example.com" } : null,
+          token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
         checkIsModerator: async () => true,
+        checkHasVerifiedEmployerClaim: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -123,7 +131,33 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
         });
 
         expect(response.status).toBe(200);
-        expect(await response.json()).toEqual({ id: "user-123", email: "person@example.com", isModerator: true });
+        expect(await response.json()).toEqual({
+          id: "user-123",
+          email: "person@example.com",
+          aal: "aal1",
+          isModerator: true,
+          isEmployer: false,
+        });
+      },
+    );
+  });
+
+  it("returns isEmployer: true when the checker reports a verified employer claim", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: async (token) =>
+          token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
+        checkIsModerator: async () => false,
+        checkHasVerifiedEmployerClaim: async () => true,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/me`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as { isEmployer: boolean };
+        expect(body.isEmployer).toBe(true);
       },
     );
   });
@@ -143,7 +177,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
 });
 
 const testVerifier = async (token: string) =>
-  token === "valid-test-token" ? { id: "user-123", email: "person@example.com" } : null;
+  token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null;
 
 function makeInsertOnlyServiceClient(result: { data: unknown; error: unknown }) {
   const calls: Array<{ table: string; method: string; args: unknown[] }> = [];

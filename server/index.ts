@@ -34,6 +34,15 @@ import {
 } from "./mailbox/connect.js";
 import { readGoogleOAuthConfig, type GoogleOAuthConfig } from "./mailbox/oauth.js";
 import { readMailboxEncryptionKey } from "./mailbox/tokenCrypto.js";
+import { hasVerifiedEmployerClaim, type HasVerifiedEmployerClaimChecker } from "./requireEmployer.js";
+import {
+  submitEmployerClaim,
+  getEmployerClaimsQueue,
+  submitEmployerClaimDecision,
+  CompanyNotFoundError,
+  EMPLOYER_CLAIM_DECISIONS,
+  type EmployerClaimDecisionValue,
+} from "./employer/claims.js";
 
 export interface CreateAppOptions {
   verifyAccessToken?: AccessTokenVerifier;
@@ -52,6 +61,8 @@ export interface CreateAppOptions {
   mailboxEncryptionKey?: Buffer;
   /** Injectable for tests; defaults to process.env.CLIENT_APP_URL (R6.1) — base origin the OAuth callback redirects back to. Empty string is a valid default: in production the server serves the client from the same origin, so a relative redirect is correct. */
   mailboxClientAppUrl?: string;
+  /** Injectable for tests (R5.4a) — same "server-verified UX signal only" role as checkIsModerator. */
+  checkHasVerifiedEmployerClaim?: HasVerifiedEmployerClaimChecker;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -76,6 +87,10 @@ export function createApp(options: CreateAppOptions = {}) {
   // server-side (requireModerator on every moderation route below), this
   // is a UX signal only, never trusted as an authorization decision itself.
   const checkIsModerator = options.checkIsModerator ?? isModerator;
+  // R5.4a: same "UX signal only, never the authorization boundary itself"
+  // caveat isModerator already carries — any *verified* claim, not scoped
+  // to one company (createRequireEmployerOf is the real per-company gate).
+  const checkHasVerifiedEmployerClaim = options.checkHasVerifiedEmployerClaim ?? hasVerifiedEmployerClaim;
 
   app.get(
     "/api/me",
@@ -84,7 +99,8 @@ export function createApp(options: CreateAppOptions = {}) {
       response.set("Cache-Control", "no-store");
       response.set("Vary", "Authorization");
       const userIsModerator = await checkIsModerator(request.user!.id);
-      response.status(200).json({ ...request.user, isModerator: userIsModerator });
+      const userIsEmployer = await checkHasVerifiedEmployerClaim(request.user!.id);
+      response.status(200).json({ ...request.user, isModerator: userIsModerator, isEmployer: userIsEmployer });
     },
   );
 
@@ -302,6 +318,90 @@ export function createApp(options: CreateAppOptions = {}) {
           response.status(404).json({ error: error.message });
           return;
         }
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // R5.4a: how a candidate becomes an employer — requireAuth only, not
+  // requireEmployer (nothing to gate yet; submitting a claim is how you
+  // get one). domainVerified is computed server-side inside
+  // submitEmployerClaim from request.user!.email, never client-supplied.
+  app.post("/api/employer/claims", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const { companyId, representativeName, representativeRole, evidence } = request.body ?? {};
+
+    if (typeof companyId !== "string" || companyId.trim() === "") {
+      response.status(400).json({ error: "companyId is required" });
+      return;
+    }
+
+    if (typeof representativeName !== "string" || representativeName.trim() === "") {
+      response.status(400).json({ error: "representativeName is required" });
+      return;
+    }
+
+    if (typeof representativeRole !== "string" || representativeRole.trim() === "") {
+      response.status(400).json({ error: "representativeRole is required" });
+      return;
+    }
+
+    try {
+      const result = await submitEmployerClaim(resolveServiceClient(), {
+        userId: request.user!.id,
+        userEmail: request.user!.email,
+        companyId,
+        representativeName,
+        representativeRole,
+        evidence: typeof evidence === "string" ? evidence : undefined,
+      });
+      response.status(201).json(result);
+    } catch (error) {
+      if (error instanceof CompanyNotFoundError) {
+        response.status(404).json({ error: error.message });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.get("/api/moderation/employer-claims", requireAuth, requireModerator, async (_request, response) => {
+    try {
+      const queue = await getEmployerClaimsQueue(resolveServiceClient());
+      response.status(200).json(queue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.post(
+    "/api/moderation/employer-claims/:claimId/decision",
+    requireAuth,
+    requireModerator,
+    async (request: AuthenticatedRequest, response) => {
+      const { decision, rationale } = request.body ?? {};
+
+      if (!EMPLOYER_CLAIM_DECISIONS.includes(decision)) {
+        response.status(400).json({ error: `decision must be one of: ${EMPLOYER_CLAIM_DECISIONS.join(", ")}` });
+        return;
+      }
+
+      if (typeof rationale !== "string" || rationale.trim() === "") {
+        response.status(400).json({ error: "rationale is required" });
+        return;
+      }
+
+      try {
+        const result = await submitEmployerClaimDecision(resolveServiceClient(), {
+          claimId: request.params.claimId as string,
+          reviewerId: request.user!.id,
+          decision: decision as EmployerClaimDecisionValue,
+          rationale,
+        });
+        response.status(201).json(result);
+      } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         response.status(500).json({ error: message });
       }

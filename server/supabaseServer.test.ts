@@ -114,7 +114,10 @@ describe("verifyAccessToken", () => {
 
     const result = await verifyAccessToken("valid-token", { auth: { getUser } });
 
-    expect(result).toEqual({ id: "user-123", email: "person@example.com" });
+    // "valid-token" has no "." segments, so decodeAal falls through to its
+    // fail-closed default rather than a real JWT's aal claim — see the
+    // dedicated describe("aal decoding") block below for that.
+    expect(result).toEqual({ id: "user-123", email: "person@example.com", aal: "aal1" });
     expect(getUser).toHaveBeenCalledWith("valid-token");
   });
 
@@ -127,5 +130,57 @@ describe("verifyAccessToken", () => {
     const result = await verifyAccessToken("bad-token", { auth: { getUser } });
 
     expect(result).toBeNull();
+  });
+});
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.signature`;
+}
+
+describe("verifyAccessToken aal decoding", () => {
+  it("returns aal2 when the token's payload carries aal2", async () => {
+    const getUser = vi.fn().mockResolvedValue({
+      data: { user: { id: "user-123", email: "person@example.com" } },
+      error: null,
+    });
+
+    const result = await verifyAccessToken(fakeJwt({ aal: "aal2" }), { auth: { getUser } });
+
+    expect(result?.aal).toBe("aal2");
+  });
+
+  it("returns aal1 when the token's payload carries aal1", async () => {
+    const getUser = vi.fn().mockResolvedValue({
+      data: { user: { id: "user-123", email: "person@example.com" } },
+      error: null,
+    });
+
+    const result = await verifyAccessToken(fakeJwt({ aal: "aal1" }), { auth: { getUser } });
+
+    expect(result?.aal).toBe("aal1");
+  });
+
+  it("defaults to aal1 when the payload has no aal claim at all", async () => {
+    const getUser = vi.fn().mockResolvedValue({
+      data: { user: { id: "user-123", email: "person@example.com" } },
+      error: null,
+    });
+
+    const result = await verifyAccessToken(fakeJwt({}), { auth: { getUser } });
+
+    expect(result?.aal).toBe("aal1");
+  });
+
+  it("defaults to aal1 (fail-closed) for a malformed payload segment", async () => {
+    const getUser = vi.fn().mockResolvedValue({
+      data: { user: { id: "user-123", email: "person@example.com" } },
+      error: null,
+    });
+
+    const result = await verifyAccessToken("header.not-valid-base64url-json.signature", { auth: { getUser } });
+
+    expect(result?.aal).toBe("aal1");
   });
 });
