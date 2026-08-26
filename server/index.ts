@@ -60,6 +60,14 @@ import {
   CORRECTION_DECISIONS,
   type CorrectionDecisionValue,
 } from "./employer/corrections.js";
+import {
+  listEmployerBlockedVacancies,
+  submitVacancyAppeal,
+  getAppealsQueue,
+  UnverifiedEmployerError as UnverifiedEmployerAppealError,
+  VacancyNotFoundError,
+  DuplicatePendingAppealError,
+} from "./employer/appeals.js";
 
 export interface CreateAppOptions {
   verifyAccessToken?: AccessTokenVerifier;
@@ -132,6 +140,14 @@ export function createApp(options: CreateAppOptions = {}) {
   // scoped per-company.
   const requireEmployerOfCompanyParam = createRequireEmployerOf(
     (request) => request.params.companyId as string | undefined,
+    options.checkIsVerifiedEmployer ?? isVerifiedEmployerOf,
+  );
+  // R5.4c: /api/employer/appeals has no companyId in its URL (the vacancy
+  // implies it) — the client sends companyId in the body instead, gated
+  // here the same way, then cross-checked again inside submitVacancyAppeal
+  // against the vacancy's own company_id before anything is written.
+  const requireEmployerOfCompanyBody = createRequireEmployerOf(
+    (request) => (request.body as { companyId?: string } | undefined)?.companyId,
     options.checkIsVerifiedEmployer ?? isVerifiedEmployerOf,
   );
   const requireWorkerSecret = createRequireWorkerSecret(options.workerSecret ?? process.env.WORKER_TRIGGER_SECRET);
@@ -523,6 +539,84 @@ export function createApp(options: CreateAppOptions = {}) {
       }
     },
   );
+
+  // R5.4c: which of this employer's vacancies are currently blocked, and
+  // why — moderation_cases/moderation_decisions are service_role-only (no
+  // authenticated grant at all), so this can't be an RLS-direct client
+  // read the way listMyEmployerClaims is.
+  app.get(
+    "/api/employer/companies/:companyId/blocked-vacancies",
+    requireAuth,
+    requireEmployerOfCompanyParam,
+    async (request: AuthenticatedRequest, response) => {
+      try {
+        const entries = await listEmployerBlockedVacancies(resolveServiceClient(), request.params.companyId as string);
+        response.status(200).json(entries);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/employer/appeals",
+    requireAuth,
+    requireEmployerOfCompanyBody,
+    async (request: AuthenticatedRequest, response) => {
+      const { companyId, vacancyId, rationale, evidence } = request.body ?? {};
+
+      if (typeof vacancyId !== "string" || vacancyId.trim() === "") {
+        response.status(400).json({ error: "vacancyId is required" });
+        return;
+      }
+
+      if (typeof rationale !== "string" || rationale.trim() === "") {
+        response.status(400).json({ error: "rationale is required" });
+        return;
+      }
+
+      try {
+        const result = await submitVacancyAppeal(resolveServiceClient(), {
+          userId: request.user!.id,
+          companyId: companyId as string,
+          vacancyId,
+          rationale,
+          evidence: typeof evidence === "string" ? evidence : undefined,
+        });
+        response.status(201).json(result);
+      } catch (error) {
+        if (error instanceof UnverifiedEmployerAppealError) {
+          response.status(403).json({ error: error.message });
+          return;
+        }
+        if (error instanceof VacancyNotFoundError) {
+          response.status(404).json({ error: error.message });
+          return;
+        }
+        if (error instanceof DuplicatePendingAppealError) {
+          response.status(409).json({ error: error.message });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // R5.4c: resolving an appeal reuses POST /api/moderation/cases/:caseId/decisions
+  // unchanged — the moderator submits a decision against the appeal case's
+  // own id with appealId set, which that route already accepted (R6.1-era
+  // code, unused until now). No new decision-writing route needed.
+  app.get("/api/moderation/appeals", requireAuth, requireModerator, async (_request, response) => {
+    try {
+      const queue = await getAppealsQueue(resolveServiceClient());
+      response.status(200).json(queue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
 
   // MP-W2: triggers the MP-W1 batch entrypoint (same runApplicationBatch
   // npm run worker:applications already calls) over HTTP, for an external

@@ -16,6 +16,7 @@ import {
   type CompanyFactCorrection,
   type CorrectableField,
 } from "../lib/companyFactCorrections";
+import { listBlockedVacancies, submitVacancyAppeal, type BlockedVacancyEntry } from "../lib/employerAppeals";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
 interface EmployerPageProps {
@@ -57,6 +58,12 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
   const [correctionEvidence, setCorrectionEvidence] = useState("");
   const [correctionBusy, setCorrectionBusy] = useState(false);
 
+  const [blockedVacancies, setBlockedVacancies] = useState<Array<{ companyId: string } & BlockedVacancyEntry> | null>(null);
+  const [appealingVacancyId, setAppealingVacancyId] = useState<string | null>(null);
+  const [appealRationale, setAppealRationale] = useState("");
+  const [appealEvidence, setAppealEvidence] = useState("");
+  const [appealBusy, setAppealBusy] = useState(false);
+
   async function refreshClaims() {
     const result = await listMyEmployerClaims(getSupabaseBrowserClient());
 
@@ -77,6 +84,37 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
     }
   }
 
+  async function refreshBlockedVacancies(companyIds: string[]) {
+    if (companyIds.length === 0) {
+      setBlockedVacancies([]);
+      return;
+    }
+
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      return;
+    }
+
+    // listBlockedVacancies is per-company (mirrors the server route's
+    // requireEmployerOf, which is company-scoped) — one call per verified
+    // company, merged here; companyId is tagged back onto each entry since
+    // the API response itself doesn't carry it (the route already knows
+    // which company it's answering for).
+    const results = await Promise.all(companyIds.map((id) => listBlockedVacancies(id, accessToken)));
+    const merged: Array<{ companyId: string } & BlockedVacancyEntry> = [];
+
+    results.forEach((result, index) => {
+      if (result.kind === "success") {
+        result.entries.forEach((entry) => merged.push({ companyId: companyIds[index], ...entry }));
+      } else if (result.kind === "error") {
+        setError(result.message);
+      }
+    });
+
+    setBlockedVacancies(merged);
+  }
+
   useEffect(() => {
     void refreshClaims();
     void refreshCorrections();
@@ -89,6 +127,51 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (claims === null) {
+      return;
+    }
+
+    const verifiedIds = [...new Set(claims.filter((claim) => claim.status === "verified").map((claim) => claim.companyId))];
+    void refreshBlockedVacancies(verifiedIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claims]);
+
+  async function handleFileAppeal(entry: { companyId: string } & BlockedVacancyEntry) {
+    setError(null);
+    setNotice(null);
+
+    if (appealRationale.trim() === "") {
+      setError("Rationale is required to file an appeal.");
+      return;
+    }
+
+    setAppealBusy(true);
+
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      setError("You must be signed in to file an appeal.");
+      setAppealBusy(false);
+      return;
+    }
+
+    const result = await submitVacancyAppeal(entry.companyId, entry.vacancyId, appealRationale.trim(), appealEvidence, accessToken);
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      setNotice("Appeal submitted. A different moderator than the one who made the original decision will review it.");
+      setAppealingVacancyId(null);
+      setAppealRationale("");
+      setAppealEvidence("");
+      const verifiedIds = [...new Set((claims ?? []).filter((claim) => claim.status === "verified").map((claim) => claim.companyId))];
+      await refreshBlockedVacancies(verifiedIds);
+    }
+
+    setAppealBusy(false);
+  }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -302,6 +385,83 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
 
         {verifiedCompanies.length > 0 && (
           <>
+            <Card>
+              <CardHeader>
+                <CardTitle id="blocked-vacancies-title">Blocked vacancies</CardTitle>
+              </CardHeader>
+              <CardContent aria-labelledby="blocked-vacancies-title">
+                {blockedVacancies?.length === 0 && (
+                  <p className="text-sm text-ios-text-secondary">No blocked vacancies right now.</p>
+                )}
+                <ul className="space-y-3">
+                  {blockedVacancies?.map((entry) => (
+                    <li key={entry.vacancyId} className="rounded-control border border-ios-separator p-3 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-black">{entry.title || "(untitled)"}</span>
+                        <StatusBadge status="blocked" />
+                      </div>
+                      <p className="mt-1 text-ios-text-secondary">
+                        {entry.decisionRationale} <span>(policy {entry.decisionPolicyVersion})</span>
+                      </p>
+
+                      {entry.hasPendingAppeal ? (
+                        <p className="mt-2 text-xs text-ios-text-secondary">Appeal pending review.</p>
+                      ) : appealingVacancyId === entry.vacancyId ? (
+                        <div className="mt-3 space-y-2">
+                          <textarea
+                            value={appealRationale}
+                            onChange={(event) => setAppealRationale(event.target.value)}
+                            disabled={appealBusy}
+                            rows={3}
+                            placeholder="Required — why this decision should be reconsidered."
+                            className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black placeholder:text-ios-text-secondary focus-visible:border-ios-blue disabled:cursor-not-allowed disabled:opacity-50"
+                          />
+                          <textarea
+                            value={appealEvidence}
+                            onChange={(event) => setAppealEvidence(event.target.value)}
+                            disabled={appealBusy}
+                            rows={2}
+                            placeholder="Evidence (optional)."
+                            className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black placeholder:text-ios-text-secondary focus-visible:border-ios-blue disabled:cursor-not-allowed disabled:opacity-50"
+                          />
+                          <div className="flex gap-2">
+                            <Button size="sm" disabled={appealBusy} onClick={() => void handleFileAppeal(entry)}>
+                              {appealBusy ? "Submitting…" : "Submit appeal"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={appealBusy}
+                              onClick={() => {
+                                setAppealingVacancyId(null);
+                                setAppealRationale("");
+                                setAppealEvidence("");
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={() => {
+                            setAppealingVacancyId(entry.vacancyId);
+                            setAppealRationale("");
+                            setAppealEvidence("");
+                          }}
+                        >
+                          File an appeal
+                        </Button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle id="corrections-title">Your fact corrections</CardTitle>

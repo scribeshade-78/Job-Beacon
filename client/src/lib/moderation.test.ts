@@ -82,6 +82,30 @@ describe("submitModerationDecision", () => {
     });
   });
 
+  it("includes appealId in the body when resolving an appeal", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "decision-1" }) });
+
+    await submitModerationDecision(
+      "case-1",
+      "cleared",
+      "Domain check was a false positive.",
+      "tok",
+      fetchImpl as unknown as typeof fetch,
+      "appeal-1",
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/moderation/cases/case-1/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer tok" },
+      body: JSON.stringify({
+        decision: "cleared",
+        rationale: "Domain check was a false positive.",
+        policyVersion: MODERATION_POLICY_VERSION,
+        appealId: "appeal-1",
+      }),
+    });
+  });
+
   it("surfaces the server's error message on a non-ok response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: "rationale is required" }) });
 

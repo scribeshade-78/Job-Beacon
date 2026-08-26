@@ -15,6 +15,7 @@ import {
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { EmployerClaimsQueuePanel } from "../panels/EmployerClaimsQueuePanel";
 import { CompanyFactCorrectionsQueuePanel } from "../panels/CompanyFactCorrectionsQueuePanel";
+import { AppealsQueuePanel } from "../panels/AppealsQueuePanel";
 
 interface ModeratorPageProps {
   onLogout: () => void;
@@ -61,7 +62,7 @@ async function getAccessToken(): Promise<string | null> {
   return data.session?.access_token ?? null;
 }
 
-type ModeratorTab = "vacancies" | "employerClaims" | "factCorrections";
+type ModeratorTab = "vacancies" | "employerClaims" | "factCorrections" | "appeals";
 
 export function ModeratorPage({ onLogout }: ModeratorPageProps) {
   const [tab, setTab] = useState<ModeratorTab>("vacancies");
@@ -183,6 +184,9 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
         >
           Fact corrections
         </Button>
+        <Button variant={tab === "appeals" ? "primary" : "secondary"} size="sm" onClick={() => setTab("appeals")}>
+          Appeals
+        </Button>
       </div>
 
       {tab === "employerClaims" ? (
@@ -192,6 +196,10 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
       ) : tab === "factCorrections" ? (
         <main className="mx-auto max-w-[1200px] p-6">
           <CompanyFactCorrectionsQueuePanel />
+        </main>
+      ) : tab === "appeals" ? (
+        <main className="mx-auto max-w-[1200px] p-6">
+          <AppealsQueuePanel />
         </main>
       ) : (
       <main className="mx-auto grid max-w-[1200px] gap-6 p-6 lg:grid-cols-[380px_1fr]">

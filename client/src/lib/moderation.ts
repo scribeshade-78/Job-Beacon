@@ -60,12 +60,19 @@ const GENERIC_DECISION_FAILURE_MESSAGE = "Could not record this decision. Please
 
 export type SubmitModerationDecisionResult = { kind: "success" } | { kind: "error"; message: string };
 
+/**
+ * appealId is trailing (after fetchImpl, not before) so every existing
+ * positional call site — none of which pass it — stays valid. Set it when
+ * this decision resolves an appeal case (R5.4c's AppealsQueuePanel); the
+ * server route has accepted it since R6.1-era code, just unused until now.
+ */
 export async function submitModerationDecision(
   caseId: string,
   decision: ModerationDecisionValue,
   rationale: string,
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
+  appealId?: string,
 ): Promise<SubmitModerationDecisionResult> {
   let response: Response;
 
@@ -73,7 +80,7 @@ export async function submitModerationDecision(
     response = await fetchImpl(`/api/moderation/cases/${caseId}/decisions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ decision, rationale, policyVersion: MODERATION_POLICY_VERSION }),
+      body: JSON.stringify({ decision, rationale, policyVersion: MODERATION_POLICY_VERSION, appealId }),
     });
   } catch {
     return { kind: "error", message: "Network error contacting the server." };
