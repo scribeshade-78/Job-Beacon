@@ -6,6 +6,13 @@ export interface ResponseClassificationEntry {
   confidence: number | null;
   modelVersion: string;
   classifiedAt: string;
+  extractedCompany: string | null;
+  extractedRole: string | null;
+  extractedJobId: string | null;
+  /** Postgres `date` — an ISO calendar day (YYYY-MM-DD) or null. */
+  extractedDeadline: string | null;
+  /** Verbatim salary phrasing from the message; never a computed figure. */
+  extractedSalaryText: string | null;
 }
 
 export interface InterviewEntry {
@@ -52,6 +59,11 @@ interface MessageRow {
     confidence: number | null;
     model_version: string;
     classified_at: string;
+    extracted_company: string | null;
+    extracted_role: string | null;
+    extracted_job_id: string | null;
+    extracted_deadline: string | null;
+    extracted_salary_text: string | null;
   }> | null;
   interviews: Array<{
     id: string;
@@ -93,7 +105,7 @@ export async function listMessages(client: Pick<SupabaseClient, "from">): Promis
     const { data, error } = await client
       .from("messages")
       .select(
-        "id, mailbox_connection_id, application_attempt_id, provider_message_id, sender, subject, received_at, response_classifications (id, category, confidence, model_version, classified_at), interviews (id, scheduled_at, format), candidate_action_items (id, item_type, status, due_at)",
+        "id, mailbox_connection_id, application_attempt_id, provider_message_id, sender, subject, received_at, response_classifications (id, category, confidence, model_version, classified_at, extracted_company, extracted_role, extracted_job_id, extracted_deadline, extracted_salary_text), interviews (id, scheduled_at, format), candidate_action_items (id, item_type, status, due_at)",
       )
       .order("received_at", { ascending: false });
 
@@ -119,6 +131,11 @@ export async function listMessages(client: Pick<SupabaseClient, "from">): Promis
           confidence: entry.confidence,
           modelVersion: entry.model_version,
           classifiedAt: entry.classified_at,
+          extractedCompany: entry.extracted_company,
+          extractedRole: entry.extracted_role,
+          extractedJobId: entry.extracted_job_id,
+          extractedDeadline: entry.extracted_deadline,
+          extractedSalaryText: entry.extracted_salary_text,
         })),
         interviews: (row.interviews ?? []).map((entry) => ({
           id: entry.id,

@@ -20,6 +20,11 @@ describe("listMessages", () => {
               confidence: 0.92,
               model_version: "classifier-v0",
               classified_at: "2026-08-20T00:01:00Z",
+              extracted_company: "ApplyCo",
+              extracted_role: "Backend Engineer",
+              extracted_job_id: "REQ-42",
+              extracted_deadline: "2026-08-25",
+              extracted_salary_text: "18-24 LPA",
             },
           ],
           interviews: [{ id: "interview-1", scheduled_at: "2026-08-25T10:00:00Z", format: "video" }],
@@ -52,6 +57,11 @@ describe("listMessages", () => {
               confidence: 0.92,
               modelVersion: "classifier-v0",
               classifiedAt: "2026-08-20T00:01:00Z",
+              extractedCompany: "ApplyCo",
+              extractedRole: "Backend Engineer",
+              extractedJobId: "REQ-42",
+              extractedDeadline: "2026-08-25",
+              extractedSalaryText: "18-24 LPA",
             },
           ],
           interviews: [{ id: "interview-1", scheduledAt: "2026-08-25T10:00:00Z", format: "video" }],
@@ -91,6 +101,60 @@ describe("listMessages", () => {
       expect(result.messages[0].classifications).toEqual([]);
       expect(result.messages[0].interviews).toEqual([]);
       expect(result.messages[0].actionItems).toEqual([]);
+    }
+  });
+
+  it("maps a classification whose entity columns are all null", async () => {
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "message-3",
+          mailbox_connection_id: "conn-1",
+          application_attempt_id: null,
+          provider_message_id: "msg-3",
+          sender: "noreply@applyco.example",
+          subject: "Application received",
+          received_at: "2026-08-21T00:00:00Z",
+          response_classifications: [
+            {
+              id: "classification-3",
+              category: "application_received",
+              confidence: null,
+              model_version: "openai/gpt-4o-mini",
+              classified_at: "2026-08-21T00:01:00Z",
+              extracted_company: null,
+              extracted_role: null,
+              extracted_job_id: null,
+              extracted_deadline: null,
+              extracted_salary_text: null,
+            },
+          ],
+          interviews: null,
+          candidate_action_items: null,
+        },
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listMessages>[0];
+
+    const result = await listMessages(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.messages[0].classifications[0]).toEqual({
+        id: "classification-3",
+        category: "application_received",
+        confidence: null,
+        modelVersion: "openai/gpt-4o-mini",
+        classifiedAt: "2026-08-21T00:01:00Z",
+        extractedCompany: null,
+        extractedRole: null,
+        extractedJobId: null,
+        extractedDeadline: null,
+        extractedSalaryText: null,
+      });
     }
   });
 

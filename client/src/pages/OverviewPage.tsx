@@ -1,8 +1,7 @@
-import { Inbox } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { EmptyState } from "../components/ui/empty-state";
 import { AutomationPanel } from "../panels/AutomationPanel";
 import { ActionRequiredPanel } from "../panels/ActionRequiredPanel";
+import { TodayPanel } from "../panels/TodayPanel";
 
 const STATS = [
   "Applications submitted",
@@ -39,20 +38,7 @@ export function OverviewPage({ candidateId, ready }: OverviewPageProps) {
         </Card>
       </div>
 
-      <div className="lg:col-span-8">
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent applications</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <EmptyState
-              icon={Inbox}
-              title="No recent applications yet"
-              description="This list isn't wired up yet — check the Applications page for your full history."
-            />
-          </CardContent>
-        </Card>
-      </div>
+      <div className="lg:col-span-8">{ready && <TodayPanel />}</div>
 
       <div className="lg:col-span-4">{ready && <ActionRequiredPanel />}</div>
     </div>
