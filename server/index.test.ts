@@ -5,6 +5,7 @@ import { APP_NAME } from "../shared/app.js";
 import type { CreateAppOptions } from "./index.js";
 import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
+import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
 // these route-level tests only care about auth/ownership/rate-limit/status-
@@ -26,6 +27,12 @@ vi.mock("./applications/runner.js", () => ({
 // server/mailbox/classifyBatch.test.ts; here only auth-gating and wiring.
 vi.mock("./mailbox/classifyBatch.js", () => ({
   runMessageClassificationBatch: vi.fn(),
+}));
+
+// POST /api/worker/match-messages — internals covered by
+// server/mailbox/matchBatch.test.ts.
+vi.mock("./mailbox/matchBatch.js", () => ({
+  runApplicationMatchBatch: vi.fn(),
 }));
 
 const { app, createApp } = await import("./index.js");
@@ -660,6 +667,57 @@ describe("POST /api/worker/classify-messages", () => {
         });
         expect(response.status).toBe(500);
         expect(await response.json()).toEqual({ error: "Failed to run message classification batch" });
+      },
+    );
+  });
+});
+
+describe("POST /api/worker/match-messages", () => {
+  const mockMatch = vi.mocked(runApplicationMatchBatch);
+  const batchResult = { scanned: 4, linked: 2, review: 1, ambiguous: 0, unmatched: 1, errors: 0 };
+
+  it("returns 401 for a missing/wrong secret without running the batch", async () => {
+    await withTestServer({ workerSecret: "correct-secret" }, async (testBaseUrl) => {
+      const missing = await fetch(`${testBaseUrl}/api/worker/match-messages`, { method: "POST" });
+      expect(missing.status).toBe(401);
+      const wrong = await fetch(`${testBaseUrl}/api/worker/match-messages`, {
+        method: "POST",
+        headers: { Authorization: "Bearer nope" },
+      });
+      expect(wrong.status).toBe(401);
+      expect(mockMatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the batch result for the correct secret", async () => {
+    mockMatch.mockResolvedValueOnce(batchResult);
+
+    await withTestServer(
+      { workerSecret: "correct-secret", serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/worker/match-messages`, {
+          method: "POST",
+          headers: { Authorization: "Bearer correct-secret" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(batchResult);
+        expect(mockMatch).toHaveBeenCalledOnce();
+      },
+    );
+  });
+
+  it("returns 500 when the batch throws", async () => {
+    mockMatch.mockRejectedValueOnce(new Error("db down"));
+
+    await withTestServer(
+      { workerSecret: "correct-secret", serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/worker/match-messages`, {
+          method: "POST",
+          headers: { Authorization: "Bearer correct-secret" },
+        });
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "Failed to run message match batch" });
       },
     );
   });

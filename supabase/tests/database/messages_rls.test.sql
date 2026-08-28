@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(11);
+select plan(13);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- mailbox_connections grants/RLS this fixture also touches are covered
@@ -54,6 +54,19 @@ select lives_ok(
   'service_role can insert into messages'
 );
 
+-- 4b. service_role can record an application-match result (Phase 3).
+-- application_attempt_id is left NULL here — pointing it at a real attempt
+-- needs the whole application_plans -> vacancies -> ... fixture chain,
+-- which application_attempts_rls.test.sql already covers; this asserts the
+-- new explainability column is writable and the matcher's shape round-trips.
+select lives_ok(
+  $$update messages
+      set application_match =
+        '{"confidence": 0.95, "reasons": ["job_id_exact"], "matched_at": "2026-08-28T00:00:00Z"}'::jsonb
+    where id = 'eeeeeeee-9010-1111-1111-111111111111'$$,
+  'service_role can write messages.application_match'
+);
+
 -- 5. a duplicate (mailbox_connection_id, provider_message_id) is rejected
 select throws_ok(
   $$insert into messages (mailbox_connection_id, provider_message_id)
@@ -73,6 +86,15 @@ select results_eq(
   $$select subject from messages where id = 'eeeeeeee-9010-1111-1111-111111111111'$$,
   $$values ('Re: your application'::text)$$,
   'Candidate A can select a message on their own mailbox connection'
+);
+
+-- 6b. the application_match explainability column is covered by the same
+-- SELECT policy — no separate grant, the owner can read why it was linked
+select results_eq(
+  $$select application_match->>'confidence' from messages
+      where id = 'eeeeeeee-9010-1111-1111-111111111111'$$,
+  $$values ('0.95'::text)$$,
+  'Candidate A can read messages.application_match on their own message'
 );
 
 -- 7. Candidate A cannot insert — no grant exists

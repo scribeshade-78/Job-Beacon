@@ -18,6 +18,7 @@ import { createOpenAIClient } from "./resumes/openaiClient.js";
 import { extractResumeFacts } from "./resumes/extractFacts.js";
 import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
+import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -650,6 +651,21 @@ export function createApp(options: CreateAppOptions = {}) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Message classification run failed:", message);
       response.status(500).json({ error: "Failed to run message classification batch" });
+    }
+  });
+
+  // R6.3 Response Intelligence Phase 3: link classified-but-unlinked
+  // messages to the owning candidate's application attempts. Runs after
+  // /api/worker/classify-messages on the same external scheduler; safe to
+  // re-run (only touches messages whose application_attempt_id IS NULL).
+  app.post("/api/worker/match-messages", requireWorkerSecret, async (_request, response) => {
+    try {
+      const result = await runApplicationMatchBatch(resolveServiceClient());
+      response.status(200).json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Message match run failed:", message);
+      response.status(500).json({ error: "Failed to run message match batch" });
     }
   });
 
