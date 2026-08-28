@@ -16,11 +16,14 @@ export class GmailApiError extends Error {
 }
 
 /**
- * `format=metadata` only — never `format=full`. messages.raw_payload is
- * meant to hold Gmail's own response shape verbatim (see
- * 20260820140010_messages.sql's comment), but that migration deliberately
- * has no body/content column: fetching `format=full` would pull the email
- * body into raw_payload anyway, defeating that decision. `q=in:inbox`
+ * `format=metadata` for anything whose result reaches messages.raw_payload
+ * — never `format=full` on the persisted path. raw_payload is meant to
+ * hold Gmail's own response shape verbatim (see 20260820140010_messages.sql's
+ * comment), but that migration deliberately has no body/content column:
+ * fetching `format=full` here would pull the email body into raw_payload
+ * anyway, defeating that decision. (fetchMessagePlainText below does use
+ * `format=full`, but returns only the decoded text for in-memory
+ * classification and persists nothing.) `q=in:inbox`
  * excludes Spam/Trash/Promotions/Social — reading the minimum necessary,
  * not a relevance filter (response_classifications, not ingestion, decides
  * what's actually a recruiter reply).
@@ -90,4 +93,67 @@ export async function fetchMessageMetadata(
     receivedAt: body.internalDate ? new Date(Number(body.internalDate)).toISOString() : null,
     raw: body,
   };
+}
+
+/** Bounds the classifier prompt cost — recruiter emails carry their signal well within this; the tail is quoted history and signatures. */
+const MAX_BODY_TEXT_CHARS = 20_000;
+
+interface GmailPart {
+  mimeType?: string;
+  body?: { data?: string };
+  parts?: GmailPart[];
+}
+
+function findPlainTextPart(part: GmailPart | undefined): string | null {
+  if (!part) {
+    return null;
+  }
+  if (part.mimeType === "text/plain" && part.body?.data) {
+    return part.body.data;
+  }
+  for (const child of part.parts ?? []) {
+    const found = findPlainTextPart(child);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * R6.3 (Response Intelligence): fetches the message's plain-text body for
+ * in-memory AI classification only — the founder-approved "Option B" of
+ * this phase. `format=full` is used here (the one place it's allowed:
+ * fetchMessageMetadata above still uses `format=metadata` so the body
+ * never lands in messages.raw_payload), and the decoded text is returned
+ * directly and never persisted. Returns null when the message has no
+ * text/plain part (HTML-only mail) — the classifier then works from
+ * sender + subject alone rather than this function guessing at markup.
+ */
+export async function fetchMessagePlainText(
+  accessToken: string,
+  messageId: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<string | null> {
+  const url = new URL(`${GMAIL_API_BASE}/messages/${messageId}`);
+  url.searchParams.set("format", "full");
+
+  const response = await fetchImpl(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    throw new GmailApiError(`Gmail messages.get (full) failed: HTTP ${response.status}`, response.status);
+  }
+
+  const body = (await response.json()) as { payload?: GmailPart };
+  const encoded = findPlainTextPart(body.payload);
+
+  if (!encoded) {
+    return null;
+  }
+
+  // Gmail encodes part bodies as base64url.
+  const decoded = Buffer.from(encoded, "base64url").toString("utf8").trim();
+  return decoded ? decoded.slice(0, MAX_BODY_TEXT_CHARS) : null;
 }

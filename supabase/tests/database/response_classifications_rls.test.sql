@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(11);
+select plan(14);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- mailbox_connections/messages grants/RLS this fixture also touches are
@@ -44,11 +44,27 @@ select is_empty(
 
 set local role service_role;
 
--- 4. service_role can insert a classification
+-- 4. service_role can insert a classification, including the Phase 1 entity columns
 select lives_ok(
-  $$insert into response_classifications (id, message_id, category, confidence, model_version)
-    values ('ffffffff-9011-1111-1111-111111111111', 'eeeeeeee-9011-1111-1111-111111111111', 'rejection', 0.92, 'classifier-v0')$$,
-  'service_role can insert into response_classifications'
+  $$insert into response_classifications
+      (id, message_id, category, confidence, model_version, prompt_version,
+       extracted_company, extracted_role, extracted_job_id, extracted_deadline,
+       extracted_salary_text, raw_extraction)
+    values ('ffffffff-9011-1111-1111-111111111111', 'eeeeeeee-9011-1111-1111-111111111111',
+       'rejection', 0.92, 'classifier-v0', 'message-classification-v1',
+       'Acme Corp', 'Backend Engineer', 'REQ-42', date '2026-09-15',
+       '18-24 LPA', '{"category":"rejection"}'::jsonb)$$,
+  'service_role can insert into response_classifications with entity columns'
+);
+
+-- 4b. the unique index on message_id makes classification idempotent-by-upsert:
+-- a second plain insert for the same message is rejected
+select throws_ok(
+  $$insert into response_classifications (message_id, category, model_version)
+    values ('eeeeeeee-9011-1111-1111-111111111111', 'interview', 'classifier-v0')$$,
+  '23505',
+  null,
+  'a second response_classifications row for the same message violates the unique index'
 );
 reset role;
 
@@ -61,6 +77,22 @@ select results_eq(
   $$select category from response_classifications where id = 'ffffffff-9011-1111-1111-111111111111'$$,
   $$values ('rejection'::text)$$,
   'Candidate A can select a classification on their own mailbox message'
+);
+
+-- 5b. the entity columns are covered by the same SELECT policy — no separate grant needed
+select results_eq(
+  $$select extracted_company, extracted_job_id, extracted_deadline
+      from response_classifications where id = 'ffffffff-9011-1111-1111-111111111111'$$,
+  $$values ('Acme Corp'::text, 'REQ-42'::text, date '2026-09-15')$$,
+  'Candidate A can read the extracted entity columns on their own message classification'
+);
+
+-- 5c. raw_extraction round-trips as jsonb for the owner
+select results_eq(
+  $$select raw_extraction->>'category' from response_classifications
+      where id = 'ffffffff-9011-1111-1111-111111111111'$$,
+  $$values ('rejection'::text)$$,
+  'Candidate A can read raw_extraction jsonb on their own message classification'
 );
 
 -- 6. Candidate A cannot insert — no grant exists

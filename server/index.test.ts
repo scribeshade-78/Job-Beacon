@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { APP_NAME } from "../shared/app.js";
 import type { CreateAppOptions } from "./index.js";
 import { runApplicationBatch } from "./applications/runner.js";
+import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
 // these route-level tests only care about auth/ownership/rate-limit/status-
@@ -19,6 +20,12 @@ vi.mock("./resumes/textExtraction.js", () => ({
 // these route-level tests only care about auth-gating and response wiring.
 vi.mock("./applications/runner.js", () => ({
   runApplicationBatch: vi.fn(),
+}));
+
+// POST /api/worker/classify-messages — same shape: internals covered by
+// server/mailbox/classifyBatch.test.ts; here only auth-gating and wiring.
+vi.mock("./mailbox/classifyBatch.js", () => ({
+  runMessageClassificationBatch: vi.fn(),
 }));
 
 const { app, createApp } = await import("./index.js");
@@ -604,5 +611,56 @@ describe("POST /api/worker/run", () => {
       expect(response.status).toBe(500);
       expect(await response.json()).toEqual({ error: "Failed to run application batch" });
     });
+  });
+});
+
+describe("POST /api/worker/classify-messages", () => {
+  const mockRun = vi.mocked(runMessageClassificationBatch);
+  const batchResult = { scanned: 3, classified: 2, malformed: 0, errors: 1 };
+
+  it("returns 401 for a missing/wrong secret without running the batch", async () => {
+    await withTestServer({ workerSecret: "correct-secret" }, async (testBaseUrl) => {
+      const missing = await fetch(`${testBaseUrl}/api/worker/classify-messages`, { method: "POST" });
+      expect(missing.status).toBe(401);
+      const wrong = await fetch(`${testBaseUrl}/api/worker/classify-messages`, {
+        method: "POST",
+        headers: { Authorization: "Bearer nope" },
+      });
+      expect(wrong.status).toBe(401);
+      expect(mockRun).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the batch result for the correct secret", async () => {
+    mockRun.mockResolvedValueOnce(batchResult);
+
+    await withTestServer(
+      { workerSecret: "correct-secret", serviceClient: {} as never, openaiClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/worker/classify-messages`, {
+          method: "POST",
+          headers: { Authorization: "Bearer correct-secret" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(batchResult);
+        expect(mockRun).toHaveBeenCalledOnce();
+      },
+    );
+  });
+
+  it("returns 500 when the batch throws", async () => {
+    mockRun.mockRejectedValueOnce(new Error("openrouter down"));
+
+    await withTestServer(
+      { workerSecret: "correct-secret", serviceClient: {} as never, openaiClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/worker/classify-messages`, {
+          method: "POST",
+          headers: { Authorization: "Bearer correct-secret" },
+        });
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "Failed to run message classification batch" });
+      },
+    );
   });
 });

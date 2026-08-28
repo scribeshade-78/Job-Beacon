@@ -17,6 +17,7 @@ import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
 import { createOpenAIClient } from "./resumes/openaiClient.js";
 import { extractResumeFacts } from "./resumes/extractFacts.js";
 import { runApplicationBatch } from "./applications/runner.js";
+import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -634,6 +635,21 @@ export function createApp(options: CreateAppOptions = {}) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Worker run failed:", message);
       response.status(500).json({ error: "Failed to run application batch" });
+    }
+  });
+
+  // R6.3 Response Intelligence: backfill/retry classification of stored
+  // messages, for the same external scheduler as /api/worker/run. Fresh
+  // mail is classified inline during the mailbox poll; this drains the
+  // backlog and anything the poll couldn't classify.
+  app.post("/api/worker/classify-messages", requireWorkerSecret, async (_request, response) => {
+    try {
+      const result = await runMessageClassificationBatch(resolveServiceClient(), resolveOpenAIClient());
+      response.status(200).json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Message classification run failed:", message);
+      response.status(500).json({ error: "Failed to run message classification batch" });
     }
   });
 

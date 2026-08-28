@@ -1,4 +1,6 @@
+import type OpenAI from "openai";
 import { createSupabaseServiceRoleClient } from "../supabaseServiceRole.js";
+import { createOpenAIClient } from "../resumes/openaiClient.js";
 import { readGoogleOAuthConfig } from "./oauth.js";
 import { readMailboxEncryptionKey } from "./tokenCrypto.js";
 import { runMailboxPollingBatch } from "./poll.js";
@@ -16,7 +18,16 @@ async function main() {
   const config = readGoogleOAuthConfig();
   const encryptionKey = readMailboxEncryptionKey();
 
-  const result = await runMailboxPollingBatch(client, config, encryptionKey);
+  // Optional: without OPENROUTER_API_KEY the poll still runs and stores
+  // messages — classification is left to `npm run worker:mailbox-classify`.
+  let openaiClient: OpenAI | undefined;
+  try {
+    openaiClient = createOpenAIClient();
+  } catch (error) {
+    console.warn("[mailbox:cli] classification disabled this run:", error instanceof Error ? error.message : error);
+  }
+
+  const result = await runMailboxPollingBatch(client, config, encryptionKey, fetch, openaiClient);
 
   console.log("[mailbox:cli] batch complete", result);
 }

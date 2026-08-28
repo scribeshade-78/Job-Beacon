@@ -52,7 +52,14 @@ describe("claimMailboxConnectionsForPolling", () => {
 
 // ---- pollOneMailboxConnection ----
 
-function makePollClient(overrides: { updateResults?: Array<{ error: unknown }>; upsertResults?: Array<{ error: unknown }> } = {}) {
+function makePollClient(
+  overrides: {
+    updateResults?: Array<{ error: unknown }>;
+    upsertResults?: Array<{ data?: unknown; error: unknown }>;
+    classificationUpsertResult?: { error: unknown };
+    existingClassification?: { data: unknown; error: unknown };
+  } = {},
+) {
   const updateCalls: unknown[] = [];
   const upsertCalls: Array<{ payload: unknown; options: unknown }> = [];
   let updateIdx = 0;
@@ -65,12 +72,19 @@ function makePollClient(overrides: { updateResults?: Array<{ error: unknown }>; 
     return { eq: vi.fn(async () => result) };
   });
 
-  const messagesUpsert = vi.fn(async (payload: unknown, options: unknown) => {
+  // messages.upsert(...).select("id").single()
+  const messagesUpsert = vi.fn((payload: unknown, options: unknown) => {
     upsertCalls.push({ payload, options });
-    const result = overrides.upsertResults?.[upsertIdx] ?? { error: null };
+    const idx = upsertIdx;
+    const result = overrides.upsertResults?.[idx] ?? { data: { id: `msg-db-${idx}` }, error: null };
     upsertIdx += 1;
-    return result;
+    return { select: () => ({ single: async () => result }) };
   });
+
+  const classificationUpsert = vi.fn(
+    async (_row: unknown) => overrides.classificationUpsertResult ?? { error: null },
+  );
+  const classificationLookup = vi.fn(async () => overrides.existingClassification ?? { data: null, error: null });
 
   const from = vi.fn((table: string) => {
     if (table === "mailbox_connections") {
@@ -79,11 +93,26 @@ function makePollClient(overrides: { updateResults?: Array<{ error: unknown }>; 
     if (table === "messages") {
       return { upsert: messagesUpsert };
     }
+    if (table === "response_classifications") {
+      return {
+        upsert: classificationUpsert,
+        select: () => ({ eq: () => ({ maybeSingle: classificationLookup }) }),
+      };
+    }
     throw new Error(`Unexpected table ${table}`);
   });
 
   const client = { from } as unknown as SupabaseClient;
-  return { client, from, mailboxUpdate, messagesUpsert, updateCalls, upsertCalls };
+  return {
+    client,
+    from,
+    mailboxUpdate,
+    messagesUpsert,
+    classificationUpsert,
+    classificationLookup,
+    updateCalls,
+    upsertCalls,
+  };
 }
 
 function makeGmailFetch(
@@ -112,6 +141,15 @@ function makeGmailFetch(
       return { ok: true, json: async () => ({ messages: (options.messageIds ?? []).map((id) => ({ id })) }) } as Response;
     }
 
+    if (urlStr.includes("/messages/") && urlStr.includes("format=full")) {
+      return {
+        ok: true,
+        json: async () => ({
+          payload: { mimeType: "text/plain", body: { data: Buffer.from("email body text", "utf8").toString("base64url") } },
+        }),
+      } as Response;
+    }
+
     if (urlStr.includes("/messages/")) {
       const id = urlStr.split("/messages/")[1]?.split("?")[0];
       return {
@@ -127,6 +165,21 @@ function makeGmailFetch(
     throw new Error(`Unexpected fetch to ${urlStr}`);
   });
 }
+
+function makeClassifierClient(content: string) {
+  const create = vi.fn().mockResolvedValue({ choices: [{ message: { content } }] });
+  return { chat: { completions: { create } } } as unknown as Pick<import("openai").default, "chat">;
+}
+
+const VALID_CLASSIFICATION_JSON = JSON.stringify({
+  category: "recruiter_followup",
+  confidence: 0.8,
+  company: null,
+  role: null,
+  job_id: null,
+  deadline: null,
+  salary_text: null,
+});
 
 const NOT_EXPIRED_CONNECTION = {
   id: "conn-1",
@@ -254,6 +307,54 @@ describe("pollOneMailboxConnection", () => {
     expect(result.outcome).toBe("terminal_error");
     expect(updateCalls[0]).toMatchObject({ status: "error" });
   });
+
+  it("classifies each stored message with its plain-text body when an openaiClient is passed", async () => {
+    const { client, classificationUpsert } = makePollClient();
+    const fetchImpl = makeGmailFetch({ messageIds: ["m1", "m2"] });
+    const openai = makeClassifierClient(VALID_CLASSIFICATION_JSON);
+
+    const result = await pollOneMailboxConnection(client, NOT_EXPIRED_CONNECTION, CONFIG, KEY, fetchImpl, openai);
+
+    expect(result.outcome).toBe("success");
+    expect(classificationUpsert).toHaveBeenCalledTimes(2);
+    expect(classificationUpsert.mock.calls[0][0]).toMatchObject({ message_id: "msg-db-0", category: "recruiter_followup" });
+    // format=full was fetched for the body
+    expect(fetchImpl).toHaveBeenCalledWith(expect.stringContaining("format=full"), expect.anything());
+  });
+
+  it("does not classify — and stays successful — when no openaiClient is passed", async () => {
+    const { client, classificationUpsert } = makePollClient();
+    const fetchImpl = makeGmailFetch({ messageIds: ["m1"] });
+
+    const result = await pollOneMailboxConnection(client, NOT_EXPIRED_CONNECTION, CONFIG, KEY, fetchImpl);
+
+    expect(result.outcome).toBe("success");
+    expect(classificationUpsert).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalledWith(expect.stringContaining("format=full"), expect.anything());
+  });
+
+  it("a classification failure is swallowed and never changes the poll outcome", async () => {
+    const { client } = makePollClient();
+    const fetchImpl = makeGmailFetch({ messageIds: ["m1"] });
+    const openai = { chat: { completions: { create: vi.fn().mockRejectedValue(new Error("OpenRouter down")) } } } as unknown as Pick<import("openai").default, "chat">;
+
+    const result = await pollOneMailboxConnection(client, NOT_EXPIRED_CONNECTION, CONFIG, KEY, fetchImpl, openai);
+
+    expect(result).toEqual({ connectionId: "conn-1", messagesFetched: 1, outcome: "success" });
+  });
+
+  it("skips the model call for a message that already has a classification (poll-window overlap)", async () => {
+    const { client, classificationUpsert } = makePollClient({ existingClassification: { data: { id: "rc-1" }, error: null } });
+    const fetchImpl = makeGmailFetch({ messageIds: ["m1"] });
+    const openai = makeClassifierClient(VALID_CLASSIFICATION_JSON);
+
+    const result = await pollOneMailboxConnection(client, NOT_EXPIRED_CONNECTION, CONFIG, KEY, fetchImpl, openai);
+
+    expect(result.outcome).toBe("success");
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+    expect(classificationUpsert).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalledWith(expect.stringContaining("format=full"), expect.anything());
+  });
 });
 
 // ---- runMailboxPollingBatch ----
@@ -274,7 +375,9 @@ describe("runMailboxPollingBatch", () => {
       }
       return { eq: vi.fn(async () => ({ error: null })) };
     });
-    const messagesUpsert = vi.fn(async () => ({ error: null }));
+    const messagesUpsert = vi.fn(() => ({
+      select: () => ({ single: async () => ({ data: { id: "m-db" }, error: null }) }),
+    }));
     const from = vi.fn((table: string) => {
       if (table === "mailbox_connections") {
         return { update: mailboxUpdate };

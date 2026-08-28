@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { fetchMessageMetadata, listRecentMessageIds } from "./gmailClient.js";
+import type OpenAI from "openai";
+import { fetchMessageMetadata, fetchMessagePlainText, listRecentMessageIds } from "./gmailClient.js";
+import { classifyAndStoreMessage } from "./classifyBatch.js";
 import {
   GoogleRefreshTokenInvalidError,
   refreshGoogleAccessToken,
@@ -90,6 +92,7 @@ export async function pollOneMailboxConnection(
   config: GoogleOAuthConfig,
   encryptionKey: Buffer,
   fetchImpl: FetchImpl = fetch,
+  openaiClient?: Pick<OpenAI, "chat">,
 ): Promise<PollConnectionResult> {
   if (!connection.secret_manager_key) {
     // Shouldn't happen for a 'connected' row (completeMailboxConnect always
@@ -140,20 +143,58 @@ export async function pollOneMailboxConnection(
     for (const messageId of messageIds) {
       const metadata = await fetchMessageMetadata(accessToken, messageId, fetchImpl);
 
-      const { error: upsertError } = await client.from("messages").upsert(
-        {
-          mailbox_connection_id: connection.id,
-          provider_message_id: metadata.id,
-          sender: metadata.sender,
-          subject: metadata.subject,
-          received_at: metadata.receivedAt,
-          raw_payload: metadata.raw,
-        },
-        { onConflict: "mailbox_connection_id,provider_message_id" },
-      );
+      const { data: upserted, error: upsertError } = await client
+        .from("messages")
+        .upsert(
+          {
+            mailbox_connection_id: connection.id,
+            provider_message_id: metadata.id,
+            sender: metadata.sender,
+            subject: metadata.subject,
+            received_at: metadata.receivedAt,
+            raw_payload: metadata.raw,
+          },
+          { onConflict: "mailbox_connection_id,provider_message_id" },
+        )
+        .select("id")
+        .single();
 
       if (upsertError) {
         throw upsertError;
+      }
+
+      if (openaiClient && upserted) {
+        // Best-effort Response Intelligence classification. It must never
+        // fail or slow a poll — a message not classified here is picked up
+        // later by runMessageClassificationBatch. Same "AI step isolated
+        // from ingestion" stance as trust scoring in the ingestion worker.
+        const messageDbId = (upserted as { id: string }).id;
+        try {
+          // The poll window overlaps the previous run by an hour, so most
+          // messages seen here were already stored (and classified) on an
+          // earlier pass — skip the paid model call when a classification
+          // already exists.
+          const { data: existing } = await client
+            .from("response_classifications")
+            .select("id")
+            .eq("message_id", messageDbId)
+            .maybeSingle();
+
+          if (!existing) {
+            const bodyText = await fetchMessagePlainText(accessToken, metadata.id, fetchImpl);
+            await classifyAndStoreMessage(client, openaiClient, {
+              messageId: messageDbId,
+              sender: metadata.sender,
+              subject: metadata.subject,
+              bodyText,
+            });
+          }
+        } catch (error) {
+          console.error("[mailbox:poll] classification failed for a message", {
+            connectionId: connection.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     }
 
@@ -221,6 +262,7 @@ export async function runMailboxPollingBatch(
   config: GoogleOAuthConfig,
   encryptionKey: Buffer,
   fetchImpl: FetchImpl = fetch,
+  openaiClient?: Pick<OpenAI, "chat">,
 ): Promise<RunMailboxPollingBatchResult> {
   const connections = await claimMailboxConnectionsForPolling(client);
 
@@ -230,7 +272,14 @@ export async function runMailboxPollingBatch(
 
   for (const connection of connections) {
     try {
-      const result = await pollOneMailboxConnection(client, connection, config, encryptionKey, fetchImpl);
+      const result = await pollOneMailboxConnection(
+        client,
+        connection,
+        config,
+        encryptionKey,
+        fetchImpl,
+        openaiClient,
+      );
 
       if (result.outcome === "success") {
         succeeded += 1;
