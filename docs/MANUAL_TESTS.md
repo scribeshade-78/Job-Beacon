@@ -293,9 +293,34 @@ Steps:
 - `soft_penalties` is always `[]` in v1 (all its codes are reserved).
 - Re-running `scoreVacancy` on an already-`VERIFIED` vacancy does not re-enqueue.
 
+## Response Intelligence Phase 2.2 — Priority Scoring & Opportunities UI — Verification
+
+### Regression check (no live environment needed)
+
+- `npm run typecheck` passes.
+- `npm test` passes — new `shared/priorityScore.test.ts` (weights sum to 1.00, neutral-default composite, hard-blocker cap → 0 with uncapped preserved, null-factor → neutral 50, clamp); new `client/src/lib/opportunities.test.ts` cases (fit join + `computePriorityScore`, no-row → `fitAnalysis: null`, sort by priority desc with pending last, hard-blocked sorts below eligible + above pending, `fit_analyses` query error still returns the list).
+
+### Live smoke test (DEFERRED — needs the app running against a local Supabase with ≥1 `fit_analyses` row for the signed-in candidate)
+
+Pre-checks: complete the Phase 2.1 live smoke test first so at least one `fit_analyses` row exists (ideally three verified vacancies for the same candidate: one eligible with JD text, one `LOCATION_PRESENCE`-capped, one verified-but-not-yet-analysed).
+
+Steps:
+
+1. `npm run dev`, sign in as that candidate, open **Opportunities**.
+2. Header shows "Sorted by priority". Cards are ordered: highest priority score first, hard-blocked (priority 0) below eligible ones, "Fit analysis pending" cards last.
+3. An eligible card shows a green/amber `Priority NN` chip, `Technical fit NN`, `Eligibility 100`, any `Missing:` skill chips (max 5 then `+N more`), and up to 3 top-reason bullets.
+4. The `LOCATION_PRESENCE` card shows a red `Not eligible` chip, a red "Not eligible." banner with the blocker detail, and `(would rank NN if eligible)`.
+5. A verified vacancy with no `fit_analyses` row shows only "Fit analysis pending" — no chips, no error.
+6. A card whose fit row has `jd_text_available = false` shows `Technical fit — (no job description text)` and still a numeric priority (technical-fit factor falls back to neutral 50).
+
+### Known-expected behavior (NOT bugs)
+
+- Priority scores cluster near 50 — 6 of the 8 §12.1 factors are held at a neutral 50 until their data sources land (Phase 2.3+). The score still orders by fit + eligibility.
+- The score is computed on read (`shared/priorityScore.ts`), not stored; there is no `priority_score` column.
+
 ## Future phases (placeholders)
 
 - MP-W2 (or similar): continuous daemon/polling mode + `SIGINT`/`SIGTERM` graceful shutdown, deferred out of MP-W1's scope
 - First real per-source submission adapter (e.g. Greenhouse), once an authorized employer relationship and credentials exist — MP-A1 built the capability model this depends on, but registers none
-- Phase 2.2: the §12.1 weighted 8-factor Opportunity Priority Score + the Opportunities UI (Technical Fit / Practical Eligibility shown separately with reasons and risks) + §11.4 compensation model
+- Phase 2.3+: replace the 6 neutral-50 placeholder factors in `shared/priorityScore.ts` with real signals (response stage, employment arrangement, compensation quality, company credibility, urgency, user preferences); promote the priority score to a stored, versioned `fit_analyses` column at that point; §11.4 compensation model in the UI
 - USAJOBS `Fields=Full` so its duties text is actually captured (out of scope for 2.1)

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { computePriorityScore, type PriorityScore } from "../../../shared/priorityScore";
 
 export type OpportunityTrustStatus =
   | "VERIFIED"
@@ -53,6 +54,26 @@ function formatNumber(n: number): string {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(n);
 }
 
+export interface OpportunityReasonEntry {
+  code: string;
+  detail: string;
+}
+
+/**
+ * The candidate-facing slice of a fit_analyses row (Phase 2.1) plus the
+ * Phase 2.2 weighted §12.1 priority score computed on read.
+ */
+export interface OpportunityFitAnalysis {
+  priority: PriorityScore;
+  technicalFitScore: number | null;
+  practicalEligibilityScore: number | null;
+  eligibilityCapped: boolean;
+  hardBlockers: OpportunityReasonEntry[];
+  missingEvidence: string[];
+  topReasons: string[];
+  jdTextAvailable: boolean;
+}
+
 export interface OpportunitySummary {
   id: string;
   title: string;
@@ -67,6 +88,8 @@ export interface OpportunitySummary {
   discoveredAt: string;
   lastSeenAt: string;
   autoApplyStatus: OpportunityAutoApplyStatus;
+  /** null until the fit-analysis worker has produced a fit_analyses row for this candidate x vacancy. */
+  fitAnalysis: OpportunityFitAnalysis | null;
 }
 
 interface VacancyRow {
@@ -93,6 +116,17 @@ interface VacancyRow {
     status: string;
     gate_results: { eligible: boolean } | null;
   }> | null;
+}
+
+interface FitAnalysisRow {
+  vacancy_id: string;
+  technical_fit_score: number | null;
+  practical_eligibility_score: number | null;
+  eligibility_capped: boolean;
+  hard_blockers: OpportunityReasonEntry[] | null;
+  missing_evidence: string[] | null;
+  top_reasons: string[] | null;
+  jd_text_available: boolean;
 }
 
 const FAILURE_MESSAGE = "Could not load opportunities. Please try again.";
@@ -206,11 +240,99 @@ export async function listOpportunities(
         discoveredAt: row.discovered_at,
         lastSeenAt: row.last_seen_at,
         autoApplyStatus: mapAutoApplyStatus(row.application_plans),
+        fitAnalysis: null as OpportunityFitAnalysis | null,
       };
     });
+
+    await attachFitAnalyses(client, opportunities);
+    sortByPriority(opportunities);
 
     return { kind: "success", opportunities };
   } catch {
     return { kind: "error", message: FAILURE_MESSAGE };
   }
+}
+
+/**
+ * Fetches this candidate's fit_analyses rows for the listed vacancies (RLS
+ * scopes them to the signed-in candidate automatically) and attaches the
+ * §12.1 priority score. A fit-lookup failure is swallowed — the
+ * Opportunities list must still render without fit data rather than error
+ * out entirely.
+ */
+async function attachFitAnalyses(
+  client: Pick<SupabaseClient, "from">,
+  opportunities: OpportunitySummary[],
+): Promise<void> {
+  if (opportunities.length === 0) {
+    return;
+  }
+
+  try {
+    const { data, error } = await client
+      .from("fit_analyses")
+      .select(
+        "vacancy_id, technical_fit_score, practical_eligibility_score, eligibility_capped, hard_blockers, missing_evidence, top_reasons, jd_text_available",
+      )
+      .in(
+        "vacancy_id",
+        opportunities.map((o) => o.id),
+      );
+
+    if (error || !data) {
+      return;
+    }
+
+    const byVacancy = new Map<string, FitAnalysisRow>();
+    for (const fit of data as unknown as FitAnalysisRow[]) {
+      byVacancy.set(fit.vacancy_id, fit);
+    }
+
+    for (const opp of opportunities) {
+      const fit = byVacancy.get(opp.id);
+      if (!fit) {
+        continue;
+      }
+      opp.fitAnalysis = {
+        priority: computePriorityScore({
+          technicalFitScore: fit.technical_fit_score,
+          practicalEligibilityScore: fit.practical_eligibility_score,
+          eligibilityCapped: fit.eligibility_capped,
+        }),
+        technicalFitScore: fit.technical_fit_score,
+        practicalEligibilityScore: fit.practical_eligibility_score,
+        eligibilityCapped: fit.eligibility_capped,
+        hardBlockers: fit.hard_blockers ?? [],
+        missingEvidence: fit.missing_evidence ?? [],
+        topReasons: fit.top_reasons ?? [],
+        jdTextAvailable: fit.jd_text_available,
+      };
+    }
+  } catch {
+    // fit data is best-effort — leave fitAnalysis null on any failure.
+  }
+}
+
+/**
+ * Scored opportunities first (priority score desc), then not-yet-analysed
+ * ones; last_seen_at desc as the tiebreak within each group. A
+ * hard-blocked opportunity has priority 0, so it sinks below eligible ones
+ * but stays above "analysis pending".
+ */
+function sortByPriority(opportunities: OpportunitySummary[]): void {
+  opportunities.sort((a, b) => {
+    const pa = a.fitAnalysis?.priority.score ?? null;
+    const pb = b.fitAnalysis?.priority.score ?? null;
+
+    if (pa !== null && pb !== null && pa !== pb) {
+      return pb - pa;
+    }
+    if (pa !== null && pb === null) {
+      return -1;
+    }
+    if (pa === null && pb !== null) {
+      return 1;
+    }
+    return b.lastSeenAt.localeCompare(a.lastSeenAt);
+  });
 }

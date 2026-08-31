@@ -1,18 +1,68 @@
 import { describe, expect, it, vi } from "vitest";
 import { listOpportunities, formatSalary, type OpportunitySalary } from "./opportunities";
 
-function makeClient(opportunities: unknown) {
+/** Thenable chainable stub — select/in/eq/order all return `this`; awaiting resolves to `result`. */
+function tableStub(result: { data: unknown; error: unknown }) {
+  const b: Record<string, unknown> = {};
+  for (const m of ["select", "in", "eq", "order"]) {
+    b[m] = () => b;
+  }
+  b.then = (resolve: (v: unknown) => void) => resolve(result);
+  return b;
+}
+
+function makeClient(
+  opportunities: unknown,
+  fitAnalyses: unknown = [],
+  fitError: unknown = null,
+) {
   return {
-    from: vi.fn(() => ({
-      select: vi.fn(() => ({
-        in: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            order: vi.fn(() => Promise.resolve({ data: opportunities, error: null })),
-          })),
-        })),
-      })),
-    })),
+    from: vi.fn((table: string) => {
+      if (table === "fit_analyses") {
+        return tableStub({ data: fitError ? null : fitAnalyses, error: fitError });
+      }
+      return tableStub({ data: opportunities, error: null });
+    }),
   } as never;
+}
+
+function vacancyRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "vac-1",
+    raw_title: "Test Role",
+    authoritative_url: "https://example.com/jobs/1",
+    company_id: null,
+    country: "United Kingdom",
+    region: null,
+    city: "London",
+    remote_type: null,
+    currency: null,
+    salary_min: null,
+    salary_max: null,
+    salary_interval: null,
+    salary_source: null,
+    discovered_at: "2026-01-15T10:00:00Z",
+    last_seen_at: "2026-01-20T10:00:00Z",
+    trust_status: "VERIFIED",
+    companies: null,
+    vacancy_trust_scores: [{ score: 72 }],
+    application_plans: [],
+    ...over,
+  };
+}
+
+function fitRow(over: Record<string, unknown> = {}) {
+  return {
+    vacancy_id: "vac-1",
+    technical_fit_score: 80,
+    practical_eligibility_score: 100,
+    eligibility_capped: false,
+    hard_blockers: [],
+    missing_evidence: [],
+    top_reasons: [],
+    jd_text_available: true,
+    ...over,
+  };
 }
 
 describe("formatSalary", () => {
@@ -272,5 +322,89 @@ describe("listOpportunities", () => {
     } as never;
 
     await listOpportunities(client);
+  });
+
+  it("attaches the fit analysis and computes the §12.1 priority score", async () => {
+    const client = makeClient([vacancyRow()], [fitRow({ technical_fit_score: 80, practical_eligibility_score: 100 })]);
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      const fit = result.opportunities[0].fitAnalysis;
+      expect(fit).not.toBeNull();
+      expect(fit?.technicalFitScore).toBe(80);
+      expect(fit?.practicalEligibilityScore).toBe(100);
+      // 0.2*80 + 0.2*100 + 0.6*50 = 66
+      expect(fit?.priority.score).toBe(66);
+    }
+  });
+
+  it("leaves fitAnalysis null when there is no fit_analyses row for a vacancy", async () => {
+    const client = makeClient([vacancyRow({ id: "vac-1" })], [fitRow({ vacancy_id: "vac-other" })]);
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.opportunities[0].fitAnalysis).toBeNull();
+    }
+  });
+
+  it("sorts opportunities by priority score descending, pending ones last", async () => {
+    const vacancies = [
+      vacancyRow({ id: "low", authoritative_url: "https://x/low" }),
+      vacancyRow({ id: "high", authoritative_url: "https://x/high" }),
+      vacancyRow({ id: "pending", authoritative_url: "https://x/pending" }),
+    ];
+    const fits = [
+      fitRow({ vacancy_id: "low", technical_fit_score: 0, practical_eligibility_score: 0 }), // 30
+      fitRow({ vacancy_id: "high", technical_fit_score: 100, practical_eligibility_score: 100 }), // 70
+    ];
+    const client = makeClient(vacancies, fits);
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.opportunities.map((o) => o.id)).toEqual(["high", "low", "pending"]);
+    }
+  });
+
+  it("a hard-blocked opportunity (priority 0) sorts below an eligible one but above a pending one", async () => {
+    const vacancies = [
+      vacancyRow({ id: "blocked", authoritative_url: "https://x/blocked" }),
+      vacancyRow({ id: "eligible", authoritative_url: "https://x/eligible" }),
+      vacancyRow({ id: "pending", authoritative_url: "https://x/pending" }),
+    ];
+    const fits = [
+      fitRow({
+        vacancy_id: "blocked",
+        technical_fit_score: 90,
+        practical_eligibility_score: 0,
+        eligibility_capped: true,
+        hard_blockers: [{ code: "LOCATION_PRESENCE", detail: "Not in the required country." }],
+      }),
+      fitRow({ vacancy_id: "eligible", technical_fit_score: 50, practical_eligibility_score: 50 }),
+    ];
+    const client = makeClient(vacancies, fits);
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.opportunities.map((o) => o.id)).toEqual(["eligible", "blocked", "pending"]);
+      const blocked = result.opportunities.find((o) => o.id === "blocked")!;
+      expect(blocked.fitAnalysis?.priority.score).toBe(0);
+      expect(blocked.fitAnalysis?.eligibilityCapped).toBe(true);
+      expect(blocked.fitAnalysis?.priority.uncappedScore).toBeGreaterThan(0);
+    }
+  });
+
+  it("still returns the opportunities list when the fit_analyses query errors", async () => {
+    const client = makeClient([vacancyRow()], [], { message: "fit query failed" });
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.opportunities).toHaveLength(1);
+      expect(result.opportunities[0].fitAnalysis).toBeNull();
+    }
   });
 });

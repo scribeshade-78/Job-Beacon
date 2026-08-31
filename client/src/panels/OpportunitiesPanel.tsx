@@ -1,11 +1,94 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/status-badge";
-import { listOpportunities, type OpportunitySummary } from "../lib/opportunities";
+import {
+  listOpportunities,
+  type OpportunityFitAnalysis,
+  type OpportunitySummary,
+} from "../lib/opportunities";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { safeVacancyHref } from "./shared";
 import { formatSalary } from "../lib/opportunities";
 import { formatDistanceToNow } from "date-fns";
+
+const MAX_MISSING_SKILLS_SHOWN = 5;
+const MAX_TOP_REASONS_SHOWN = 3;
+
+function priorityBadge(fit: OpportunityFitAnalysis): { label: string; className: string } {
+  if (fit.eligibilityCapped) {
+    return { label: "Not eligible", className: "bg-red-100 text-red-800" };
+  }
+  const score = fit.priority.score;
+  if (score === null) {
+    return { label: "Priority —", className: "bg-ios-separator text-ios-text-secondary" };
+  }
+  if (score >= 70) {
+    return { label: `Priority ${score}`, className: "bg-green-100 text-green-800" };
+  }
+  if (score >= 40) {
+    return { label: `Priority ${score}`, className: "bg-amber-100 text-amber-800" };
+  }
+  return { label: `Priority ${score}`, className: "bg-ios-separator text-ios-text-secondary" };
+}
+
+function FitSection({ fit }: { fit: OpportunityFitAnalysis | null }) {
+  if (fit === null) {
+    return <p className="mt-2 text-xs text-ios-text-secondary italic">Fit analysis pending</p>;
+  }
+
+  const badge = priorityBadge(fit);
+  const shownSkills = fit.missingEvidence.slice(0, MAX_MISSING_SKILLS_SHOWN);
+  const extraSkills = fit.missingEvidence.length - shownSkills.length;
+
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`px-2 py-0.5 rounded text-xs font-medium ${badge.className}`}>{badge.label}</span>
+        <span className="text-xs text-ios-text-secondary">
+          Technical fit {fit.technicalFitScore ?? "—"}
+          {fit.technicalFitScore === null && !fit.jdTextAvailable ? " (no job description text)" : ""}
+        </span>
+        <span className="text-xs text-ios-text-secondary">
+          Eligibility {fit.practicalEligibilityScore ?? "—"}
+        </span>
+        {fit.eligibilityCapped && fit.priority.uncappedScore !== null && (
+          <span className="text-xs text-ios-text-secondary">
+            (would rank {fit.priority.uncappedScore} if eligible)
+          </span>
+        )}
+      </div>
+
+      {fit.hardBlockers.length > 0 && (
+        <div role="alert" className="rounded bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">
+          <span className="font-medium">Not eligible.</span>{" "}
+          {fit.hardBlockers.map((b) => b.detail).join(" ")}
+        </div>
+      )}
+
+      {shownSkills.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-ios-text-secondary">Missing:</span>
+          {shownSkills.map((skill, i) => (
+            <span key={`${skill}-${i}`} className="px-2 py-0.5 bg-ios-separator rounded text-xs">
+              {skill}
+            </span>
+          ))}
+          {extraSkills > 0 && (
+            <span className="text-xs text-ios-text-secondary">+{extraSkills} more</span>
+          )}
+        </div>
+      )}
+
+      {fit.topReasons.length > 0 && (
+        <ul className="list-disc list-inside text-xs text-ios-text-secondary space-y-0.5">
+          {fit.topReasons.slice(0, MAX_TOP_REASONS_SHOWN).map((reason, i) => (
+            <li key={`${reason}-${i}`}>{reason}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function trustStatusToBadge(status: OpportunitySummary["trustStatus"]): "verified" | "under_review" | "blocked" | "action_required" {
   switch (status) {
@@ -91,6 +174,9 @@ export function OpportunitiesPanel() {
         {opportunities?.length === 0 && (
           <p className="text-sm text-ios-text-secondary">No verified opportunities found.</p>
         )}
+        {opportunities !== null && opportunities.length > 0 && (
+          <p className="text-xs text-ios-text-secondary mb-3">Sorted by priority</p>
+        )}
         <ul className="space-y-4" role="list" aria-label="Verified job opportunities">
           {opportunities?.map((opp) => (
             <li key={opp.id} className="border border-ios-separator rounded-lg p-4">
@@ -129,6 +215,7 @@ export function OpportunitiesPanel() {
                     </span>
                     <StatusBadge status={autoApplyStatusBadge(opp.autoApplyStatus)} className="text-xs" />
                   </div>
+                  <FitSection fit={opp.fitAnalysis} />
                 </div>
               </div>
             </li>
