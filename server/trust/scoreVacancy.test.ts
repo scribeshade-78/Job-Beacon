@@ -37,6 +37,7 @@ const defaultVacancyRow = {
   salary_source: "employer_disclosed",
   source_code: "greenhouse",
   company_id: "company-1",
+  trust_status: null,
 };
 
 const defaultCompany = { domain: "acme.com", career_domain: "careers.acme.com" };
@@ -71,9 +72,13 @@ function makeClient(overrides: {
     throw new Error(`Unexpected table: ${table}`);
   });
 
+  const enqueueFitJobs = vi.fn().mockResolvedValue(undefined);
+
   return {
     client: { from } as unknown as Parameters<typeof scoreVacancy>[0],
     from,
+    enqueueFitJobs,
+    deps: { enqueueFitJobs },
     vacancySelectBuilder,
     companyBuilder,
     policyBuilder,
@@ -85,9 +90,9 @@ function makeClient(overrides: {
 
 describe("scoreVacancy", () => {
   it("scores a fully favorable vacancy as VERIFIED with every confirmable positive code", async () => {
-    const { client, trustScoreBuilder, flagsBuilder, vacancyUpdateBuilder } = makeClient();
+    const { client, deps, trustScoreBuilder, flagsBuilder, vacancyUpdateBuilder } = makeClient();
 
-    const result = await scoreVacancy(client, "vacancy-1");
+    const result = await scoreVacancy(client, "vacancy-1", deps);
 
     expect(result.status).toBe("VERIFIED");
     if (result.status !== "BLOCKED") {
@@ -115,6 +120,43 @@ describe("scoreVacancy", () => {
 
     expect(vacancyUpdateBuilder.calls[0]).toEqual({ method: "update", args: [{ trust_status: "VERIFIED" }] });
     expect(vacancyUpdateBuilder.calls[1]).toEqual({ method: "eq", args: ["id", "vacancy-1"] });
+
+    // Phase 2.1: entering VERIFIED enqueues fit analysis.
+    expect(deps.enqueueFitJobs).toHaveBeenCalledWith(client, "vacancy-1");
+  });
+
+  it("does NOT re-enqueue fit analysis when the vacancy is already VERIFIED", async () => {
+    const { client, deps } = makeClient({
+      vacancy: { data: { ...defaultVacancyRow, trust_status: "VERIFIED" }, error: null },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("VERIFIED");
+    expect(deps.enqueueFitJobs).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue fit analysis when the score bucket is not VERIFIED", async () => {
+    const { client, deps } = makeClient({
+      vacancy: {
+        data: { ...defaultVacancyRow, company_id: null, salary_min: null, salary_max: null, salary_source: null, source_code: "adzuna" },
+        error: null,
+      },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("UNDER_REVIEW");
+    expect(deps.enqueueFitJobs).not.toHaveBeenCalled();
+  });
+
+  it("a failing fit enqueue never breaks scoring", async () => {
+    const { client, deps } = makeClient();
+    deps.enqueueFitJobs.mockRejectedValueOnce(new Error("queue down"));
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("VERIFIED");
   });
 
   it("returns BLOCKED and delegates to applyHardBlocks's write path when a hard block fires, without computing a score", async () => {

@@ -261,7 +261,41 @@ Status: no live environment needed to verify the gate-logic change itself — `r
 - A `paused`/`stopped` candidate can still *pass* `rate_and_abuse_controls` (it's independent now) — they're still blocked overall via the separate `automation_authorization` gate, so overall eligibility is unaffected
 - `cancelled` attempts never count toward the limit, even if there are many of them
 
+## Response Intelligence Phase 2.1 — JD Extraction & Fit Analysis — Verification
+
+### Regression check (no live environment needed)
+
+- `npm run typecheck` passes (both `tsc` projects).
+- `npm test` passes — new suites: `server/opportunities/{jdExtraction,practicalEligibility,fitPrompt,analyzeFit,fitWorker,runner,enqueue}.test.ts`, plus `server/opportunities/*` route test in `server/index.test.ts` and the new enqueue-on-VERIFIED-transition cases in `server/trust/scoreVacancy.test.ts`.
+- `supabase test db` passes — new pgTAP: `vacancy_jd_snapshots_rls`, `fit_analyses_rls`, `fit_analysis_jobs_rls`, `fact_confirmations_fit_trigger`.
+
+### Live smoke test (DEFERRED — needs a running local Supabase + a real `OPENROUTER_API_KEY`, plus at least one verified vacancy with JD text in `vacancy_versions.raw_payload`)
+
+Pre-checks:
+
+1. `npx supabase start` healthy; migrations `20260831120000/10/20` applied.
+2. `.env` has `OPENROUTER_API_KEY` (same key MP-F1 uses).
+3. At least one `vacancies` row with `trust_status = 'VERIFIED'` whose latest `vacancy_versions.raw_payload` carries JD text (Greenhouse `content` or Lever `description`/`lists`). Real ingestion has never run, so this row likely has to be inserted by hand for the smoke test.
+4. At least one candidate with `automation_authorizations.status = 'authorized'`, ≥1 `candidate_selected_roles` row, and a **confirmed** `location` fact.
+
+Steps:
+
+1. Trigger an enqueue: either re-score the verified vacancy (so `scoreVacancy` sees a transition into `VERIFIED`) or update that candidate's `location` `fact_confirmations` row to `confirmed` (fires the `fit_enqueue_on_fact_confirmed` trigger). Expect one `fit_analysis_jobs` row per (active candidate × that vacancy).
+2. `npm run worker:fit`. Expect a structured summary `{ claimed, analyzed, capped, noJdText, failed }`.
+3. Inspect `vacancy_jd_snapshots` — one row for the vacancy's latest version, `clean_text` non-empty, `sections` a JSON array of `{heading, body}`.
+4. Inspect `fit_analyses` — one row for the pair: `technical_fit_score` 0–100, `technical_fit_components` has all six dimensions with a `score` + `rationale`, `missing_evidence` a string array, `practical_eligibility_score` 100 (same-country/remote) or 0 (`LOCATION_PRESENCE`, with `eligibility_capped = true`), `jd_text_available = true`, `model_version`/`prompt_version` set.
+5. Confirm cost/latency of the OpenRouter call are acceptable (first real `analyzeTechnicalFit` call — unverified until this runs, same caveat MP-F1 had).
+6. Sign in as that candidate and confirm RLS: `select * from fit_analyses` returns only their own rows.
+
+### Known-expected behavior (NOT bugs)
+
+- A verified vacancy whose payload has **no** JD text (Adzuna truncation, USAJOBS summary-only) produces a `fit_analyses` row with `jd_text_available = false`, `technical_fit_score = null`, no `vacancy_jd_snapshots` row, and the job marked `done` (not retried).
+- `soft_penalties` is always `[]` in v1 (all its codes are reserved).
+- Re-running `scoreVacancy` on an already-`VERIFIED` vacancy does not re-enqueue.
+
 ## Future phases (placeholders)
 
 - MP-W2 (or similar): continuous daemon/polling mode + `SIGINT`/`SIGTERM` graceful shutdown, deferred out of MP-W1's scope
 - First real per-source submission adapter (e.g. Greenhouse), once an authorized employer relationship and credentials exist — MP-A1 built the capability model this depends on, but registers none
+- Phase 2.2: the §12.1 weighted 8-factor Opportunity Priority Score + the Opportunities UI (Technical Fit / Practical Eligibility shown separately with reasons and risks) + §11.4 compensation model
+- USAJOBS `Fields=Full` so its duties text is actually captured (out of scope for 2.1)

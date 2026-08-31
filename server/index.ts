@@ -19,6 +19,7 @@ import { extractResumeFacts } from "./resumes/extractFacts.js";
 import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
+import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -666,6 +667,21 @@ export function createApp(options: CreateAppOptions = {}) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Message match run failed:", message);
       response.status(500).json({ error: "Failed to run message match batch" });
+    }
+  });
+
+  // Response Intelligence Phase 2.1: drains fit_analysis_jobs (JD extraction
+  // + AI Technical Fit + rules-engine Practical Eligibility). Same external
+  // scheduler as the other /api/worker/* routes; leasing + upsert make
+  // overlapping triggers safe.
+  app.post("/api/worker/run-fit", requireWorkerSecret, async (_request, response) => {
+    try {
+      const result = await runFitAnalysisBatch(resolveServiceClient(), { openai: resolveOpenAIClient() });
+      response.status(200).json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Fit analysis run failed:", message);
+      response.status(500).json({ error: "Failed to run fit analysis batch" });
     }
   });
 

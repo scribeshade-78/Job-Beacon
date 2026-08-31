@@ -3,6 +3,7 @@ import { applyHardBlocks } from "./applyHardBlocks.js";
 import { evaluateHardBlocks, type HardBlockSignals } from "./hardBlocks.js";
 import { evaluatePositiveReasonCodes, type PositiveReasonCodeSignals } from "./positiveReasonCodes.js";
 import { computeTrustScore, type TrustScoreSignals } from "./trustScore.js";
+import { enqueueFitJobsForVacancy } from "../opportunities/enqueue.js";
 
 const TRUST_SCORE_POLICY_VERSION = "r3-trust-score-v1";
 
@@ -36,6 +37,16 @@ interface VacancyRow {
   salary_source: "employer_disclosed" | "estimated" | null;
   source_code: string;
   company_id: string | null;
+  trust_status: string | null;
+}
+
+export interface ScoreVacancyDeps {
+  /**
+   * Injected so scoreVacancy.test.ts can assert the transition-into-VERIFIED
+   * enqueue without a live fit_analysis_jobs path. Defaults to the real
+   * enqueue.
+   */
+  enqueueFitJobs?: (client: SupabaseClient, vacancyId: string) => Promise<unknown>;
 }
 
 /**
@@ -46,10 +57,16 @@ interface VacancyRow {
  * mapped to a status bucket and paired with whichever §12.4 positive
  * reason codes are confirmable from real signals today.
  */
-export async function scoreVacancy(client: SupabaseClient, vacancyId: string): Promise<ScoreVacancyOutcome> {
+export async function scoreVacancy(
+  client: SupabaseClient,
+  vacancyId: string,
+  deps: ScoreVacancyDeps = {},
+): Promise<ScoreVacancyOutcome> {
   const { data: vacancy, error: vacancyError } = await client
     .from("vacancies")
-    .select("id, authoritative_url, status, last_seen_at, salary_min, salary_max, salary_source, source_code, company_id")
+    .select(
+      "id, authoritative_url, status, last_seen_at, salary_min, salary_max, salary_source, source_code, company_id, trust_status",
+    )
     .eq("id", vacancyId)
     .single();
 
@@ -168,6 +185,24 @@ export async function scoreVacancy(client: SupabaseClient, vacancyId: string): P
 
   if (updateError) {
     throw updateError;
+  }
+
+  // Phase 2.1: a vacancy *entering* VERIFIED enqueues a fit analysis for
+  // every active candidate. Guarded on a real transition — scoreVacancy
+  // runs on every ingestion pass, so re-scoring an already-VERIFIED
+  // vacancy must not re-enqueue. Wrapped so an enqueue failure never
+  // blocks scoring/ingestion (the "ingestion must remain available when
+  // trust scoring or company resolution is slow" invariant — the
+  // ingestion worker already wraps its scoreVacancy call the same way).
+  if (bucket === "VERIFIED" && row.trust_status !== "VERIFIED") {
+    try {
+      await (deps.enqueueFitJobs ?? enqueueFitJobsForVacancy)(client, vacancyId);
+    } catch (error) {
+      console.error("[trust:scoreVacancy] fit enqueue failed", {
+        vacancyId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   return { status: bucket, score: total, reasonCodes: positiveReasonCodes };

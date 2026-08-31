@@ -14,6 +14,7 @@
     "worker:mailbox": "node --env-file-if-exists=.env --import=tsx server/mailbox/cli.ts",
     "worker:mailbox-classify": "node --env-file-if-exists=.env --import=tsx server/mailbox/classifyCli.ts",
     "worker:mailbox-match": "node --env-file-if-exists=.env --import=tsx server/mailbox/matchCli.ts",
+    "worker:fit": "node --env-file-if-exists=.env --import=tsx server/opportunities/cli.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "vitest run",
     "build": "npm run build:client && npm run build:server",
