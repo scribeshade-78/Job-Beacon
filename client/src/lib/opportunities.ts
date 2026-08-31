@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { computePriorityScore, type PriorityScore } from "../../../shared/priorityScore";
+import {
+  computePriorityScore,
+  isResponseCategory,
+  type PriorityScore,
+  type ResponseCategory,
+} from "../../../shared/priorityScore";
 
 export type OpportunityTrustStatus =
   | "VERIFIED"
@@ -108,6 +113,7 @@ interface VacancyRow {
   salary_source: "employer_disclosed" | "estimated" | null;
   discovered_at: string;
   last_seen_at: string;
+  expires_at: string | null;
   trust_status: OpportunityTrustStatus | null;
   companies: { displayed_name: string; domain: string | null } | null;
   vacancy_trust_scores: Array<{ score: number | null }> | null;
@@ -201,6 +207,7 @@ export async function listOpportunities(
         salary_source,
         discovered_at,
         last_seen_at,
+        expires_at,
         trust_status,
         companies (displayed_name, domain),
         vacancy_trust_scores (score),
@@ -244,7 +251,7 @@ export async function listOpportunities(
       };
     });
 
-    await attachFitAnalyses(client, opportunities);
+    await attachFitAnalyses(client, rows, opportunities);
     sortByPriority(opportunities);
 
     return { kind: "success", opportunities };
@@ -253,15 +260,135 @@ export async function listOpportunities(
   }
 }
 
+/** Latest response classification for one (candidate, vacancy) pair. */
+interface ResponseStageInfo {
+  category: ResponseCategory | null;
+  deadlineIso: string | null;
+  classifiedAt: string;
+}
+
+/** Peel one embed level, tolerating PostgREST returning an object or a 1-element array. */
+function embedChild(node: unknown, key: string): unknown {
+  const n = Array.isArray(node) ? node[0] : node;
+  return n && typeof n === "object" ? (n as Record<string, unknown>)[key] : undefined;
+}
+
+/**
+ * Walks response_classifications -> messages -> application_attempts ->
+ * application_plans.vacancy_id. Defensive because the embed shape (object
+ * vs array at each hop) is not guaranteed.
+ */
+function classificationVacancyId(messagesNode: unknown): string | null {
+  const attempts = embedChild(messagesNode, "application_attempts");
+  let plan = embedChild(attempts, "application_plans");
+  if (Array.isArray(plan)) plan = plan[0];
+  const vid = plan && typeof plan === "object" ? (plan as Record<string, unknown>).vacancy_id : undefined;
+  return typeof vid === "string" ? vid : null;
+}
+
+/**
+ * This candidate's latest response classification per vacancy, reached
+ * through the application chain. RLS scopes rows to the signed-in
+ * candidate. Returns an empty map on any query error — response stage
+ * then just falls back to neutral in the priority score.
+ */
+async function loadResponseStages(
+  client: Pick<SupabaseClient, "from">,
+): Promise<Map<string, ResponseStageInfo>> {
+  const byVacancy = new Map<string, ResponseStageInfo>();
+
+  const { data, error } = await client
+    .from("response_classifications")
+    .select(
+      "category, classified_at, extracted_deadline, messages!inner(application_attempts!inner(application_plans!inner(vacancy_id)))",
+    );
+
+  if (error || !data) {
+    return byVacancy;
+  }
+
+  for (const raw of data as unknown[]) {
+    const row = raw as {
+      category: string | null;
+      classified_at: string;
+      extracted_deadline: string | null;
+      messages: unknown;
+    };
+    const vacancyId = classificationVacancyId(row.messages);
+    if (!vacancyId) continue;
+
+    const prev = byVacancy.get(vacancyId);
+    if (!prev || row.classified_at > prev.classifiedAt) {
+      byVacancy.set(vacancyId, {
+        category: isResponseCategory(row.category) ? row.category : null,
+        deadlineIso: row.extracted_deadline,
+        classifiedAt: row.classified_at,
+      });
+    }
+  }
+
+  return byVacancy;
+}
+
+/** This candidate's free-text selected role names (RLS-scoped). */
+async function loadSelectedRoles(client: Pick<SupabaseClient, "from">): Promise<string[]> {
+  const { data, error } = await client.from("candidate_selected_roles").select("role_name");
+  if (error || !data) {
+    return [];
+  }
+  return (data as Array<{ role_name: string }>).map((r) => r.role_name);
+}
+
+const DAY_MS = 86_400_000;
+
+/** Whole days from now to `iso`; null when absent or unparseable. */
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((t - Date.now()) / DAY_MS);
+}
+
+/** Nearest (soonest) deadline in days across the given ISO timestamps. */
+function nearestDeadlineDays(isos: Array<string | null>): number | null {
+  const days = isos.map(daysUntil).filter((n): n is number => n !== null);
+  return days.length > 0 ? Math.min(...days) : null;
+}
+
+/**
+ * Mirrors server/applications/eligibilityGate.ts evaluateRoleMatch: plain
+ * case-insensitive substring of a selected role name in the title. null
+ * when the candidate has selected no roles (no preference signal).
+ */
+function resolveRoleMatch(title: string, roles: string[]): boolean | null {
+  if (roles.length === 0) return null;
+  const t = title.toLowerCase();
+  return roles.some((role) => {
+    const n = role.trim().toLowerCase();
+    return n.length > 0 && t.includes(n);
+  });
+}
+
+function normalizeRemoteType(v: string | null): "remote" | "hybrid" | "on_site" | null {
+  return v === "remote" || v === "hybrid" || v === "on_site" ? v : null;
+}
+
 /**
  * Fetches this candidate's fit_analyses rows for the listed vacancies (RLS
- * scopes them to the signed-in candidate automatically) and attaches the
- * §12.1 priority score. A fit-lookup failure is swallowed — the
+ * scopes them to the signed-in candidate automatically) plus the Phase
+ * 2.3a priority signals (latest response stage, selected roles), and
+ * attaches the §12.1 priority score. Any lookup failure is swallowed — the
  * Opportunities list must still render without fit data rather than error
- * out entirely.
+ * out entirely; a missing signal just leaves that factor neutral.
+ *
+ * company_credibility (§12.1, 5%) is deliberately left neutral: its source
+ * is vacancy_trust_scores.score, which the candidate's browser role cannot
+ * read (its only `authenticated` grant is behind a moderator RLS policy).
+ * Wiring it needs a server-side compute path — deferred to Phase 2.3b.
  */
 async function attachFitAnalyses(
   client: Pick<SupabaseClient, "from">,
+  rows: VacancyRow[],
   opportunities: OpportunitySummary[],
 ): Promise<void> {
   if (opportunities.length === 0) {
@@ -288,16 +415,33 @@ async function attachFitAnalyses(
       byVacancy.set(fit.vacancy_id, fit);
     }
 
+    const [stages, selectedRoles] = await Promise.all([
+      loadResponseStages(client),
+      loadSelectedRoles(client),
+    ]);
+    const rowById = new Map(rows.map((r) => [r.id, r]));
+
     for (const opp of opportunities) {
       const fit = byVacancy.get(opp.id);
       if (!fit) {
         continue;
       }
+      const row = rowById.get(opp.id);
+      const stage = stages.get(opp.id);
+
       opp.fitAnalysis = {
         priority: computePriorityScore({
           technicalFitScore: fit.technical_fit_score,
           practicalEligibilityScore: fit.practical_eligibility_score,
           eligibilityCapped: fit.eligibility_capped,
+          responseCategory: stage?.category ?? null,
+          hasApplication: (row?.application_plans?.length ?? 0) > 0,
+          remoteType: normalizeRemoteType(row?.remote_type ?? null),
+          salary: row
+            ? { min: row.salary_min, max: row.salary_max, source: row.salary_source }
+            : null,
+          deadlineDays: nearestDeadlineDays([row?.expires_at ?? null, stage?.deadlineIso ?? null]),
+          roleMatch: resolveRoleMatch(opp.title, selectedRoles),
         }),
         technicalFitScore: fit.technical_fit_score,
         practicalEligibilityScore: fit.practical_eligibility_score,

@@ -15,15 +15,33 @@ function makeClient(
   opportunities: unknown,
   fitAnalyses: unknown = [],
   fitError: unknown = null,
+  extras: { responseClassifications?: unknown; selectedRoles?: unknown } = {},
 ) {
   return {
     from: vi.fn((table: string) => {
       if (table === "fit_analyses") {
         return tableStub({ data: fitError ? null : fitAnalyses, error: fitError });
       }
+      if (table === "response_classifications") {
+        return tableStub({ data: extras.responseClassifications ?? [], error: null });
+      }
+      if (table === "candidate_selected_roles") {
+        return tableStub({ data: extras.selectedRoles ?? [], error: null });
+      }
       return tableStub({ data: opportunities, error: null });
     }),
   } as never;
+}
+
+/** A response_classifications row embed-walked to vacancy_id by opportunities.ts. */
+function classificationRow(over: Record<string, unknown> = {}) {
+  return {
+    category: "interview",
+    classified_at: "2026-02-01T00:00:00Z",
+    extracted_deadline: null,
+    messages: { application_attempts: { application_plans: { vacancy_id: "vac-1" } } },
+    ...over,
+  };
 }
 
 function vacancyRow(over: Record<string, unknown> = {}) {
@@ -43,6 +61,7 @@ function vacancyRow(over: Record<string, unknown> = {}) {
     salary_source: null,
     discovered_at: "2026-01-15T10:00:00Z",
     last_seen_at: "2026-01-20T10:00:00Z",
+    expires_at: null,
     trust_status: "VERIFIED",
     companies: null,
     vacancy_trust_scores: [{ score: 72 }],
@@ -406,5 +425,124 @@ describe("listOpportunities", () => {
       expect(result.opportunities).toHaveLength(1);
       expect(result.opportunities[0].fitAnalysis).toBeNull();
     }
+  });
+
+  // --- Phase 2.3a: real priority signals ---
+
+  async function priorityOf(
+    over: Record<string, unknown>,
+    extras: { responseClassifications?: unknown; selectedRoles?: unknown } = {},
+  ) {
+    const client = makeClient([vacancyRow(over)], [fitRow()], null, extras);
+    const result = await listOpportunities(client);
+    if (result.kind !== "success") throw new Error("expected success");
+    return result.opportunities[0].fitAnalysis!.priority;
+  }
+
+  it("baseline (no real signals) keeps every new factor neutral and scores 66", async () => {
+    const p = await priorityOf({});
+    expect(p.score).toBe(66);
+    for (const f of ["response_stage", "employment_arrangement", "compensation_quality", "company_credibility", "urgency", "user_preferences"] as const) {
+      expect(p.components?.[f]).toEqual({ weight: expect.any(Number), value: 50, source: "neutral" });
+    }
+  });
+
+  it("an 'interview' response classification lifts response_stage and the score", async () => {
+    const p = await priorityOf({}, { responseClassifications: [classificationRow({ category: "interview" })] });
+    expect(p.components?.response_stage).toEqual({ weight: 0.25, value: 85, source: "fit" });
+    expect(p.score).toBe(75); // 66 + 0.25*(85-50) = 74.75 -> 75
+  });
+
+  it("a 'rejection' classification sinks the score", async () => {
+    const p = await priorityOf({}, { responseClassifications: [classificationRow({ category: "rejection" })] });
+    expect(p.components?.response_stage.value).toBe(0);
+    expect(p.score).toBe(54); // 66 - 0.25*50 = 53.5 -> 54
+  });
+
+  it("only the latest classification per vacancy is used", async () => {
+    const p = await priorityOf({}, {
+      responseClassifications: [
+        classificationRow({ category: "recruiter_followup", classified_at: "2026-02-01T00:00:00Z" }),
+        classificationRow({ category: "offer", classified_at: "2026-03-01T00:00:00Z" }),
+      ],
+    });
+    expect(p.components?.response_stage.value).toBe(100);
+  });
+
+  it("an application with no classified reply reads as 'Submitted' (40)", async () => {
+    const p = await priorityOf({ application_plans: [{ id: "plan-1", status: "pending", gate_results: { eligible: true } }] });
+    expect(p.components?.response_stage).toEqual({ weight: 0.25, value: 40, source: "fit" });
+  });
+
+  it("a malformed classification embed is skipped, leaving response_stage neutral", async () => {
+    const p = await priorityOf({}, { responseClassifications: [classificationRow({ messages: null })] });
+    expect(p.components?.response_stage.source).toBe("neutral");
+    expect(p.score).toBe(66);
+  });
+
+  it("remote_type maps to employment_arrangement", async () => {
+    expect((await priorityOf({ remote_type: "remote" })).components?.employment_arrangement.value).toBe(100);
+    expect((await priorityOf({ remote_type: "hybrid" })).components?.employment_arrangement.value).toBe(70);
+    expect((await priorityOf({ remote_type: "on_site" })).components?.employment_arrangement.value).toBe(40);
+  });
+
+  it("an employer-disclosed salary range scores compensation_quality high", async () => {
+    const p = await priorityOf({ salary_min: 60000, salary_max: 80000, salary_source: "employer_disclosed" });
+    expect(p.components?.compensation_quality).toEqual({ weight: 0.1, value: 90, source: "fit" });
+  });
+
+  it("an estimated salary is a weaker compensation signal", async () => {
+    const p = await priorityOf({ salary_min: 60000, salary_max: 80000, salary_source: "estimated" });
+    expect(p.components?.compensation_quality).toEqual({ weight: 0.1, value: 50, source: "fit" });
+  });
+
+  it("a near expires_at deadline maxes urgency", async () => {
+    const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const p = await priorityOf({ expires_at: soon });
+    expect(p.components?.urgency).toEqual({ weight: 0.05, value: 100, source: "fit" });
+    expect(p.score).toBeGreaterThan(66);
+  });
+
+  it("a past deadline is not treated as a signal", async () => {
+    const past = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const p = await priorityOf({ expires_at: past });
+    expect(p.components?.urgency.source).toBe("neutral");
+    expect(p.score).toBe(66);
+  });
+
+  it("a selected role that matches the title lifts user_preferences", async () => {
+    const p = await priorityOf({}, { selectedRoles: [{ role_name: "test role" }] });
+    expect(p.components?.user_preferences).toEqual({ weight: 0.05, value: 100, source: "fit" });
+  });
+
+  it("selected roles that do not match score user_preferences at 50 but mark it real", async () => {
+    const p = await priorityOf({}, { selectedRoles: [{ role_name: "Staff Designer" }] });
+    expect(p.components?.user_preferences).toEqual({ weight: 0.05, value: 50, source: "fit" });
+  });
+
+  it("company_credibility stays neutral even though the vacancy has a trust score", async () => {
+    const p = await priorityOf({ vacancy_trust_scores: [{ score: 95 }] });
+    expect(p.components?.company_credibility).toEqual({ weight: 0.05, value: 50, source: "neutral" });
+  });
+
+  it("still attaches the fit analysis when the response_classifications query errors", async () => {
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "fit_analyses") return tableStub({ data: [fitRow()], error: null });
+        if (table === "response_classifications") return tableStub({ data: null, error: { message: "boom" } });
+        if (table === "candidate_selected_roles") return tableStub({ data: [], error: null });
+        return tableStub({ data: [vacancyRow()], error: null });
+      }),
+    } as never;
+    const result = await listOpportunities(client);
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.opportunities[0].fitAnalysis).not.toBeNull();
+      expect(result.opportunities[0].fitAnalysis?.priority.components?.response_stage.source).toBe("neutral");
+    }
+  });
+
+  it("bumps the priority score version to priority-v2", async () => {
+    expect((await priorityOf({})).version).toBe("priority-v2");
   });
 });
