@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   computePriorityScore,
+  daysUntil,
   FACTOR_WEIGHTS,
+  finalizeWithFreshUrgency,
   isResponseCategory,
+  nearestDeadlineDays,
   NEUTRAL_FACTOR_VALUE,
   PRIORITY_SCORE_VERSION,
   type PriorityScoreInput,
@@ -23,8 +26,8 @@ describe("FACTOR_WEIGHTS", () => {
 });
 
 describe("PRIORITY_SCORE_VERSION", () => {
-  it("is priority-v2 (2.3a real signals)", () => {
-    expect(PRIORITY_SCORE_VERSION).toBe("priority-v2");
+  it("is priority-v3 (2.3b server-computed + stored)", () => {
+    expect(PRIORITY_SCORE_VERSION).toBe("priority-v3");
   });
 });
 
@@ -235,9 +238,27 @@ describe("computePriorityScore — 2.3a real signals", () => {
     });
   });
 
-  it("company_credibility is always a neutral placeholder in 2.3a", () => {
-    const r = computePriorityScore({ ...BASE, responseCategory: "offer", remoteType: "remote", roleMatch: true });
-    expect(r.components?.company_credibility).toEqual({ weight: 0.05, value: NEUTRAL_FACTOR_VALUE, source: "neutral" });
+  describe("company_credibility (5%)", () => {
+    it("stays neutral when no trust score is supplied", () => {
+      const r = computePriorityScore({ ...BASE, responseCategory: "offer", remoteType: "remote", roleMatch: true });
+      expect(r.components?.company_credibility).toEqual({ weight: 0.05, value: NEUTRAL_FACTOR_VALUE, source: "neutral" });
+    });
+
+    it("uses vacancy_trust_scores.score directly (already 0-100)", () => {
+      const r = computePriorityScore({ ...BASE, companyCredibility: 87 });
+      expect(r.components?.company_credibility).toEqual({ weight: 0.05, value: 87, source: "fit" });
+    });
+
+    it("a zero trust score is a real signal, not an absent one", () => {
+      const r = computePriorityScore({ ...BASE, companyCredibility: 0 });
+      expect(r.components?.company_credibility).toEqual({ weight: 0.05, value: 0, source: "fit" });
+      expect(r.score).toBe(48); // 50 - 0.05*50 = 47.5 -> 48
+    });
+
+    it("clamps an out-of-range trust score", () => {
+      expect(computePriorityScore({ ...BASE, companyCredibility: 140 }).components?.company_credibility.value).toBe(100);
+      expect(computePriorityScore({ ...BASE, companyCredibility: -5 }).components?.company_credibility.value).toBe(0);
+    });
   });
 
   it("eligibilityCapped still forces score 0 while the new factors move the uncapped score", () => {
@@ -279,5 +300,108 @@ describe("isResponseCategory", () => {
     expect(isResponseCategory(null)).toBe(false);
     expect(isResponseCategory(undefined)).toBe(false);
     expect(isResponseCategory("")).toBe(false);
+  });
+});
+
+const DAY = 86_400_000;
+
+describe("daysUntil / nearestDeadlineDays", () => {
+  it("returns null for absent or unparseable input", () => {
+    expect(daysUntil(null)).toBeNull();
+    expect(daysUntil(undefined)).toBeNull();
+    expect(daysUntil("")).toBeNull();
+    expect(daysUntil("not a date")).toBeNull();
+  });
+
+  // Half-day offsets keep these off the floor() boundary, so the result does
+  // not depend on how many milliseconds elapse between the two Date.now()s.
+  it("floors to whole days and goes negative for the past", () => {
+    expect(daysUntil(new Date(Date.now() + 5.5 * DAY).toISOString())).toBe(5);
+    expect(daysUntil(new Date(Date.now() - 2.5 * DAY).toISOString())).toBe(-3);
+  });
+
+  it("nearestDeadlineDays picks the soonest and ignores nulls", () => {
+    const soon = new Date(Date.now() + 3.5 * DAY).toISOString();
+    const later = new Date(Date.now() + 40.5 * DAY).toISOString();
+    expect(nearestDeadlineDays([later, null, soon])).toBe(3);
+    expect(nearestDeadlineDays([null, undefined])).toBeNull();
+    expect(nearestDeadlineDays([])).toBeNull();
+  });
+});
+
+describe("finalizeWithFreshUrgency", () => {
+  /** A stored breakdown, exactly as analyzeFit would have persisted it. */
+  function storedComponents(input: PriorityScoreInput) {
+    return computePriorityScore(input).components!;
+  }
+
+  it("reproduces the stored score when the fresh urgency matches the snapshot", () => {
+    const input: PriorityScoreInput = {
+      technicalFitScore: 80,
+      practicalEligibilityScore: 100,
+      eligibilityCapped: false,
+      responseCategory: "interview",
+      companyCredibility: 90,
+      deadlineDays: null,
+    };
+    const stored = computePriorityScore(input);
+    expect(finalizeWithFreshUrgency(stored.components!, null)).toBe(stored.uncappedScore);
+  });
+
+  it("moves only by the urgency slice when the deadline has drawn closer", () => {
+    const components = storedComponents({
+      technicalFitScore: 80,
+      practicalEligibilityScore: 100,
+      eligibilityCapped: false,
+      deadlineDays: null, // snapshot urgency neutral 50
+    });
+    // 66 baseline, urgency 50 -> 100 is +0.05*50 = +2.5 -> 68.5 -> 69
+    expect(finalizeWithFreshUrgency(components, null)).toBe(66);
+    expect(finalizeWithFreshUrgency(components, 1)).toBe(69);
+  });
+
+  it("a past deadline drops urgency back to neutral", () => {
+    const components = storedComponents({
+      technicalFitScore: 80,
+      practicalEligibilityScore: 100,
+      eligibilityCapped: false,
+      deadlineDays: 1, // snapshot urgency 100
+    });
+    expect(finalizeWithFreshUrgency(components, 1)).toBe(69);
+    expect(finalizeWithFreshUrgency(components, -4)).toBe(66);
+  });
+
+  it("leaves every non-urgency factor exactly as stored", () => {
+    const components = storedComponents({
+      technicalFitScore: 0,
+      practicalEligibilityScore: 0,
+      eligibilityCapped: false,
+      responseCategory: "rejection",
+      companyCredibility: 0,
+      remoteType: "on_site",
+      roleMatch: false,
+      deadlineDays: null,
+    });
+    // .25*0 + .2*0 + .2*0 + .1*40 + .1*50 + .05*0 + .05*urgency + .05*50
+    // = 4 + 5 + 2.5 + .05*urgency
+    expect(finalizeWithFreshUrgency(components, null)).toBe(14); // urgency 50 -> 11.5 + 2.5 = 14
+    expect(finalizeWithFreshUrgency(components, 0)).toBe(17); // urgency 100 -> 11.5 + 5 = 16.5 -> 17
+  });
+
+  it("re-sums with the STORED weights, not the current ones", () => {
+    const components = storedComponents({ ...BASE, deadlineDays: null });
+    // Halve every stored weight: the result must halve too (25), proving the
+    // stored weights are used rather than FACTOR_WEIGHTS.
+    const halved = Object.fromEntries(
+      Object.entries(components).map(([k, c]) => [k, { ...c, weight: c.weight / 2 }]),
+    ) as typeof components;
+    expect(finalizeWithFreshUrgency(halved, null)).toBe(25);
+  });
+
+  it("falls back to neutral for a factor missing from a stored breakdown", () => {
+    const components = storedComponents({ ...BASE, deadlineDays: null });
+    const partial = { ...components } as Record<string, unknown>;
+    delete partial.technical_fit;
+    expect(finalizeWithFreshUrgency(partial as typeof components, null)).toBe(50);
   });
 });

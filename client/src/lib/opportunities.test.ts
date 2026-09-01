@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { listOpportunities, formatSalary, type OpportunitySalary } from "./opportunities";
+import {
+  computePriorityScore,
+  PRIORITY_SCORE_VERSION,
+  type PriorityScoreInput,
+} from "../../../shared/priorityScore";
 
 /** Thenable chainable stub — select/in/eq/order all return `this`; awaiting resolves to `result`. */
 function tableStub(result: { data: unknown; error: unknown }) {
@@ -15,33 +20,15 @@ function makeClient(
   opportunities: unknown,
   fitAnalyses: unknown = [],
   fitError: unknown = null,
-  extras: { responseClassifications?: unknown; selectedRoles?: unknown } = {},
 ) {
   return {
     from: vi.fn((table: string) => {
       if (table === "fit_analyses") {
         return tableStub({ data: fitError ? null : fitAnalyses, error: fitError });
       }
-      if (table === "response_classifications") {
-        return tableStub({ data: extras.responseClassifications ?? [], error: null });
-      }
-      if (table === "candidate_selected_roles") {
-        return tableStub({ data: extras.selectedRoles ?? [], error: null });
-      }
       return tableStub({ data: opportunities, error: null });
     }),
   } as never;
-}
-
-/** A response_classifications row embed-walked to vacancy_id by opportunities.ts. */
-function classificationRow(over: Record<string, unknown> = {}) {
-  return {
-    category: "interview",
-    classified_at: "2026-02-01T00:00:00Z",
-    extracted_deadline: null,
-    messages: { application_attempts: { application_plans: { vacancy_id: "vac-1" } } },
-    ...over,
-  };
 }
 
 function vacancyRow(over: Record<string, unknown> = {}) {
@@ -80,8 +67,32 @@ function fitRow(over: Record<string, unknown> = {}) {
     missing_evidence: [],
     top_reasons: [],
     jd_text_available: true,
+    // Phase 2.3b: a row the fit worker has not re-run since the migration.
+    // The client falls back to the 2.3a on-read computation for these.
+    priority_score: null,
+    priority_uncapped_score: null,
+    priority_components: null,
+    priority_score_version: null,
     ...over,
   };
+}
+
+/**
+ * A fit_analyses row carrying a stored score, exactly as
+ * server/opportunities/analyzeFit.ts would have persisted it.
+ */
+function storedFitRow(input: PriorityScoreInput, over: Record<string, unknown> = {}) {
+  const p = computePriorityScore(input);
+  return fitRow({
+    technical_fit_score: input.technicalFitScore,
+    practical_eligibility_score: input.practicalEligibilityScore,
+    eligibility_capped: input.eligibilityCapped,
+    priority_score: p.score,
+    priority_uncapped_score: p.uncappedScore,
+    priority_components: p.components,
+    priority_score_version: PRIORITY_SCORE_VERSION,
+    ...over,
+  });
 }
 
 describe("formatSalary", () => {
@@ -427,122 +438,105 @@ describe("listOpportunities", () => {
     }
   });
 
-  // --- Phase 2.3a: real priority signals ---
+  // --- Phase 2.3b: the stored score ---
 
-  async function priorityOf(
-    over: Record<string, unknown>,
-    extras: { responseClassifications?: unknown; selectedRoles?: unknown } = {},
-  ) {
-    const client = makeClient([vacancyRow(over)], [fitRow()], null, extras);
+  async function priorityOf(vacancyOver: Record<string, unknown>, fit: unknown) {
+    const client = makeClient([vacancyRow(vacancyOver)], [fit]);
     const result = await listOpportunities(client);
     if (result.kind !== "success") throw new Error("expected success");
     return result.opportunities[0].fitAnalysis!.priority;
   }
 
-  it("baseline (no real signals) keeps every new factor neutral and scores 66", async () => {
-    const p = await priorityOf({});
-    expect(p.score).toBe(66);
-    for (const f of ["response_stage", "employment_arrangement", "compensation_quality", "company_credibility", "urgency", "user_preferences"] as const) {
-      expect(p.components?.[f]).toEqual({ weight: expect.any(Number), value: 50, source: "neutral" });
-    }
+  const STORED_INPUT: PriorityScoreInput = {
+    technicalFitScore: 80,
+    practicalEligibilityScore: 100,
+    eligibilityCapped: false,
+    responseCategory: "interview",
+    companyCredibility: 90,
+    remoteType: "remote",
+    deadlineDays: null, // snapshot urgency neutral
+  };
+
+  it("reads the stored score rather than recomputing from the fit fields", async () => {
+    const stored = computePriorityScore(STORED_INPUT);
+    const p = await priorityOf({}, storedFitRow(STORED_INPUT));
+
+    expect(p.version).toBe(PRIORITY_SCORE_VERSION);
+    expect(p.score).toBe(stored.score);
+    // The 2.3a fallback would have scored 66 from tech/practical alone.
+    expect(p.score).not.toBe(66);
+    expect(p.components?.company_credibility).toEqual({ weight: 0.05, value: 90, source: "fit" });
+    expect(p.components?.response_stage.value).toBe(85);
   });
 
-  it("an 'interview' response classification lifts response_stage and the score", async () => {
-    const p = await priorityOf({}, { responseClassifications: [classificationRow({ category: "interview" })] });
-    expect(p.components?.response_stage).toEqual({ weight: 0.25, value: 85, source: "fit" });
-    expect(p.score).toBe(75); // 66 + 0.25*(85-50) = 74.75 -> 75
-  });
-
-  it("a 'rejection' classification sinks the score", async () => {
-    const p = await priorityOf({}, { responseClassifications: [classificationRow({ category: "rejection" })] });
-    expect(p.components?.response_stage.value).toBe(0);
-    expect(p.score).toBe(54); // 66 - 0.25*50 = 53.5 -> 54
-  });
-
-  it("only the latest classification per vacancy is used", async () => {
-    const p = await priorityOf({}, {
-      responseClassifications: [
-        classificationRow({ category: "recruiter_followup", classified_at: "2026-02-01T00:00:00Z" }),
-        classificationRow({ category: "offer", classified_at: "2026-03-01T00:00:00Z" }),
-      ],
-    });
-    expect(p.components?.response_stage.value).toBe(100);
-  });
-
-  it("an application with no classified reply reads as 'Submitted' (40)", async () => {
-    const p = await priorityOf({ application_plans: [{ id: "plan-1", status: "pending", gate_results: { eligible: true } }] });
-    expect(p.components?.response_stage).toEqual({ weight: 0.25, value: 40, source: "fit" });
-  });
-
-  it("a malformed classification embed is skipped, leaving response_stage neutral", async () => {
-    const p = await priorityOf({}, { responseClassifications: [classificationRow({ messages: null })] });
-    expect(p.components?.response_stage.source).toBe("neutral");
-    expect(p.score).toBe(66);
-  });
-
-  it("remote_type maps to employment_arrangement", async () => {
-    expect((await priorityOf({ remote_type: "remote" })).components?.employment_arrangement.value).toBe(100);
-    expect((await priorityOf({ remote_type: "hybrid" })).components?.employment_arrangement.value).toBe(70);
-    expect((await priorityOf({ remote_type: "on_site" })).components?.employment_arrangement.value).toBe(40);
-  });
-
-  it("an employer-disclosed salary range scores compensation_quality high", async () => {
-    const p = await priorityOf({ salary_min: 60000, salary_max: 80000, salary_source: "employer_disclosed" });
-    expect(p.components?.compensation_quality).toEqual({ weight: 0.1, value: 90, source: "fit" });
-  });
-
-  it("an estimated salary is a weaker compensation signal", async () => {
-    const p = await priorityOf({ salary_min: 60000, salary_max: 80000, salary_source: "estimated" });
-    expect(p.components?.compensation_quality).toEqual({ weight: 0.1, value: 50, source: "fit" });
-  });
-
-  it("a near expires_at deadline maxes urgency", async () => {
+  it("refreshes the urgency slice from the vacancy's current expires_at", async () => {
+    const baseline = computePriorityScore(STORED_INPUT).score!;
     const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
-    const p = await priorityOf({ expires_at: soon });
-    expect(p.components?.urgency).toEqual({ weight: 0.05, value: 100, source: "fit" });
-    expect(p.score).toBeGreaterThan(66);
+
+    const fresh = await priorityOf({ expires_at: soon }, storedFitRow(STORED_INPUT));
+
+    // The stored snapshot held urgency neutral; a 2-day deadline lifts that
+    // slice to 100. Compared against a full recompute rather than
+    // baseline + 2.5, since baseline is already rounded.
+    expect(fresh.score).toBe(computePriorityScore({ ...STORED_INPUT, deadlineDays: 1 }).score);
+    expect(fresh.score).toBeGreaterThan(baseline);
   });
 
-  it("a past deadline is not treated as a signal", async () => {
+  it("a past expires_at leaves urgency neutral", async () => {
     const past = new Date(Date.now() - 5 * 86_400_000).toISOString();
-    const p = await priorityOf({ expires_at: past });
-    expect(p.components?.urgency.source).toBe("neutral");
+    const p = await priorityOf({ expires_at: past }, storedFitRow(STORED_INPUT));
+    expect(p.score).toBe(computePriorityScore(STORED_INPUT).score);
+  });
+
+  it("a hard-blocked stored row still reports score 0 with a positive uncapped score", async () => {
+    const capped: PriorityScoreInput = { ...STORED_INPUT, practicalEligibilityScore: 0, eligibilityCapped: true };
+    const p = await priorityOf({}, storedFitRow(capped));
+
+    expect(p.score).toBe(0);
+    expect(p.capped).toBe(true);
+    expect(p.uncappedScore).toBeGreaterThan(0);
+  });
+
+  it("falls back to the 2.3a computation when the row has no stored components", async () => {
+    const p = await priorityOf({}, fitRow());
+    expect(p.version).toBe(PRIORITY_SCORE_VERSION);
+    expect(p.score).toBe(66); // 0.2*80 + 0.2*100 + 0.6*50
+    expect(p.components?.company_credibility.source).toBe("neutral");
+  });
+
+  it("falls back when the stored breakdown was written under a different version", async () => {
+    const p = await priorityOf({}, storedFitRow(STORED_INPUT, { priority_score_version: "priority-v2" }));
     expect(p.score).toBe(66);
+    expect(p.components?.response_stage.source).toBe("neutral");
   });
 
-  it("a selected role that matches the title lifts user_preferences", async () => {
-    const p = await priorityOf({}, { selectedRoles: [{ role_name: "test role" }] });
-    expect(p.components?.user_preferences).toEqual({ weight: 0.05, value: 100, source: "fit" });
-  });
+  it("sorts by the stored score, not the fit fields", async () => {
+    // Identical technical/practical fit; only the stored response stage
+    // differs, so a fit-fields-only sort could not tell these apart.
+    const vacancies = [
+      vacancyRow({ id: "rejected", authoritative_url: "https://x/rejected" }),
+      vacancyRow({ id: "offered", authoritative_url: "https://x/offered" }),
+    ];
+    const fits = [
+      storedFitRow({ ...STORED_INPUT, responseCategory: "rejection" }, { vacancy_id: "rejected" }),
+      storedFitRow({ ...STORED_INPUT, responseCategory: "offer" }, { vacancy_id: "offered" }),
+    ];
 
-  it("selected roles that do not match score user_preferences at 50 but mark it real", async () => {
-    const p = await priorityOf({}, { selectedRoles: [{ role_name: "Staff Designer" }] });
-    expect(p.components?.user_preferences).toEqual({ weight: 0.05, value: 50, source: "fit" });
-  });
-
-  it("company_credibility stays neutral even though the vacancy has a trust score", async () => {
-    const p = await priorityOf({ vacancy_trust_scores: [{ score: 95 }] });
-    expect(p.components?.company_credibility).toEqual({ weight: 0.05, value: 50, source: "neutral" });
-  });
-
-  it("still attaches the fit analysis when the response_classifications query errors", async () => {
-    const client = {
-      from: vi.fn((table: string) => {
-        if (table === "fit_analyses") return tableStub({ data: [fitRow()], error: null });
-        if (table === "response_classifications") return tableStub({ data: null, error: { message: "boom" } });
-        if (table === "candidate_selected_roles") return tableStub({ data: [], error: null });
-        return tableStub({ data: [vacancyRow()], error: null });
-      }),
-    } as never;
+    const client = makeClient(vacancies, fits);
     const result = await listOpportunities(client);
+
     expect(result.kind).toBe("success");
     if (result.kind === "success") {
-      expect(result.opportunities[0].fitAnalysis).not.toBeNull();
-      expect(result.opportunities[0].fitAnalysis?.priority.components?.response_stage.source).toBe("neutral");
+      expect(result.opportunities.map((o) => o.id)).toEqual(["offered", "rejected"]);
     }
   });
 
-  it("bumps the priority score version to priority-v2", async () => {
-    expect((await priorityOf({})).version).toBe("priority-v2");
+  it("no longer queries response_classifications or candidate_selected_roles", async () => {
+    const client = makeClient([vacancyRow()], [storedFitRow(STORED_INPUT)]);
+    await listOpportunities(client);
+
+    const tables = (client as unknown as { from: { mock: { calls: string[][] } } }).from.mock.calls.map((c) => c[0]);
+    expect(tables).not.toContain("response_classifications");
+    expect(tables).not.toContain("candidate_selected_roles");
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { analyzeFit } from "./analyzeFit.js";
 import { FIT_DIMENSIONS, type RawFitAnalysis } from "./fitPrompt.js";
+import { FACTOR_WEIGHTS, PRIORITY_SCORE_VERSION } from "../../shared/priorityScore.js";
 
 function fitPayload(): RawFitAnalysis {
   const components = Object.fromEntries(
@@ -33,11 +34,15 @@ interface ClientOpts {
   version?: unknown;
   existingSnapshot?: unknown;
   insertedSnapshotId?: string;
+  /** Phase 2.3b priority inputs. */
+  trustScore?: number | null;
+  applicationPlan?: unknown;
+  selectedRoles?: unknown[];
+  existingAnalysis?: unknown;
 }
 
 function makeClient(opts: ClientOpts) {
   const counts: Record<string, number> = {};
-  const upserts: unknown[] = [];
 
   const from = vi.fn((table: string) => {
     counts[table] = (counts[table] ?? 0) + 1;
@@ -62,17 +67,24 @@ function makeClient(opts: ClientOpts) {
       return builder({ single: { data: { id: opts.insertedSnapshotId ?? "snap-new" }, error: null } });
     }
     if (table === "fit_analyses") {
-      const b = builder({ await: { error: null } });
-      (b as unknown as { upsert: (v: unknown) => unknown }).upsert = (v: unknown) => {
-        upserts.push(v);
-        return b;
-      };
-      return b;
+      // Read-only here: the previous analysis, for the AI-skip guard. The
+      // upsert is fitWorker's job, not analyzeFit's.
+      return builder({ maybeSingle: { data: opts.existingAnalysis ?? null, error: null } });
+    }
+    if (table === "vacancy_trust_scores") {
+      const score = opts.trustScore ?? null;
+      return builder({ maybeSingle: { data: score === null ? null : { score }, error: null } });
+    }
+    if (table === "application_plans") {
+      return builder({ maybeSingle: { data: opts.applicationPlan ?? null, error: null } });
+    }
+    if (table === "candidate_selected_roles") {
+      return builder({ await: { data: opts.selectedRoles ?? [], error: null } });
     }
     throw new Error(`unexpected table ${table}`);
   });
 
-  return { client: { from } as never, upserts };
+  return { client: { from } as never };
 }
 
 const VACANCY = {
@@ -83,6 +95,15 @@ const VACANCY = {
   region: null,
   city: null,
   remote_type: "on_site",
+  salary_min: null,
+  salary_max: null,
+  salary_source: null,
+  expires_at: null,
+};
+
+const CONFIRMED_LOCATION = {
+  facts: [{ id: "f1", fact_type: "location", fact_value: "Bengaluru, India" }],
+  confirmations: [{ extracted_fact_id: "f1", corrected_value: null }],
 };
 
 const GREENHOUSE_VERSION = {
@@ -202,5 +223,295 @@ describe("analyzeFit", () => {
     const deps = { openai: { chat: { completions: { create } } } as never };
 
     await expect(analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" })).rejects.toBeTruthy();
+  });
+});
+
+describe("analyzeFit — Phase 2.3b stored priority score", () => {
+  function base(over: ClientOpts = {}) {
+    return makeClient({ vacancy: VACANCY, ...CONFIRMED_LOCATION, version: GREENHOUSE_VERSION, ...over });
+  }
+
+  it("returns a versioned, stored-shaped priority score", async () => {
+    const { client } = base();
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_score_version).toBe(PRIORITY_SCORE_VERSION);
+    expect(row.priority_score).toBeGreaterThanOrEqual(0);
+    expect(row.priority_score).toBeLessThanOrEqual(100);
+    expect(row.priority_uncapped_score).toBe(row.priority_score);
+    expect(Object.keys(row.priority_components!).sort()).toEqual(Object.keys(FACTOR_WEIGHTS).sort());
+  });
+
+  it("wires company_credibility from the latest vacancy_trust_scores row", async () => {
+    const { client } = base({ trustScore: 92 });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.company_credibility).toEqual({ weight: 0.05, value: 92, source: "fit" });
+  });
+
+  it("leaves company_credibility neutral when the vacancy has never been scored", async () => {
+    const { client } = base({ trustScore: null });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.company_credibility.source).toBe("neutral");
+  });
+
+  it("an application with no classified reply reads as Submitted (40)", async () => {
+    const { client } = base({ applicationPlan: { id: "plan-1", application_attempts: [] } });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.response_stage).toEqual({ weight: 0.25, value: 40, source: "fit" });
+  });
+
+  it("uses the latest classification reached through the application chain", async () => {
+    const { client } = base({
+      applicationPlan: {
+        id: "plan-1",
+        application_attempts: [
+          {
+            messages: [
+              {
+                response_classifications: [
+                  { category: "recruiter_followup", classified_at: "2026-02-01T00:00:00Z", extracted_deadline: null },
+                ],
+              },
+              {
+                response_classifications: [
+                  { category: "offer", classified_at: "2026-03-01T00:00:00Z", extracted_deadline: null },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.response_stage.value).toBe(100);
+  });
+
+  it("tolerates PostgREST returning to-one embeds as objects rather than arrays", async () => {
+    const { client } = base({
+      applicationPlan: {
+        id: "plan-1",
+        application_attempts: {
+          messages: {
+            response_classifications: {
+              category: "interview",
+              classified_at: "2026-03-01T00:00:00Z",
+              extracted_deadline: null,
+            },
+          },
+        },
+      },
+    });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.response_stage.value).toBe(85);
+  });
+
+  it("an unknown classification category falls back to neutral rather than guessing", async () => {
+    const { client } = base({
+      applicationPlan: {
+        id: "plan-1",
+        application_attempts: [
+          {
+            messages: [
+              {
+                response_classifications: [
+                  { category: "screening_call", classified_at: "2026-03-01T00:00:00Z", extracted_deadline: null },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    // An application still exists, so the Submitted floor applies.
+    expect(row.priority_components!.response_stage.value).toBe(40);
+  });
+
+  it("matches a selected role against the vacancy title", async () => {
+    const { client } = base({ selectedRoles: [{ role_name: "platform engineer" }] });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.user_preferences).toEqual({ weight: 0.05, value: 100, source: "fit" });
+  });
+
+  it("selected roles that do not match score 50 but count as a real signal", async () => {
+    const { client } = base({ selectedRoles: [{ role_name: "Staff Designer" }] });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.user_preferences).toEqual({ weight: 0.05, value: 50, source: "fit" });
+  });
+
+  it("wires employment_arrangement and compensation_quality from the vacancy row", async () => {
+    const { client } = base({
+      vacancy: { ...VACANCY, remote_type: "remote", salary_min: 60000, salary_max: 80000, salary_source: "employer_disclosed" },
+    });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.employment_arrangement.value).toBe(100);
+    expect(row.priority_components!.compensation_quality.value).toBe(90);
+  });
+
+  it("snapshots urgency from expires_at", async () => {
+    const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const { client } = base({ vacancy: { ...VACANCY, expires_at: soon } });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.priority_components!.urgency).toEqual({ weight: 0.05, value: 100, source: "fit" });
+  });
+
+  it("a hard-blocked analysis stores priority_score 0 with a positive uncapped score", async () => {
+    const { client } = base({ vacancy: { ...VACANCY, country: "United States" } });
+    const { deps } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(row.eligibility_capped).toBe(true);
+    expect(row.priority_score).toBe(0);
+    expect(row.priority_uncapped_score).toBeGreaterThan(0);
+  });
+});
+
+describe("analyzeFit — Phase 2.3b AI-skip guard", () => {
+  const SNAPSHOT = { id: "snap-1", clean_text: "Build platforms.", sections: [{ heading: "Duties" }] };
+
+  function existingAnalysis(over: Record<string, unknown> = {}) {
+    return {
+      jd_snapshot_id: "snap-1",
+      analyzed_at: "2026-03-01T00:00:00Z",
+      technical_fit_score: 55,
+      technical_fit_components: { core_technical_skills: { score: 55, rationale: "stored" } },
+      missing_evidence: ["Kubernetes"],
+      top_reasons: ["stored reason"],
+      risks: ["stored risk"],
+      model_version: "openai/gpt-4o-mini-OLD",
+      prompt_version: "fit-analysis-v1",
+      ...over,
+    };
+  }
+
+  function guardClient(over: ClientOpts = {}) {
+    return makeClient({
+      vacancy: VACANCY,
+      ...CONFIRMED_LOCATION,
+      version: GREENHOUSE_VERSION,
+      existingSnapshot: SNAPSHOT,
+      existingAnalysis: existingAnalysis(),
+      ...over,
+    });
+  }
+
+  it("reuses the stored Technical Fit and skips the AI call when nothing it depends on changed", async () => {
+    const { client } = guardClient();
+    const { deps, create } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(row.technical_fit_score).toBe(55);
+    expect(row.missing_evidence).toEqual(["Kubernetes"]);
+    expect(row.top_reasons).toEqual(["stored reason"]);
+    expect(row.risks).toEqual(["stored risk"]);
+    // The reused output keeps reporting the model that actually produced it.
+    expect(row.model_version).toBe("openai/gpt-4o-mini-OLD");
+  });
+
+  it("still recomputes Practical Eligibility and the priority score when skipping the AI", async () => {
+    const { client } = guardClient({ trustScore: 88, selectedRoles: [{ role_name: "platform engineer" }] });
+    const { deps, create } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(row.practical_eligibility_score).toBe(100);
+    expect(row.priority_components!.company_credibility.value).toBe(88);
+    expect(row.priority_components!.user_preferences.value).toBe(100);
+    expect(row.priority_score_version).toBe(PRIORITY_SCORE_VERSION);
+  });
+
+  it("re-runs the AI when the JD snapshot changed", async () => {
+    const { client } = guardClient({ existingAnalysis: existingAnalysis({ jd_snapshot_id: "snap-OLD" }) });
+    const { deps, create } = openaiFake();
+
+    const row = await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).toHaveBeenCalledOnce();
+    expect(row.technical_fit_score).toBe(68);
+  });
+
+  it("re-runs the AI when the prompt version was bumped", async () => {
+    const { client } = guardClient({ existingAnalysis: existingAnalysis({ prompt_version: "fit-analysis-v0" }) });
+    const { deps, create } = openaiFake();
+
+    await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("re-runs the AI when a fact confirmation is newer than the stored analysis", async () => {
+    const { client } = guardClient({
+      confirmations: [{ extracted_fact_id: "f1", corrected_value: null, updated_at: "2026-04-01T00:00:00Z" }],
+    });
+    const { deps, create } = openaiFake();
+
+    await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("does not re-run the AI for a confirmation older than the stored analysis", async () => {
+    const { client } = guardClient({
+      confirmations: [{ extracted_fact_id: "f1", corrected_value: null, updated_at: "2026-01-01T00:00:00Z" }],
+    });
+    const { deps, create } = openaiFake();
+
+    await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("re-runs the AI when the stored analysis has no Technical Fit to reuse", async () => {
+    const { client } = guardClient({ existingAnalysis: existingAnalysis({ technical_fit_score: null }) });
+    const { deps, create } = openaiFake();
+
+    await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("runs the AI when there is no previous analysis at all", async () => {
+    const { client } = guardClient({ existingAnalysis: null });
+    const { deps, create } = openaiFake();
+
+    await analyzeFit(client, deps, { candidateId: "cand-1", vacancyId: "vac-1" });
+
+    expect(create).toHaveBeenCalledOnce();
   });
 });

@@ -136,10 +136,57 @@ describe("scoreVacancy", () => {
     expect(deps.enqueueFitJobs).not.toHaveBeenCalled();
   });
 
-  it("does not enqueue fit analysis when the score bucket is not VERIFIED", async () => {
+  // Phase 2.3b: the stored priority score's company_credibility factor reads
+  // vacancy_trust_scores.score, so ANY bucket transition must re-enqueue —
+  // not just the transition into VERIFIED.
+  it("enqueues fit analysis on a non-VERIFIED bucket transition", async () => {
     const { client, deps } = makeClient({
       vacancy: {
         data: { ...defaultVacancyRow, company_id: null, salary_min: null, salary_max: null, salary_source: null, source_code: "adzuna" },
+        error: null,
+      },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("UNDER_REVIEW");
+    expect(deps.enqueueFitJobs).toHaveBeenCalledWith(client, "vacancy-1");
+  });
+
+  it("enqueues fit analysis when a vacancy LEAVES VERIFIED", async () => {
+    const { client, deps } = makeClient({
+      vacancy: {
+        data: {
+          ...defaultVacancyRow,
+          trust_status: "VERIFIED",
+          company_id: null,
+          salary_min: null,
+          salary_max: null,
+          salary_source: null,
+          source_code: "adzuna",
+        },
+        error: null,
+      },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("UNDER_REVIEW");
+    expect(deps.enqueueFitJobs).toHaveBeenCalledWith(client, "vacancy-1");
+  });
+
+  it("does NOT re-enqueue when the bucket is unchanged (scoreVacancy runs every ingestion pass)", async () => {
+    const { client, deps } = makeClient({
+      vacancy: {
+        data: {
+          ...defaultVacancyRow,
+          trust_status: "UNDER_REVIEW",
+          company_id: null,
+          salary_min: null,
+          salary_max: null,
+          salary_source: null,
+          source_code: "adzuna",
+        },
         error: null,
       },
     });

@@ -1,25 +1,30 @@
 /**
- * Opportunity Intelligence Phase 2.2 / 2.3a — the §12.1 weighted
+ * Opportunity Intelligence Phase 2.2 / 2.3a / 2.3b — the §12.1 weighted
  * Opportunity Priority Score.
  *
- * Pure and versioned. Still computed on read (client-side) rather than
- * persisted: 2.3a wired 5 more factors to real data, but several of them —
- * response_stage, urgency (time-decaying), user_preferences — change
- * independently of the fit worker's re-run triggers, so a stored score
- * would be stale by design. Promote to a stored, versioned column only
- * once the list needs SQL-side sort/paginate AND a recompute mesh +
- * urgency-decay strategy exist (deferred Phase 2.3b).
+ * Pure and versioned. As of 2.3b this runs SERVER-SIDE in
+ * server/opportunities/analyzeFit.ts and its result is stored on
+ * fit_analyses (priority_score / priority_uncapped_score /
+ * priority_components / priority_score_version). All 8 factors now read
+ * real data when it exists — company_credibility became reachable once the
+ * computation moved to the service-role client, which (unlike the
+ * candidate's browser role) can read vacancy_trust_scores.
  *
- * 2.3a status: 7 of 8 factors read real data when available.
- * company_credibility stays a neutral placeholder — its source
- * (vacancy_trust_scores.score) is not readable by the candidate's browser
- * role (moderator-gated RLS), so it cannot be wired in a client-side
- * compute-on-read. See client/src/lib/opportunities.ts.
+ * Storage is kept honest by two mechanisms:
+ *   * a re-enqueue mesh (20260901050010_fit_enqueue_mesh + the broadened
+ *     guard in server/trust/scoreVacancy.ts) re-runs the analysis when
+ *     response stage, trust bucket, or selected roles change;
+ *   * urgency — the one factor that decays daily with no data change at
+ *     all, so no trigger can ever cover it — is refreshed by the READER
+ *     via finalizeWithFreshUrgency() below, re-summing the stored
+ *     components with a freshly computed urgency slice. The stored scalar
+ *     keeps its snapshot urgency and serves as the sort key.
  *
- * Shared so a future server-side persister can import the identical rule.
+ * Still pure and side-effect free apart from daysUntil()/
+ * nearestDeadlineDays(), which read the clock and are marked as such.
  */
 
-export const PRIORITY_SCORE_VERSION = "priority-v2";
+export const PRIORITY_SCORE_VERSION = "priority-v3";
 
 /**
  * Response-stage ordinal. Keys mirror the code-owned taxonomy in
@@ -105,6 +110,13 @@ export interface PriorityScoreInput {
    * not substring-match the title; null when they've selected no roles.
    */
   roleMatch?: boolean | null;
+  /**
+   * Latest vacancy_trust_scores.score (already 0-100, see
+   * server/trust/trustScore.ts). Readable only by the service role, so this
+   * is populated server-side in analyzeFit.ts. null when the vacancy has
+   * never been scored, or was hard-blocked without a numeric result.
+   */
+  companyCredibility?: number | null;
 }
 
 export interface PriorityFactorComponent {
@@ -172,6 +184,67 @@ function resolveUserPreferences(roleMatch: PriorityScoreInput["roleMatch"]): Res
   return { value: roleMatch ? 100 : 50, real: true };
 }
 
+/**
+ * vacancy_trust_scores.score is already the 0-100 weighted trust result
+ * (80+ VERIFIED / 50-79 UNDER_REVIEW / below 50 FLAGGED), so it feeds the
+ * factor directly rather than being re-scaled — re-scaling would invent a
+ * second, undocumented credibility curve on top of the trust policy's.
+ */
+function resolveCompanyCredibility(score: PriorityScoreInput["companyCredibility"]): Resolved {
+  if (score == null) {
+    return NEUTRAL;
+  }
+  return { value: clamp(score, 0, 100), real: true };
+}
+
+const DAY_MS = 86_400_000;
+
+/** Whole days from now to `iso`; null when absent or unparseable. Reads the clock. */
+export function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((t - Date.now()) / DAY_MS);
+}
+
+/** Nearest (soonest) deadline in days across the given ISO timestamps. Reads the clock. */
+export function nearestDeadlineDays(isos: Array<string | null | undefined>): number | null {
+  const days = isos.map(daysUntil).filter((n): n is number => n !== null);
+  return days.length > 0 ? Math.min(...days) : null;
+}
+
+/**
+ * Re-sums a STORED priority_components breakdown with a freshly computed
+ * urgency slice, returning the uncapped 0-100 scalar. The caller applies
+ * the hard-blocker cap (score 0) itself.
+ *
+ * This is the reader half of the 2.3b storage design: every other factor
+ * is refreshed by a re-enqueue hook, but urgency decays with the calendar
+ * alone, so the stored value for it goes stale within a day of being
+ * written. Everything else in `components` is used exactly as stored.
+ *
+ * Weights come from the stored components rather than FACTOR_WEIGHTS so an
+ * older row is re-summed with the weights it was actually scored under.
+ * Callers must still gate on priority_score_version matching before
+ * trusting a stored breakdown at all.
+ */
+export function finalizeWithFreshUrgency(
+  components: Record<PriorityFactor, PriorityFactorComponent>,
+  deadlineDays: number | null,
+): number {
+  const freshUrgency = resolveUrgency(deadlineDays);
+
+  let weighted = 0;
+  for (const factor of Object.keys(FACTOR_WEIGHTS) as PriorityFactor[]) {
+    const stored = components[factor];
+    const weight = stored?.weight ?? FACTOR_WEIGHTS[factor];
+    const value = factor === "urgency" ? freshUrgency.value : stored?.value ?? NEUTRAL_FACTOR_VALUE;
+    weighted += weight * clamp(value, 0, 100);
+  }
+
+  return clamp(Math.round(weighted), 0, 100);
+}
+
 export interface PriorityScore {
   /** 0-100. 0 when eligibilityCapped. null when there is no fit analysis at all. */
   score: number | null;
@@ -209,9 +282,7 @@ export function computePriorityScore(input: PriorityScoreInput | null): Priority
     },
     employment_arrangement: resolveEmploymentArrangement(input.remoteType),
     compensation_quality: resolveCompensationQuality(input.salary),
-    // Phase 2.3a: unreachable in a client-side compute-on-read — the
-    // candidate's browser role cannot read vacancy_trust_scores.
-    company_credibility: NEUTRAL,
+    company_credibility: resolveCompanyCredibility(input.companyCredibility),
     urgency: resolveUrgency(input.deadlineDays),
     user_preferences: resolveUserPreferences(input.roleMatch),
   };

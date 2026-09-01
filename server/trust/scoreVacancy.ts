@@ -188,13 +188,23 @@ export async function scoreVacancy(
   }
 
   // Phase 2.1: a vacancy *entering* VERIFIED enqueues a fit analysis for
-  // every active candidate. Guarded on a real transition — scoreVacancy
-  // runs on every ingestion pass, so re-scoring an already-VERIFIED
-  // vacancy must not re-enqueue. Wrapped so an enqueue failure never
-  // blocks scoring/ingestion (the "ingestion must remain available when
-  // trust scoring or company resolution is slow" invariant — the
-  // ingestion worker already wraps its scoreVacancy call the same way).
-  if (bucket === "VERIFIED" && row.trust_status !== "VERIFIED") {
+  // every active candidate. Phase 2.3b broadens that to ANY trust bucket
+  // transition, because the stored priority score's company_credibility
+  // factor reads vacancy_trust_scores.score — a vacancy that moves
+  // VERIFIED -> UNDER_REVIEW (or back) has a stale stored score until it is
+  // re-analysed.
+  //
+  // Still guarded on a real transition: scoreVacancy runs on every
+  // ingestion pass, so re-scoring a vacancy whose bucket did not move must
+  // not re-enqueue. Same-bucket numeric drift (e.g. VERIFIED 82 -> 95) is
+  // deliberately NOT caught in v1 — it would need a prior-score fetch and a
+  // threshold, for a 5%-weight factor.
+  //
+  // Wrapped so an enqueue failure never blocks scoring/ingestion (the
+  // "ingestion must remain available when trust scoring or company
+  // resolution is slow" invariant — the ingestion worker already wraps its
+  // scoreVacancy call the same way).
+  if (bucket !== row.trust_status) {
     try {
       await (deps.enqueueFitJobs ?? enqueueFitJobsForVacancy)(client, vacancyId);
     } catch (error) {

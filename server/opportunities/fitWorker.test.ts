@@ -24,6 +24,10 @@ function row(over: Record<string, unknown> = {}) {
     risks: [],
     model_version: "openai/gpt-4o-mini",
     prompt_version: "fit-analysis-v1",
+    priority_score: 66,
+    priority_uncapped_score: 66,
+    priority_components: { technical_fit: { weight: 0.2, value: 70, source: "fit" } },
+    priority_score_version: "priority-v3",
     ...over,
   };
 }
@@ -79,6 +83,20 @@ describe("runOneFitAnalysisJob", () => {
     expect(result.jobId).toBe("job-1");
     expect(upserts).toHaveLength(1);
     expect(updates[0].status).toBe("done");
+  });
+
+  it("persists the Phase 2.3b priority columns as part of the upsert", async () => {
+    analyzeFitMock.mockResolvedValue(row());
+    const { client, upserts } = makeClient({ id: "job-1", candidate_id: "cand-1", vacancy_id: "vac-1", attempts: 1, max_attempts: 5 });
+
+    await runOneFitAnalysisJob(client, deps);
+
+    expect(upserts[0]).toMatchObject({
+      priority_score: 66,
+      priority_uncapped_score: 66,
+      priority_score_version: "priority-v3",
+      priority_components: { technical_fit: { weight: 0.2, value: 70, source: "fit" } },
+    });
   });
 
   it("failure below max_attempts: leaves job leased with a future leased_until (backoff retry)", async () => {
