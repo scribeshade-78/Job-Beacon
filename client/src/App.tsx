@@ -9,6 +9,7 @@ import { fetchVerifiedIdentity, useAuth, type VerifiedIdentity } from "./lib/aut
 import { ensureCandidateProfile } from "./lib/profile";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 import { ActionRequiredPage } from "./pages/ActionRequiredPage";
+import { AdminPage } from "./pages/AdminPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
 import { EmployerPage } from "./pages/EmployerPage";
@@ -26,6 +27,7 @@ interface SignedInRoutesProps {
   ready: boolean;
   email: string | null;
   isModerator: boolean;
+  isAdmin: boolean;
   identityError: string | null;
   profileError: string | null;
   onLogout: () => void;
@@ -42,6 +44,7 @@ function SignedInRoutes({
   ready,
   email,
   isModerator,
+  isAdmin,
   identityError,
   profileError,
   onLogout,
@@ -50,6 +53,16 @@ function SignedInRoutes({
 
   if (location === "/moderator") {
     return <ModeratorPage onLogout={onLogout} />;
+  }
+
+  // R8.1: renders bare, no candidate AppShell — same reasoning /moderator
+  // uses, and rendered unconditionally at the path the same way: the real
+  // authorization boundary is requireAdmin on every /api/admin/* route, so
+  // a non-admin who reaches this URL just sees forbidden states from the
+  // API, never candidate data. isAdmin (server-verified via /api/me) only
+  // drives whether the nav link is shown, like showModeratorLink.
+  if (location === "/admin") {
+    return <AdminPage onLogout={onLogout} />;
   }
 
   // R5.4a: renders bare, no candidate AppShell — same reasoning /moderator
@@ -62,7 +75,7 @@ function SignedInRoutes({
   }
 
   return (
-    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator}>
+    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator} showAdminLink={isAdmin}>
       {identityError && (
         <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
           {identityError}
@@ -206,6 +219,7 @@ export function App() {
           ready={ready}
           email={identity?.email ?? null}
           isModerator={identity?.isModerator ?? false}
+          isAdmin={identity?.isAdmin ?? false}
           identityError={identityError}
           profileError={profileError}
           onLogout={() => void auth.signOut()}

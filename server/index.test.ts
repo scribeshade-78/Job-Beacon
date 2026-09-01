@@ -118,6 +118,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
           token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
         checkIsModerator: async () => false,
         checkHasVerifiedEmployerClaim: async () => false,
+        checkIsAdmin: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -131,6 +132,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
           aal: "aal1",
           isModerator: false,
           isEmployer: false,
+          isAdmin: false,
         });
         expect(response.headers.get("cache-control")).toBe("no-store");
         expect(response.headers.get("vary")).toBe("Authorization");
@@ -145,6 +147,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
           token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
         checkIsModerator: async () => true,
         checkHasVerifiedEmployerClaim: async () => false,
+        checkIsAdmin: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -158,6 +161,34 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
           aal: "aal1",
           isModerator: true,
           isEmployer: false,
+          isAdmin: false,
+        });
+      },
+    );
+  });
+
+  it("returns isAdmin: true when the checker reports an admin", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: async (token) =>
+          token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
+        checkIsModerator: async () => false,
+        checkHasVerifiedEmployerClaim: async () => false,
+        checkIsAdmin: async () => true,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/me`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          id: "user-123",
+          email: "person@example.com",
+          aal: "aal1",
+          isModerator: false,
+          isEmployer: false,
+          isAdmin: true,
         });
       },
     );
@@ -170,6 +201,7 @@ describe("GET /api/me (injected verifier, no real network calls)", () => {
           token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null,
         checkIsModerator: async () => false,
         checkHasVerifiedEmployerClaim: async () => true,
+        checkIsAdmin: async () => false,
       },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/me`, {
@@ -271,9 +303,9 @@ describe("GET /api/moderation/queue", () => {
     });
   });
 
-  it("returns 403 for an authenticated non-moderator", async () => {
+  it("returns 403 for a user who is neither a moderator nor an admin", async () => {
     await withTestServer(
-      { verifyAccessToken: testVerifier, checkIsModerator: async () => false },
+      { verifyAccessToken: testVerifier, checkIsModerator: async () => false, checkIsAdmin: async () => false },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/moderation/queue`, {
           headers: { Authorization: "Bearer valid-test-token" },
@@ -301,6 +333,30 @@ describe("GET /api/moderation/queue", () => {
       },
     );
   });
+
+  it("R8.1: an admin who is not a moderator reaches the moderation queue too", async () => {
+    const from = vi.fn((table: string) => {
+      if (table === "moderation_cases") return { select: () => ({ data: [], error: null }) };
+      if (table === "moderation_decisions") return { select: () => ({ data: [], error: null }) };
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        checkIsModerator: async () => false,
+        checkIsAdmin: async () => true,
+        serviceClient: { from } as never,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/moderation/queue`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual([]);
+      },
+    );
+  });
 });
 
 describe("POST /api/moderation/cases/:caseId/decisions", () => {
@@ -317,9 +373,9 @@ describe("POST /api/moderation/cases/:caseId/decisions", () => {
     });
   });
 
-  it("returns 403 for an authenticated non-moderator", async () => {
+  it("returns 403 for a user who is neither a moderator nor an admin", async () => {
     await withTestServer(
-      { verifyAccessToken: testVerifier, checkIsModerator: async () => false },
+      { verifyAccessToken: testVerifier, checkIsModerator: async () => false, checkIsAdmin: async () => false },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/moderation/cases/case-1/decisions`, {
           method: "POST",
@@ -379,6 +435,259 @@ describe("POST /api/moderation/cases/:caseId/decisions", () => {
           body: JSON.stringify(validBody),
         });
         expect(response.status).toBe(409);
+      },
+    );
+  });
+});
+
+describe("GET /api/admin/overview", () => {
+  function makeOverviewClient() {
+    const from = vi.fn((table: string) => {
+      if (table === "moderation_cases") return { select: () => ({ data: [], error: null }) };
+      if (table === "moderation_decisions") return { select: () => ({ data: [], error: null }) };
+      if (table === "source_policies") return { select: () => ({ eq: () => ({ data: null, error: null, count: 2 }) }) };
+      if (table === "candidate_profiles") return { select: () => ({ data: null, error: null, count: 7 }) };
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    return { from } as never;
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/overview`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/overview`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the aggregate counts for an admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: makeOverviewClient() },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/overview`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          openModerationCases: 0,
+          activeSources: 2,
+          totalCandidates: 7,
+        });
+      },
+    );
+  });
+});
+
+describe("GET /api/admin/sources", () => {
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the source policy list for an admin", async () => {
+    const from = vi.fn(() => ({
+      select: () => ({ order: () => ({ data: [{ source_code: "greenhouse", kill_switch: false }], error: null }) }),
+    }));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual([{ source_code: "greenhouse", kill_switch: false }]);
+      },
+    );
+  });
+});
+
+describe("PATCH /api/admin/sources/:sourceCode", () => {
+  it("returns 400 for a non-editable field", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources/greenhouse`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ policy_version: "hacked" }),
+        });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 for a non-boolean value", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources/greenhouse`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ kill_switch: "yes" }),
+        });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 when no editable field is provided", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources/greenhouse`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({}),
+        });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 404 when the source policy does not exist", async () => {
+    const from = vi.fn(() => ({
+      update: () => ({ eq: () => ({ select: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }),
+    }));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources/nope`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ kill_switch: true }),
+        });
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it("returns 200 with the updated row", async () => {
+    const from = vi.fn(() => ({
+      update: () => ({
+        eq: () => ({
+          select: () => ({
+            maybeSingle: async () => ({ data: { source_code: "greenhouse", kill_switch: true }, error: null }),
+          }),
+        }),
+      }),
+    }));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/sources/greenhouse`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ kill_switch: true }),
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ source_code: "greenhouse", kill_switch: true });
+      },
+    );
+  });
+});
+
+describe("GET /api/admin/trust-scores", () => {
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/trust-scores`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with recent scores for an admin", async () => {
+    const from = vi.fn(() => ({
+      select: () => ({
+        order: () => ({
+          limit: () => ({
+            data: [
+              {
+                id: "s-1",
+                vacancy_id: "v-1",
+                status: "FLAGGED",
+                score: 42,
+                policy_version: "r3-trust-score-v1",
+                scored_at: "2026-08-16T00:00:00Z",
+                vacancies: { raw_title: "Backend Engineer" },
+              },
+            ],
+            error: null,
+          }),
+        }),
+      }),
+    }));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/trust-scores`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual([
+          {
+            id: "s-1",
+            vacancyId: "v-1",
+            vacancyTitle: "Backend Engineer",
+            status: "FLAGGED",
+            score: 42,
+            policyVersion: "r3-trust-score-v1",
+            scoredAt: "2026-08-16T00:00:00Z",
+          },
+        ]);
+      },
+    );
+  });
+});
+
+describe("GET /api/admin/trust-weights", () => {
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/trust-weights`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the §12.2 dimension weights summing to 100 for an admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/trust-weights`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        const weights = (await response.json()) as Record<string, number>;
+        expect(Object.values(weights).reduce((sum, weight) => sum + weight, 0)).toBe(100);
       },
     );
   });

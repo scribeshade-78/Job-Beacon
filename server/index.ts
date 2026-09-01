@@ -11,8 +11,20 @@ import {
   type AccessTokenVerifier,
   type AuthenticatedRequest,
 } from "./requireAuth.js";
-import { createRequireModerator, isModerator, type ModeratorChecker } from "./requireModerator.js";
+import { isModerator, type ModeratorChecker } from "./requireModerator.js";
+import { createRequireAdmin, isAdmin, type AdminChecker } from "./requireAdmin.js";
+import { createRequireModeratorOrAdmin } from "./requireModeratorOrAdmin.js";
 import { createRequireWorkerSecret } from "./requireWorkerSecret.js";
+import { getAdminOverview } from "./admin/overview.js";
+import {
+  listSourcePolicies,
+  updateSourcePolicy,
+  EDITABLE_SOURCE_POLICY_FIELDS,
+  SourcePolicyNotFoundError,
+  type EditableSourcePolicyField,
+} from "./admin/sources.js";
+import { getRecentTrustScores } from "./admin/trustScores.js";
+import { DIMENSION_WEIGHTS } from "./trust/trustScore.js";
 import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
 import { createOpenAIClient } from "./resumes/openaiClient.js";
 import { extractResumeFacts } from "./resumes/extractFacts.js";
@@ -93,6 +105,8 @@ export interface CreateAppOptions {
   checkHasVerifiedEmployerClaim?: HasVerifiedEmployerClaimChecker;
   /** Injectable for tests (R5.4b) — the real per-company authorization boundary requireEmployerOf enforces. */
   checkIsVerifiedEmployer?: EmployerChecker;
+  /** Injectable for tests (R8.1) — same "UX signal only" role checkIsModerator carries for /api/me; requireAdmin below is the real authorization boundary. */
+  checkIsAdmin?: AdminChecker;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -114,13 +128,17 @@ export function createApp(options: CreateAppOptions = {}) {
   // R3.1: isModerator is included so the client can conditionally show
   // moderator-only navigation (e.g. the /moderator route) without a
   // separate round trip — the actual authorization boundary remains
-  // server-side (requireModerator on every moderation route below), this
-  // is a UX signal only, never trusted as an authorization decision itself.
+  // server-side (requireModeratorOrAdmin on every moderation route below,
+  // R8.1's admin-inclusive gate), this is a UX signal only, never trusted
+  // as an authorization decision itself.
   const checkIsModerator = options.checkIsModerator ?? isModerator;
   // R5.4a: same "UX signal only, never the authorization boundary itself"
   // caveat isModerator already carries — any *verified* claim, not scoped
   // to one company (createRequireEmployerOf is the real per-company gate).
   const checkHasVerifiedEmployerClaim = options.checkHasVerifiedEmployerClaim ?? hasVerifiedEmployerClaim;
+  // R8.1: same "UX signal only, never the authorization boundary itself"
+  // caveat isModerator already carries — requireAdmin below is the real gate.
+  const checkIsAdmin = options.checkIsAdmin ?? isAdmin;
 
   app.get(
     "/api/me",
@@ -130,14 +148,24 @@ export function createApp(options: CreateAppOptions = {}) {
       response.set("Vary", "Authorization");
       const userIsModerator = await checkIsModerator(request.user!.id);
       const userIsEmployer = await checkHasVerifiedEmployerClaim(request.user!.id);
-      response.status(200).json({ ...request.user, isModerator: userIsModerator, isEmployer: userIsEmployer });
+      const userIsAdmin = await checkIsAdmin(request.user!.id);
+      response.status(200).json({
+        ...request.user,
+        isModerator: userIsModerator,
+        isEmployer: userIsEmployer,
+        isAdmin: userIsAdmin,
+      });
     },
   );
 
   app.use(express.json());
 
   const requireAuth = createRequireAuth(options.verifyAccessToken);
-  const requireModerator = createRequireModerator(checkIsModerator);
+  const requireAdmin = createRequireAdmin(checkIsAdmin);
+  // R8.1: every existing /api/moderation/* route below is regated to this
+  // instead of requireModerator directly, so admins reach them too without
+  // duplicating the route family under /api/admin/*.
+  const requireModeratorOrAdmin = createRequireModeratorOrAdmin(checkIsModerator, checkIsAdmin);
   // R5.4b: requireEmployerOf's first real consumer — companyId comes from
   // the route param, same shape as requireModerator's global check but
   // scoped per-company.
@@ -241,7 +269,7 @@ export function createApp(options: CreateAppOptions = {}) {
     },
   );
 
-  app.get("/api/moderation/queue", requireAuth, requireModerator, async (_request, response) => {
+  app.get("/api/moderation/queue", requireAuth, requireModeratorOrAdmin, async (_request, response) => {
     try {
       const queue = await getModerationQueue(resolveServiceClient());
       response.status(200).json(queue);
@@ -254,7 +282,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.post(
     "/api/moderation/cases/:caseId/decisions",
     requireAuth,
-    requireModerator,
+    requireModeratorOrAdmin,
     async (request: AuthenticatedRequest, response) => {
       const { decision, rationale, policyVersion, appealId } = request.body ?? {};
 
@@ -411,7 +439,7 @@ export function createApp(options: CreateAppOptions = {}) {
     }
   });
 
-  app.get("/api/moderation/employer-claims", requireAuth, requireModerator, async (_request, response) => {
+  app.get("/api/moderation/employer-claims", requireAuth, requireModeratorOrAdmin, async (_request, response) => {
     try {
       const queue = await getEmployerClaimsQueue(resolveServiceClient());
       response.status(200).json(queue);
@@ -424,7 +452,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.post(
     "/api/moderation/employer-claims/:claimId/decision",
     requireAuth,
-    requireModerator,
+    requireModeratorOrAdmin,
     async (request: AuthenticatedRequest, response) => {
       const { decision, rationale } = request.body ?? {};
 
@@ -497,7 +525,7 @@ export function createApp(options: CreateAppOptions = {}) {
     },
   );
 
-  app.get("/api/moderation/company-corrections", requireAuth, requireModerator, async (_request, response) => {
+  app.get("/api/moderation/company-corrections", requireAuth, requireModeratorOrAdmin, async (_request, response) => {
     try {
       const queue = await getCompanyFactCorrectionsQueue(resolveServiceClient());
       response.status(200).json(queue);
@@ -510,7 +538,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.post(
     "/api/moderation/company-corrections/:correctionId/decision",
     requireAuth,
-    requireModerator,
+    requireModeratorOrAdmin,
     async (request: AuthenticatedRequest, response) => {
       const { decision, rationale } = request.body ?? {};
 
@@ -611,7 +639,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // unchanged — the moderator submits a decision against the appeal case's
   // own id with appealId set, which that route already accepted (R6.1-era
   // code, unused until now). No new decision-writing route needed.
-  app.get("/api/moderation/appeals", requireAuth, requireModerator, async (_request, response) => {
+  app.get("/api/moderation/appeals", requireAuth, requireModeratorOrAdmin, async (_request, response) => {
     try {
       const queue = await getAppealsQueue(resolveServiceClient());
       response.status(200).json(queue);
@@ -683,6 +711,85 @@ export function createApp(options: CreateAppOptions = {}) {
       console.error("Fit analysis run failed:", message);
       response.status(500).json({ error: "Failed to run fit analysis batch" });
     }
+  });
+
+  // R8.1 Admin Operations Panel — Overview: three real counts only. MRR and
+  // error/unresolved counts are deliberately absent (no subscriptions or
+  // error_events table exists yet).
+  app.get("/api/admin/overview", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const overview = await getAdminOverview(resolveServiceClient());
+      response.status(200).json(overview);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.get("/api/admin/sources", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const sources = await listSourcePolicies(resolveServiceClient());
+      response.status(200).json(sources);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.patch(
+    "/api/admin/sources/:sourceCode",
+    requireAuth,
+    requireAdmin,
+    async (request: AuthenticatedRequest, response) => {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const patch: Partial<Record<EditableSourcePolicyField, boolean>> = {};
+
+      for (const key of Object.keys(body)) {
+        if (!(EDITABLE_SOURCE_POLICY_FIELDS as readonly string[]).includes(key)) {
+          response.status(400).json({ error: `${key} is not an editable field.` });
+          return;
+        }
+        if (typeof body[key] !== "boolean") {
+          response.status(400).json({ error: `${key} must be a boolean.` });
+          return;
+        }
+        patch[key as EditableSourcePolicyField] = body[key] as boolean;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        response.status(400).json({ error: "At least one editable field is required." });
+        return;
+      }
+
+      try {
+        const updated = await updateSourcePolicy(resolveServiceClient(), request.params.sourceCode as string, patch);
+        response.status(200).json(updated);
+      } catch (error) {
+        if (error instanceof SourcePolicyNotFoundError) {
+          response.status(404).json({ error: error.message });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  app.get("/api/admin/trust-scores", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const scores = await getRecentTrustScores(resolveServiceClient());
+      response.status(200).json(scores);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  // Read-only — the §12.2 weights are PRD-verified constants (trustScore.ts),
+  // not stored config; this only displays them. R8.1 explicitly defers
+  // making them editable.
+  app.get("/api/admin/trust-weights", requireAuth, requireAdmin, (_request, response) => {
+    response.status(200).json(DIMENSION_WEIGHTS);
   });
 
   const clientBuildPath = path.resolve(process.cwd(), "dist/client");

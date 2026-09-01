@@ -13,6 +13,7 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Target,
   User,
   X,
@@ -50,6 +51,8 @@ interface AppShellProps {
   children: ReactNode;
   /** R3.1: shown only for moderators (server-verified via /api/me's isModerator) — a UX convenience, not the authorization boundary (requireModerator on the backend is). */
   showModeratorLink?: boolean;
+  /** R8.1: shown only for admins (server-verified via /api/me's isAdmin) — same UX-convenience-only caveat as showModeratorLink; requireAdmin on the backend is the boundary. */
+  showAdminLink?: boolean;
 }
 
 function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => void }) {
@@ -96,11 +99,13 @@ function SidebarFooter({ email, onLogout }: { email: string | null; onLogout: ()
   );
 }
 
-export function AppShell({ email, onLogout, children, showModeratorLink }: AppShellProps) {
+export function AppShell({ email, onLogout, children, showModeratorLink, showAdminLink }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const navItems = showModeratorLink
-    ? [...NAV_ITEMS, { href: "/moderator", label: "Moderation", Icon: ShieldAlert }]
-    : NAV_ITEMS;
+  const navItems = [
+    ...NAV_ITEMS,
+    ...(showModeratorLink ? [{ href: "/moderator", label: "Moderation", Icon: ShieldAlert }] : []),
+    ...(showAdminLink ? [{ href: "/admin", label: "Admin", Icon: SlidersHorizontal }] : []),
+  ];
 
   return (
     <div className="min-h-screen bg-ios-bg">
