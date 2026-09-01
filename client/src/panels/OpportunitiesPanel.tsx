@@ -127,6 +127,8 @@ export function OpportunitiesPanel() {
   const [opportunities, setOpportunities] = useState<OpportunitySummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +139,7 @@ export function OpportunitiesPanel() {
       setLoading(false);
       if (result.kind === "success") {
         setOpportunities(result.opportunities);
+        setHasMore(result.hasMore);
       } else {
         setError(result.message);
       }
@@ -146,6 +149,25 @@ export function OpportunitiesPanel() {
       cancelled = true;
     };
   }, []);
+
+  // Phase 2.3c: paging is offset-based off the current row count. The view
+  // orders by the stored priority_score, so an urgency refresh can shuffle a
+  // row across a page boundary; appending rather than replacing keeps any
+  // such row visible instead of dropping it.
+  async function loadMore() {
+    setLoadingMore(true);
+    const result = await listOpportunities(getSupabaseBrowserClient(), {
+      offset: opportunities?.length ?? 0,
+    });
+    setLoadingMore(false);
+
+    if (result.kind === "success") {
+      setOpportunities((prev) => [...(prev ?? []), ...result.opportunities]);
+      setHasMore(result.hasMore);
+    } else {
+      setError(result.message);
+    }
+  }
 
   if (loading) {
     return (
@@ -204,9 +226,6 @@ export function OpportunitiesPanel() {
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <StatusBadge status={trustStatusToBadge(opp.trustStatus)} />
-                    {opp.trustScore !== null && (
-                      <span className="text-xs text-ios-text-secondary">Score: {opp.trustScore}</span>
-                    )}
                     <span className="text-xs text-ios-text-secondary">
                       {formatSalary(opp.salary)}
                     </span>
@@ -221,6 +240,16 @@ export function OpportunitiesPanel() {
             </li>
           ))}
         </ul>
+        {hasMore && (
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="mt-4 w-full rounded-lg border border-ios-separator py-2 text-sm text-ios-blue hover:bg-ios-separator/30 disabled:opacity-50"
+          >
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+        )}
       </CardContent>
     </Card>
   );

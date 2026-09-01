@@ -91,7 +91,6 @@ export interface OpportunitySummary {
   location: string;
   remoteType: string | null;
   trustStatus: OpportunityTrustStatus;
-  trustScore: number | null;
   salary: OpportunitySalary;
   discoveredAt: string;
   lastSeenAt: string;
@@ -100,11 +99,16 @@ export interface OpportunitySummary {
   fitAnalysis: OpportunityFitAnalysis | null;
 }
 
-interface VacancyRow {
+/**
+ * One row of the candidate_opportunities view (Phase 2.3c). The view has
+ * already applied the verified + active filter and, via security_invoker,
+ * scoped the fit-analysis and application-plan columns to this candidate,
+ * so there is no second query and no merge step here any more.
+ */
+interface OpportunityRow {
   id: string;
   raw_title: string;
   authoritative_url: string;
-  company_id: string | null;
   country: string | null;
   region: string | null;
   city: string | null;
@@ -118,25 +122,23 @@ interface VacancyRow {
   last_seen_at: string;
   expires_at: string | null;
   trust_status: OpportunityTrustStatus | null;
-  companies: { displayed_name: string; domain: string | null } | null;
-  vacancy_trust_scores: Array<{ score: number | null }> | null;
-  application_plans: Array<{
-    id: string;
-    status: string;
-    gate_results: { eligible: boolean } | null;
-  }> | null;
-}
 
-interface FitAnalysisRow {
-  vacancy_id: string;
+  company_name: string | null;
+  company_domain: string | null;
+
+  plan_gate_results: { eligible: boolean } | null;
+  /** Latest application_attempts.status for this candidate's plan, if any. */
+  attempt_status: string | null;
+
   technical_fit_score: number | null;
   practical_eligibility_score: number | null;
-  eligibility_capped: boolean;
+  eligibility_capped: boolean | null;
   hard_blockers: OpportunityReasonEntry[] | null;
   missing_evidence: string[] | null;
   top_reasons: string[] | null;
-  jd_text_available: boolean;
-  /** Phase 2.3b stored §12.1 score. Null on rows the fit worker has not re-run since the migration. */
+  jd_text_available: boolean | null;
+
+  /** Phase 2.3b stored §12.1 score. Null until the fit worker has scored this pair. */
   priority_score: number | null;
   priority_uncapped_score: number | null;
   priority_components: Record<PriorityFactor, PriorityFactorComponent> | null;
@@ -145,46 +147,60 @@ interface FitAnalysisRow {
 
 const FAILURE_MESSAGE = "Could not load opportunities. Please try again.";
 
-const VERIFIED_STATUSES: OpportunityTrustStatus[] = ["VERIFIED", "VERIFIED_INCOMPLETE"];
+/** Rows per page. The panel pages through with `offset`. */
+export const OPPORTUNITIES_PAGE_SIZE = 25;
+
+export interface ListOpportunitiesOptions {
+  /** 0-based row offset. Defaults to 0 (first page). */
+  offset?: number;
+  /** Rows to fetch. Defaults to OPPORTUNITIES_PAGE_SIZE. */
+  limit?: number;
+}
 
 export type ListOpportunitiesResult =
-  | { kind: "success"; opportunities: OpportunitySummary[] }
+  | {
+      kind: "success";
+      opportunities: OpportunitySummary[];
+      /** True when the view returned a full page, i.e. another page may exist. */
+      hasMore: boolean;
+    }
   | { kind: "error"; message: string };
 
-function mapAutoApplyStatus(plans: VacancyRow["application_plans"]): OpportunityAutoApplyStatus {
-  if (!plans || plans.length === 0) {
+/**
+ * Maps the candidate's latest application_attempts.status onto the badge
+ * vocabulary. The gate decision still gates everything: an ineligible plan
+ * reads as not_started regardless of any attempt.
+ *
+ * The cases below are the full application_attempts.status CHECK constraint
+ * — pending / leased / succeeded / failed / action_required / cancelled.
+ * (The pre-2.3c version of this switch matched invented names like "draft",
+ * "generating" and "completed" that the schema never had, alongside reading
+ * a non-existent application_plans.status.)
+ */
+function mapAutoApplyStatus(row: OpportunityRow): OpportunityAutoApplyStatus {
+  if (!(row.plan_gate_results?.eligible ?? false)) {
     return "not_started";
   }
 
-  const plan = plans[0];
-  const gateEligible = plan.gate_results?.eligible ?? false;
-
-  if (!gateEligible) {
-    return "not_started";
-  }
-
-  switch (plan.status) {
+  switch (row.attempt_status) {
     case "pending":
-    case "draft":
       return "queued";
-    case "in_progress":
-    case "generating":
-    case "submitting":
+    case "leased":
       return "in_progress";
     case "action_required":
       return "action_required";
-    case "completed":
     case "succeeded":
       return "completed";
     case "failed":
     case "cancelled":
       return "failed";
     default:
+      // No attempt yet (null), or a status added to the schema since.
       return "not_started";
   }
 }
 
-function formatLocation(row: VacancyRow): string {
+function formatLocation(row: OpportunityRow): string {
   const parts = [row.city, row.region, row.country].filter(Boolean);
   if (parts.length === 0) {
     return "Location not specified";
@@ -192,77 +208,123 @@ function formatLocation(row: VacancyRow): string {
   return parts.join(", ");
 }
 
+const VIEW_COLUMNS = [
+  "id",
+  "raw_title",
+  "authoritative_url",
+  "country",
+  "region",
+  "city",
+  "remote_type",
+  "currency",
+  "salary_min",
+  "salary_max",
+  "salary_interval",
+  "salary_source",
+  "discovered_at",
+  "last_seen_at",
+  "expires_at",
+  "trust_status",
+  "company_name",
+  "company_domain",
+  "plan_gate_results",
+  "attempt_status",
+  "technical_fit_score",
+  "practical_eligibility_score",
+  "eligibility_capped",
+  "hard_blockers",
+  "missing_evidence",
+  "top_reasons",
+  "jd_text_available",
+  "priority_score",
+  "priority_uncapped_score",
+  "priority_components",
+  "priority_score_version",
+].join(", ");
+
+/**
+ * A view row carries a fit analysis only once the fit worker has written
+ * one. jd_text_available is NOT NULL on fit_analyses, so its being null
+ * here means the LEFT JOIN found no row at all.
+ */
+function buildFitAnalysis(row: OpportunityRow): OpportunityFitAnalysis | null {
+  if (row.jd_text_available === null) {
+    return null;
+  }
+
+  const capped = row.eligibility_capped ?? false;
+
+  return {
+    priority: buildPriority(row, capped),
+    technicalFitScore: row.technical_fit_score,
+    practicalEligibilityScore: row.practical_eligibility_score,
+    eligibilityCapped: capped,
+    hardBlockers: row.hard_blockers ?? [],
+    missingEvidence: row.missing_evidence ?? [],
+    topReasons: row.top_reasons ?? [],
+    jdTextAvailable: row.jd_text_available,
+  };
+}
+
+/**
+ * Phase 2.3c: reads the candidate_opportunities view, which has already
+ * applied the verified + active filter, joined the company, plan and fit
+ * columns, and (through security_invoker RLS) scoped the per-candidate ones
+ * to the caller. One query, no merge step.
+ *
+ * Ordering and paging happen in SQL on the STORED priority_score. The
+ * displayed score is then refreshed for urgency decay (see buildPriority),
+ * which can move a row by at most urgency's weight — so the page is
+ * re-sorted locally to stay visually monotonic. A row can still sit on the
+ * "wrong" side of a page boundary by that much; correcting it would mean
+ * duplicating the urgency ladder in SQL, which is not worth a 5% factor.
+ */
 export async function listOpportunities(
   client: Pick<SupabaseClient, "from">,
+  options: ListOpportunitiesOptions = {},
 ): Promise<ListOpportunitiesResult> {
+  const limit = options.limit ?? OPPORTUNITIES_PAGE_SIZE;
+  const offset = options.offset ?? 0;
+
   try {
     const { data, error } = await client
-      .from("vacancies")
-      .select(
-        `
-        id,
-        raw_title,
-        authoritative_url,
-        company_id,
-        country,
-        region,
-        city,
-        remote_type,
-        currency,
-        salary_min,
-        salary_max,
-        salary_interval,
-        salary_source,
-        discovered_at,
-        last_seen_at,
-        expires_at,
-        trust_status,
-        companies (displayed_name, domain),
-        vacancy_trust_scores (score),
-        application_plans (id, status, gate_results)
-      `,
-      )
-      .in("trust_status", VERIFIED_STATUSES)
-      .eq("status", "active")
-      .order("last_seen_at", { ascending: false });
+      .from("candidate_opportunities")
+      .select(VIEW_COLUMNS)
+      .order("priority_score", { ascending: false, nullsFirst: false })
+      .order("last_seen_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error || !data) {
       return { kind: "error", message: FAILURE_MESSAGE };
     }
 
-    const rows = data as unknown as VacancyRow[];
+    const rows = data as unknown as OpportunityRow[];
 
-    const opportunities: OpportunitySummary[] = rows.map((row) => {
-      const latestScore = row.vacancy_trust_scores?.[0]?.score ?? null;
+    const opportunities: OpportunitySummary[] = rows.map((row) => ({
+      id: row.id,
+      title: row.raw_title,
+      url: row.authoritative_url,
+      companyName: row.company_name,
+      companyDomain: row.company_domain,
+      location: formatLocation(row),
+      remoteType: row.remote_type,
+      trustStatus: row.trust_status ?? "UNDER_REVIEW",
+      salary: {
+        min: row.salary_min,
+        max: row.salary_max,
+        currency: row.currency,
+        interval: row.salary_interval,
+        source: row.salary_source,
+      },
+      discoveredAt: row.discovered_at,
+      lastSeenAt: row.last_seen_at,
+      autoApplyStatus: mapAutoApplyStatus(row),
+      fitAnalysis: buildFitAnalysis(row),
+    }));
 
-      return {
-        id: row.id,
-        title: row.raw_title,
-        url: row.authoritative_url,
-        companyName: row.companies?.displayed_name ?? null,
-        companyDomain: row.companies?.domain ?? null,
-        location: formatLocation(row),
-        remoteType: row.remote_type,
-        trustStatus: row.trust_status ?? "UNDER_REVIEW",
-        trustScore: latestScore,
-        salary: {
-          min: row.salary_min,
-          max: row.salary_max,
-          currency: row.currency,
-          interval: row.salary_interval,
-          source: row.salary_source,
-        },
-        discoveredAt: row.discovered_at,
-        lastSeenAt: row.last_seen_at,
-        autoApplyStatus: mapAutoApplyStatus(row.application_plans),
-        fitAnalysis: null as OpportunityFitAnalysis | null,
-      };
-    });
-
-    await attachFitAnalyses(client, rows, opportunities);
     sortByPriority(opportunities);
 
-    return { kind: "success", opportunities };
+    return { kind: "success", opportunities, hasMore: rows.length === limit };
   } catch {
     return { kind: "error", message: FAILURE_MESSAGE };
   }
@@ -270,8 +332,8 @@ export async function listOpportunities(
 
 /**
  * Phase 2.3b: the score is computed and stored server-side
- * (server/opportunities/analyzeFit.ts), so the client no longer gathers
- * signals — it reads the stored breakdown and refreshes exactly one slice.
+ * (server/opportunities/analyzeFit.ts), so the client reads the stored
+ * breakdown and refreshes exactly one slice.
  *
  * Urgency is the only factor the re-enqueue mesh cannot keep fresh: it
  * decays with the calendar, not with a data change. So it is recomputed
@@ -281,97 +343,43 @@ export async function listOpportunities(
  * re-analysis anyway.
  *
  * A row with no stored components, or one written under a different score
- * version (rollout skew, or a pre-2.3b row the worker has not revisited),
+ * version (rollout skew, or a row the reconcile pass has not reached yet),
  * falls back to the 2.3a computation over the fit fields alone: real
- * technical/practical factors, the rest neutral.
+ * technical/practical factors, the rest neutral. Such rows sort last in SQL
+ * (priority_score IS NULL) while displaying a fallback score, so ordering
+ * and display disagree until `worker:fit --reconcile` has run.
  */
-function buildPriority(fit: FitAnalysisRow, expiresAt: string | null): PriorityScore {
-  const components = fit.priority_components;
+function buildPriority(row: OpportunityRow, capped: boolean): PriorityScore {
+  const components = row.priority_components;
 
-  if (!components || fit.priority_score_version !== PRIORITY_SCORE_VERSION) {
+  if (!components || row.priority_score_version !== PRIORITY_SCORE_VERSION) {
     return computePriorityScore({
-      technicalFitScore: fit.technical_fit_score,
-      practicalEligibilityScore: fit.practical_eligibility_score,
-      eligibilityCapped: fit.eligibility_capped,
+      technicalFitScore: row.technical_fit_score,
+      practicalEligibilityScore: row.practical_eligibility_score,
+      eligibilityCapped: capped,
     });
   }
 
-  const uncappedScore = finalizeWithFreshUrgency(components, daysUntil(expiresAt));
+  const uncappedScore = finalizeWithFreshUrgency(components, daysUntil(row.expires_at));
 
   return {
-    score: fit.eligibility_capped ? 0 : uncappedScore,
+    score: capped ? 0 : uncappedScore,
     uncappedScore,
-    capped: fit.eligibility_capped,
+    capped,
     components,
-    version: fit.priority_score_version,
+    version: row.priority_score_version,
   };
 }
 
 /**
- * Fetches this candidate's fit_analyses rows for the listed vacancies (RLS
- * scopes them to the signed-in candidate automatically) and attaches the
- * stored §12.1 priority score. A fit-lookup failure is swallowed — the
- * Opportunities list must still render without fit data rather than error
- * out entirely.
- */
-async function attachFitAnalyses(
-  client: Pick<SupabaseClient, "from">,
-  rows: VacancyRow[],
-  opportunities: OpportunitySummary[],
-): Promise<void> {
-  if (opportunities.length === 0) {
-    return;
-  }
-
-  try {
-    const { data, error } = await client
-      .from("fit_analyses")
-      .select(
-        "vacancy_id, technical_fit_score, practical_eligibility_score, eligibility_capped, hard_blockers, missing_evidence, top_reasons, jd_text_available, priority_score, priority_uncapped_score, priority_components, priority_score_version",
-      )
-      .in(
-        "vacancy_id",
-        opportunities.map((o) => o.id),
-      );
-
-    if (error || !data) {
-      return;
-    }
-
-    const byVacancy = new Map<string, FitAnalysisRow>();
-    for (const fit of data as unknown as FitAnalysisRow[]) {
-      byVacancy.set(fit.vacancy_id, fit);
-    }
-
-    const rowById = new Map(rows.map((r) => [r.id, r]));
-
-    for (const opp of opportunities) {
-      const fit = byVacancy.get(opp.id);
-      if (!fit) {
-        continue;
-      }
-
-      opp.fitAnalysis = {
-        priority: buildPriority(fit, rowById.get(opp.id)?.expires_at ?? null),
-        technicalFitScore: fit.technical_fit_score,
-        practicalEligibilityScore: fit.practical_eligibility_score,
-        eligibilityCapped: fit.eligibility_capped,
-        hardBlockers: fit.hard_blockers ?? [],
-        missingEvidence: fit.missing_evidence ?? [],
-        topReasons: fit.top_reasons ?? [],
-        jdTextAvailable: fit.jd_text_available,
-      };
-    }
-  } catch {
-    // fit data is best-effort — leave fitAnalysis null on any failure.
-  }
-}
-
-/**
+ * Re-sorts the fetched page by the urgency-refreshed score. SQL already
+ * chose *which* rows are on this page (by the stored score); this only
+ * fixes their order within it.
+ *
  * Scored opportunities first (priority score desc), then not-yet-analysed
- * ones; last_seen_at desc as the tiebreak within each group. A
- * hard-blocked opportunity has priority 0, so it sinks below eligible ones
- * but stays above "analysis pending".
+ * ones; last_seen_at desc as the tiebreak within each group. A hard-blocked
+ * opportunity has priority 0, so it sinks below eligible ones but stays
+ * above "analysis pending".
  */
 function sortByPriority(opportunities: OpportunitySummary[]): void {
   opportunities.sort((a, b) => {
