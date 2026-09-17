@@ -230,6 +230,26 @@ function extractAdzuna(raw: Record<string, unknown>): JdExtraction {
   };
 }
 
+function extractJooble(raw: Record<string, unknown>): JdExtraction {
+  // Jooble's search response carries only `snippet` — a short, provider-
+  // truncated plain-text preview ("This is a great opportunity to join our
+  // team..."). There is no full description field on this endpoint, so this
+  // resolves to short cleanText, the same class of limitation Adzuna's
+  // truncated `description` has. `type`/`source` are metadata, not JD text.
+  const snippet = asString(raw.snippet);
+  const canonicalUrl = asString(raw.link);
+  if (!snippet) {
+    return { cleanText: "", sections: [], htmlSnapshot: null, canonicalUrl };
+  }
+  const body = collapseWhitespace(decodeEntities(snippet));
+  return {
+    cleanText: body,
+    sections: body ? [{ heading: null, body }] : [],
+    htmlSnapshot: null,
+    canonicalUrl,
+  };
+}
+
 const USAJOBS_DETAIL_FIELDS: Array<{ key: string; heading: string }> = [
   { key: "JobSummary", heading: "Summary" },
   { key: "MajorDutiesList", heading: "Duties" },
@@ -275,6 +295,7 @@ const EXTRACTORS: Record<string, (raw: Record<string, unknown>) => JdExtraction>
   lever: extractLever,
   adzuna: extractAdzuna,
   usajobs: extractUsajobs,
+  jooble: extractJooble,
 };
 
 /**

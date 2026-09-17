@@ -88,6 +88,21 @@ describe("extractJd", () => {
     expect(result.htmlSnapshot).toBeNull();
   });
 
+  it("jooble: passes through the truncated snippet as one section, no html snapshot", () => {
+    const raw = {
+      link: "https://ua.jooble.org/jdp/12345",
+      snippet: "This is a great opportunity to join our team...",
+      type: "Full-time",
+    };
+    const result = extractJd("jooble", raw);
+    expect(result.canonicalUrl).toBe("https://ua.jooble.org/jdp/12345");
+    expect(result.cleanText).toBe("This is a great opportunity to join our team...");
+    expect(result.sections).toEqual([
+      { heading: null, body: "This is a great opportunity to join our team..." },
+    ]);
+    expect(result.htmlSnapshot).toBeNull();
+  });
+
   it("usajobs: maps UserArea.Details fields to labelled sections", () => {
     const raw = {
       PositionURI: "https://usajobs.gov/job/1",

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Watermark Remover</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+        body { font-family: 'Inter', sans-serif; background: #f4f7f6; display: flex; justify-content: center; padding: 20px; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); max-width: 800px; width: 100%; }
+        #canvas-container { position: relative; cursor: crosshair; margin-top: 20px; border: 2px dashed #ccc; overflow: hidden; }
+        canvas { max-width: 100%; display: block; }
+        .controls { margin-top: 20px; display: flex; gap: 10px; align-items: center; }
+        button { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; background: #007bff; color: white; }
+        button:hover { background: #0056b3; }
+        input[type="range"] { flex-grow: 1; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Watermark Remover</h2>
+    <input type="file" id="upload" accept="image/*">
+    <div id="canvas-container">
+        <canvas id="canvas"></canvas>
+    </div>
+    <div class="controls">
+        <label>Smoothing:</label>
+        <input type="range" id="blurRange" min="1" max="20" value="5">
+        <button onclick="removeWatermark()">Remove Selection</button>
+        <button onclick="resetImage()" style="background:#6c757d">Reset</button>
+        <button onclick="downloadImage()" style="background:#28a745">Download</button>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const upload = document.getElementById('upload');
+    let img = new Image();
+    let originalData = null;
+    let isDragging = false, startX, startY, rect = {};
+
+    upload.onchange = (e) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                originalData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+
+    canvas.onmousedown = (e) => {
+        isDragging = true;
+        const rectBound = canvas.getBoundingClientRect();
+        startX = e.clientX - rectBound.left;
+        startY = e.clientY - rectBound.top;
+    };
+
+    canvas.onmouseup = (e) => {
+        isDragging = false;
+        const rectBound = canvas.getBoundingClientRect();
+        rect = { x: startX, y: startY, w: (e.clientX - rectBound.left) - startX, h: (e.clientY - rectBound.top) - startY };
+    };
+
+    function removeWatermark() {
+        if (!rect.w) return;
+        const blur = document.getElementById('blurRange').value;
+        ctx.filter = `blur(${blur}px)`;
+        ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, rect.x, rect.y, rect.w, rect.h);
+        ctx.filter = 'none';
+        rect = {};
+    }
+
+    function resetImage() { if(originalData) ctx.putImageData(originalData, 0, 0); }
+
+    function downloadImage() {
+        const link = document.createElement('a');
+        link.download = 'edited-image.png';
+        link.href = canvas.toDataURL();
+        link.click();
+    }
+</script>
+
+</body>
+</html>

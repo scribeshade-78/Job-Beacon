@@ -3,6 +3,7 @@ import { greenhouseAdapter } from "./greenhouse.js";
 import { leverAdapter } from "./lever.js";
 import { adzunaAdapter } from "./adzuna.js";
 import { usajobsAdapter } from "./usajobs.js";
+import { joobleAdapter } from "./jooble.js";
 
 /**
  * Registry of all registered discovery adapters.
@@ -18,6 +19,7 @@ const ADAPTERS: readonly DiscoveryAdapter[] = [
   leverAdapter,
   adzunaAdapter,
   usajobsAdapter,
+  joobleAdapter,
 ] as const;
 
 /**

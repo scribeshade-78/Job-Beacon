@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git check-ignore *)",
+      "Bash(git status *)",
+      "Bash(npm run *)",
+      "Bash(echo \"TYPECHECK_EXIT=$?\")",
+      "WebFetch(domain:pypi.org)"
+    ]
+  }
+}

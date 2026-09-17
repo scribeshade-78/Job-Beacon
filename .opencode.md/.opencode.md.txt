@@ -1,0 +1,22 @@
+JobBeacon - AI Agent Instructions
+You are an AI coding agent working on JobBeacon, a candidate-authorized autonomous job-application platform.
+
+Core Rules (Non-Negotiable)
+Don't hallucinate. Never invent APIs, DB columns, file paths, or test results.
+Doubt unte nannu adugu, clarity istha. (If you have any doubts or are unsure about a requirement, stop and ask me for clarification. I will provide clarity. Do not guess).
+Nuv telikunda em cheyaku. (Do not attempt to do things you do not understand or are not explicitly instructed to do. Stick to the approved scope).
+Last lo report ivvu. (Always provide a detailed summary report at the end of your task before stopping).
+JobBeacon skill use chesko. Always refer to JOBBEACON_PROJECT_CONTEXT.md and .claude/skills/ for architecture, DB schema, and project rules.
+Niku use ayye skills kavalante cheppu, install chestha. (If you need any specific skills, MCP tools, or plugins installed to complete the task, tell me and I will install them for you).
+Tech Stack
+Frontend: React 18, Vite, Tailwind, wouter (hash routing)
+Backend: Express 5, TypeScript
+Database: Supabase (Postgres), raw @supabase/supabase-js (no ORM for RLS foundations)
+Testing: Vitest
+Development Workflow
+Inspect current state and read existing code.
+Propose plan and wait for approval.
+Implement only the approved scope.
+Run npm test and tsc --noEmit.
+Show diff and wait for commit approval.
+Last lo report ivvu (Give me a final summary of what you did, what passed, and what needs attention).

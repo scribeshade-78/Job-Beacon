@@ -9,6 +9,7 @@ import { greenhouseAdapter } from "./greenhouse.js";
 import { leverAdapter } from "./lever.js";
 import { adzunaAdapter } from "./adzuna.js";
 import { usajobsAdapter } from "./usajobs.js";
+import { joobleAdapter } from "./jooble.js";
 
 describe("discoveryAdapterRegistry", () => {
   it("contains the greenhouse adapter", () => {
@@ -31,6 +32,11 @@ describe("discoveryAdapterRegistry", () => {
     expect(discoveryAdapterRegistry.get("usajobs")).toBe(usajobsAdapter);
   });
 
+  it("contains the jooble adapter", () => {
+    expect(discoveryAdapterRegistry.has("jooble")).toBe(true);
+    expect(discoveryAdapterRegistry.get("jooble")).toBe(joobleAdapter);
+  });
+
   it("does not contain unregistered source codes", () => {
     expect(discoveryAdapterRegistry.has("not-a-real-source")).toBe(false);
   });
@@ -41,7 +47,8 @@ describe("discoveryAdapterRegistry", () => {
     expect(codes).toContain("lever");
     expect(codes).toContain("adzuna");
     expect(codes).toContain("usajobs");
-    expect(codes.length).toBe(4);
+    expect(codes).toContain("jooble");
+    expect(codes.length).toBe(5);
   });
 });
 
@@ -64,6 +71,11 @@ describe("getDiscoveryAdapter", () => {
   it("returns the usajobs adapter for 'usajobs' (MP-A2.1)", () => {
     const adapter = getDiscoveryAdapter("usajobs");
     expect(adapter).toBe(usajobsAdapter);
+  });
+
+  it("returns the jooble adapter for 'jooble'", () => {
+    const adapter = getDiscoveryAdapter("jooble");
+    expect(adapter).toBe(joobleAdapter);
   });
 
   it("throws for unregistered source code", () => {
