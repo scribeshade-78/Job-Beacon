@@ -6,6 +6,7 @@ import {
   type ModerationDecisionValue,
   type ModerationQueueEntry,
 } from "../../lib/moderation";
+import { safeVacancyHref } from "../../panels/shared";
 import { AdminCard, SectionMessage, getAccessToken } from "./shared";
 
 const DECISION_LABEL: Record<ModerationDecisionValue, string> = {
@@ -123,7 +124,7 @@ export function ModerationSection() {
             ) : (
               <div className="space-y-3">
                 <a
-                  href={selectedCase.vacancyUrl}
+                  href={safeVacancyHref(selectedCase.vacancyUrl)}
                   target="_blank"
                   rel="noreferrer"
                   className="break-all text-xs text-sky-400 underline"

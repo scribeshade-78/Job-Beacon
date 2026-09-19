@@ -46,15 +46,27 @@ values
 
 set local role service_role;
 
--- 0. clean slate
-select is((select count(*)::int from fit_analysis_jobs), 0, 'no fit_analysis_jobs before any signal');
+-- 0. clean slate. Scoped to this file's own candidate and its two fixture
+--    vacancies: the live database already holds jobs for real candidates, so a
+--    global count only ever equalled 0 on an empty one.
+select is(
+  (select count(*)::int from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
+  0,
+  'no fit_analysis_jobs before any signal'
+);
 
 -- 1. Classifying an UNLINKED message enqueues nothing: application_attempt_id
 --    is still NULL, which is the normal poll.ts ordering.
 insert into response_classifications (message_id, category, model_version, prompt_version)
 values ('f1111111-9232-1111-1111-111111111111', 'interview', 'classifier-v0', 'message-classification-v1');
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   0,
   'classifying a message that is not linked to an application enqueues nothing'
 );
@@ -63,46 +75,78 @@ select is(
 update messages set application_attempt_id = 'eeeeeeee-9232-1111-1111-111111111111'
   where id = 'f1111111-9232-1111-1111-111111111111';
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   1,
   'linking an already-classified message enqueues exactly one fit_analysis_jobs row'
 );
 
 -- 3. it targets the right (candidate, vacancy) pair
+-- scoped to the fixture vacancies, so the pair below is this file's own row
+-- and not one of the live queue's
 select is(
-  (select candidate_id::text || '|' || vacancy_id::text from fit_analysis_jobs),
+  (select candidate_id::text || '|' || vacancy_id::text from fit_analysis_jobs
+     where vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   'aaaaaaaa-9232-1111-1111-111111111111|cccccccc-9232-1111-1111-111111111111',
   'the enqueued job targets the message''s candidate and vacancy'
 );
 
 -- 4. and it is pending
-select is((select status from fit_analysis_jobs), 'pending', 'the enqueued job is pending');
+select is(
+  (select status from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
+  'pending',
+  'the enqueued job is pending'
+);
 
 -- 5. Re-classification of an already-linked message (a prompt-version
 --    backfill) re-arms the same row rather than adding another. Drive the
 --    job to 'done' first so the re-arm is observable.
-update fit_analysis_jobs set status = 'done', attempts = 3;
+-- fixture manipulation, scoped to this file's own rows so it cannot disturb
+-- the live queue
+update fit_analysis_jobs set status = 'done', attempts = 3
+  where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+    and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                       'cdcdcdcd-9232-1111-1111-111111111111');
 update response_classifications set category = 'offer', prompt_version = 'message-classification-v2'
   where message_id = 'f1111111-9232-1111-1111-111111111111';
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   1,
   're-classifying a linked message does not add a second job'
 );
 
 -- 6. ...and that row is back to pending with attempts reset
 select is(
-  (select status || '/' || attempts::text from fit_analysis_jobs),
+  (select status || '/' || attempts::text from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   'pending/0',
   're-classifying a linked message re-arms the existing job to pending'
 );
 
 -- 7. Linking a message that has NO classification enqueues nothing.
-update fit_analysis_jobs set status = 'done';
+update fit_analysis_jobs set status = 'done'
+  where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+    and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                       'cdcdcdcd-9232-1111-1111-111111111111');
 update messages set application_attempt_id = 'eeeeeeee-9232-1111-1111-111111111111'
   where id = 'f2222222-9232-1111-1111-111111111111';
 select is(
-  (select count(*)::int from fit_analysis_jobs where status = 'pending'),
+  (select count(*)::int from fit_analysis_jobs
+     where status = 'pending'
+       and candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   0,
   'linking a message with no classification enqueues nothing'
 );
@@ -111,29 +155,43 @@ reset role;
 
 -- 8. Selecting a target role (browser-side RLS write) enqueues for the
 --    candidate's VERIFIED vacancies only.
-delete from fit_analysis_jobs;
+-- scoped to this file's candidate so the reset cannot disturb the live queue
+-- (the surrounding transaction rolls back either way)
+delete from fit_analysis_jobs
+  where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111';
 set local role authenticated;
 set local request.jwt.claims to '{"sub":"aaaaaaaa-9232-1111-1111-111111111111"}';
 insert into candidate_selected_roles (candidate_id, role_name)
 values ('aaaaaaaa-9232-1111-1111-111111111111', 'Platform Engineer');
 reset role;
 
+-- the fan-out also covers every real VERIFIED vacancy, so this counts only
+-- the two fixture vacancies
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   1,
   'selecting a target role enqueues one job (the VERIFIED vacancy only)'
 );
 
 -- 9. the FLAGGED vacancy is not enqueued
 select is(
-  (select vacancy_id::text from fit_analysis_jobs),
+  (select vacancy_id::text from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   'cccccccc-9232-1111-1111-111111111111',
   'the FLAGGED vacancy is not enqueued by a preference change'
 );
 
 -- 10. Removing a role re-arms too (deleting a role changes what matches).
 set local role service_role;
-update fit_analysis_jobs set status = 'done';
+update fit_analysis_jobs set status = 'done'
+  where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+    and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                       'cdcdcdcd-9232-1111-1111-111111111111');
 reset role;
 set local role authenticated;
 set local request.jwt.claims to '{"sub":"aaaaaaaa-9232-1111-1111-111111111111"}';
@@ -141,7 +199,10 @@ delete from candidate_selected_roles where candidate_id = 'aaaaaaaa-9232-1111-11
 reset role;
 
 select is(
-  (select status from fit_analysis_jobs),
+  (select status from fit_analysis_jobs
+     where candidate_id = 'aaaaaaaa-9232-1111-1111-111111111111'
+       and vacancy_id in ('cccccccc-9232-1111-1111-111111111111',
+                          'cdcdcdcd-9232-1111-1111-111111111111')),
   'pending',
   'removing a target role re-arms the fit analysis job'
 );

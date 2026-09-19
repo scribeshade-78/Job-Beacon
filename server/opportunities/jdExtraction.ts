@@ -290,12 +290,50 @@ function extractUsajobs(raw: Record<string, unknown>): JdExtraction {
   };
 }
 
+/**
+ * Task A2: Remotive.
+ *
+ * Added because on-demand intake could not score what it ingested without it.
+ * Every fit analysis needs JD text, extractJd threw UnknownJdSourceError for
+ * this source, and the job was dead-lettered after its retries — so "fetch
+ * latest jobs" produced vacancies that could never be ranked, while the
+ * targeted claim was working correctly the whole time.
+ *
+ * The payload is the raw Remotive job object, whose description is an HTML
+ * fragment (verified against a stored vacancy_versions row: it opens with a p
+ * tag and carries escaped entities such as &amp;). That makes this the same
+ * shape as Greenhouse's mapping, which is why the two look alike: same
+ * htmlToSections, same entity decoding.
+ *
+ * Unlike Jooble (snippet only) and USAJOBS (details absent unless Fields=Full
+ * is requested), Remotive publishes a full description, so this yields real
+ * section boundaries rather than a single truncated blob.
+ */
+function extractRemotive(raw: Record<string, unknown>): JdExtraction {
+  const description = asString(raw.description);
+  const canonicalUrl = asString(raw.url);
+
+  if (!description) {
+    return { cleanText: "", sections: [], htmlSnapshot: null, canonicalUrl };
+  }
+
+  const sections = htmlToSections(description);
+
+  return {
+    cleanText: sectionsToText(sections),
+    sections,
+    htmlSnapshot: description,
+    canonicalUrl,
+  };
+}
+
 const EXTRACTORS: Record<string, (raw: Record<string, unknown>) => JdExtraction> = {
   greenhouse: extractGreenhouse,
   lever: extractLever,
   adzuna: extractAdzuna,
   usajobs: extractUsajobs,
   jooble: extractJooble,
+  remotive: extractRemotive,
 };
 
 /**

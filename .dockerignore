@@ -1,0 +1,23 @@
+# Task J. Keeps the build context small AND keeps secrets out of it.
+#
+# .env matters most: the builder copies source directories explicitly rather than
+# the whole tree, so a stray .env would not normally reach the image — but a
+# .dockerignore is the control that holds even if someone later changes a COPY to
+# "COPY . .", which is exactly the kind of edit that leaks a service-role key
+# into an image layer.
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+.git
+.gitignore
+
+# Local-only artefacts that have no business in a production image.
+*.log
+coverage
+.vscode
+.idea
+supabase/.temp
+supabase/.branches

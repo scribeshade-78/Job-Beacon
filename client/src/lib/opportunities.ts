@@ -91,6 +91,13 @@ export interface OpportunitySummary {
   location: string;
   remoteType: string | null;
   trustStatus: OpportunityTrustStatus;
+  /**
+   * Which source this listing came from. Surfaced because some sources require
+   * attribution as a condition of using their data (Remotive's terms require it
+   * explicitly), and because "where did this job come from" is a fair question
+   * for a candidate to be able to answer from the listing itself.
+   */
+  sourceCode: string;
   salary: OpportunitySalary;
   discoveredAt: string;
   lastSeenAt: string;
@@ -122,6 +129,7 @@ interface OpportunityRow {
   last_seen_at: string;
   expires_at: string | null;
   trust_status: OpportunityTrustStatus | null;
+  source_code: string;
 
   company_name: string | null;
   company_domain: string | null;
@@ -145,6 +153,17 @@ interface OpportunityRow {
   priority_score_version: string | null;
 }
 
+import type { SortId } from "../../../shared/opportunityQuery";
+import type { CandidatePreferences } from "./candidatePreferences";
+import {
+  EMPTY_FILTERS,
+  applyOpportunityFilters,
+  applyOpportunitySort,
+  applyPreferenceExclusions,
+  type FilterableQuery,
+  type OpportunityFilters,
+} from "./opportunityQuery";
+
 const FAILURE_MESSAGE = "Could not load opportunities. Please try again.";
 
 /** Rows per page. The panel pages through with `offset`. */
@@ -155,6 +174,21 @@ export interface ListOpportunitiesOptions {
   offset?: number;
   /** Rows to fetch. Defaults to OPPORTUNITIES_PAGE_SIZE. */
   limit?: number;
+  /**
+   * Task I — the on-the-fly filter state. Applied SERVER-SIDE, so a page covers
+   * the filtered set rather than filtering one already-loaded page. Omitted, the
+   * query is exactly what it was before this task.
+   */
+  filters?: OpportunityFilters;
+  /**
+   * Task I — the candidate's durable preferences, used ONLY for the standing
+   * exclusions. They are deliberately not filter seeds here: seeding is a UI
+   * starting value and happens in the panel, while an exclusion is a query
+   * constraint that applies to every request.
+   */
+  preferences?: CandidatePreferences | null;
+  /** Task I — which of the 6 sorts to apply. An unavailable sort falls back to best match. */
+  sort?: SortId;
 }
 
 export type ListOpportunitiesResult =
@@ -225,6 +259,7 @@ const VIEW_COLUMNS = [
   "last_seen_at",
   "expires_at",
   "trust_status",
+  "source_code",
   "company_name",
   "company_domain",
   "plan_gate_results",
@@ -272,12 +307,20 @@ function buildFitAnalysis(row: OpportunityRow): OpportunityFitAnalysis | null {
  * columns, and (through security_invoker RLS) scoped the per-candidate ones
  * to the caller. One query, no merge step.
  *
- * Ordering and paging happen in SQL on the STORED priority_score. The
- * displayed score is then refreshed for urgency decay (see buildPriority),
- * which can move a row by at most urgency's weight — so the page is
- * re-sorted locally to stay visually monotonic. A row can still sit on the
- * "wrong" side of a page boundary by that much; correcting it would mean
- * duplicating the urgency ladder in SQL, which is not worth a 5% factor.
+ * Ordering and paging happen in SQL. For the best-match sort that means the
+ * STORED priority_score, and the displayed score is then refreshed for urgency
+ * decay (see buildPriority) — which can move a row by at most urgency's weight,
+ * so the page is re-sorted locally to stay visually monotonic. A row can still
+ * sit on the "wrong" side of a page boundary by that much; correcting it would
+ * mean duplicating the urgency ladder in SQL, which is not worth a 5% factor.
+ *
+ * THAT LOCAL RE-SORT IS CONFINED TO BEST MATCH, and the confinement is the
+ * point. Task I added four other sorts, and re-sorting every page by priority
+ * regardless of which one was asked for meant SQL selected the page in the
+ * requested order and this function then scrambled it back — so "Newest" and
+ * "Highest salary" returned the right ROWS in the wrong ORDER, while the panel
+ * labelled them as sorted. The urgency-decay rationale above only ever applied
+ * to the one sort that orders by that score.
  */
 export async function listOpportunities(
   client: Pick<SupabaseClient, "from">,
@@ -287,12 +330,26 @@ export async function listOpportunities(
   const offset = options.offset ?? 0;
 
   try {
-    const { data, error } = await client
-      .from("candidate_opportunities")
-      .select(VIEW_COLUMNS)
-      .order("priority_score", { ascending: false, nullsFirst: false })
-      .order("last_seen_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    // Task I. Filter, then exclude, then sort, then page — the order the clauses
+    // are documented in shared/opportunityQuery.ts, and the order that makes an
+    // emitted query readable in a log.
+    const filtered = applyOpportunityFilters(
+      client.from("candidate_opportunities").select(VIEW_COLUMNS) as unknown as FilterableQuery,
+      options.filters ?? EMPTY_FILTERS,
+    );
+
+    const { query: excluded } = applyPreferenceExclusions(filtered, options.preferences ?? null);
+
+    const { query: sorted, applied: appliedSort } = applyOpportunitySort(excluded, options.sort);
+
+    // The structural FilterableQuery type describes only what this module needs;
+    // range() is not part of it because nothing in the filter or sort logic
+    // pages, so it is reached through the real builder here.
+    const paged = sorted as unknown as {
+      range(from: number, to: number): PromiseLike<{ data: unknown; error: unknown }>;
+    };
+
+    const { data, error } = await paged.range(offset, offset + limit - 1);
 
     if (error || !data) {
       return { kind: "error", message: FAILURE_MESSAGE };
@@ -309,6 +366,7 @@ export async function listOpportunities(
       location: formatLocation(row),
       remoteType: row.remote_type,
       trustStatus: row.trust_status ?? "UNDER_REVIEW",
+      sourceCode: row.source_code,
       salary: {
         min: row.salary_min,
         max: row.salary_max,
@@ -322,9 +380,75 @@ export async function listOpportunities(
       fitAnalysis: buildFitAnalysis(row),
     }));
 
-    sortByPriority(opportunities);
+    // Only best match re-sorts locally; see the note above. For every other sort
+    // SQL's ordering IS the answer and touching it again would undo the request.
+    if (appliedSort === "best_match") {
+      sortByPriority(opportunities);
+    }
 
     return { kind: "success", opportunities, hasMore: rows.length === limit };
+  } catch {
+    return { kind: "error", message: FAILURE_MESSAGE };
+  }
+}
+
+/**
+ * Reads specific vacancies by id.
+ *
+ * Needed because a vacancy just ingested has no fit_analysis yet, so its
+ * priority_score is NULL and it sorts below every scored row — it is not on
+ * page 1 at all. "Fetch latest jobs" therefore cannot make new jobs visible by
+ * re-reading page 1 and hoping; it has to ask for the ids it just created.
+ *
+ * Deliberately no ordering: the caller has an explicit id list and decides the
+ * order (the newest fetch goes on top).
+ */
+export async function listOpportunitiesByIds(
+  client: Pick<SupabaseClient, "from">,
+  vacancyIds: readonly string[],
+): Promise<ListOpportunitiesResult> {
+  if (vacancyIds.length === 0) {
+    return { kind: "success", opportunities: [], hasMore: false };
+  }
+
+  try {
+    const { data, error } = await client
+      .from("candidate_opportunities")
+      .select(VIEW_COLUMNS)
+      .in("id", [...vacancyIds]);
+
+    if (error || !data) {
+      return { kind: "error", message: FAILURE_MESSAGE };
+    }
+
+    const rows = data as unknown as OpportunityRow[];
+
+    return {
+      kind: "success",
+      opportunities: rows.map((row) => ({
+        id: row.id,
+        title: row.raw_title,
+        url: row.authoritative_url,
+        companyName: row.company_name,
+        companyDomain: row.company_domain,
+        location: formatLocation(row),
+        remoteType: row.remote_type,
+        trustStatus: row.trust_status ?? "UNDER_REVIEW",
+        sourceCode: row.source_code,
+        salary: {
+          min: row.salary_min,
+          max: row.salary_max,
+          currency: row.currency,
+          interval: row.salary_interval,
+          source: row.salary_source,
+        },
+        discoveredAt: row.discovered_at,
+        lastSeenAt: row.last_seen_at,
+        autoApplyStatus: mapAutoApplyStatus(row),
+        fitAnalysis: buildFitAnalysis(row),
+      })),
+      hasMore: false,
+    };
   } catch {
     return { kind: "error", message: FAILURE_MESSAGE };
   }

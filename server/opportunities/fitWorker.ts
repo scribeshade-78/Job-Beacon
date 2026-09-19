@@ -26,11 +26,26 @@ interface FitJobRow {
   max_attempts: number;
 }
 
+export interface RunOneFitJobOptions {
+  /**
+   * Restricts the claim to these vacancies. Omitted, this claims the oldest
+   * pending job anywhere — the scheduled drain's behaviour, unchanged.
+   *
+   * Supplying ids is what makes on-demand scoring possible at all: the FIFO
+   * claim would otherwise hand back the head of the backlog (131 pending rows
+   * at the time of writing) and never reach a vacancy ingested seconds ago.
+   */
+  vacancyIds?: readonly string[];
+}
+
 export async function runOneFitAnalysisJob(
   client: SupabaseClient,
   deps: AnalyzeFitDeps,
+  options: RunOneFitJobOptions = {},
 ): Promise<RunOneFitJobResult> {
-  const { data: jobs, error: claimError } = await client.rpc("claim_fit_analysis_job");
+  const { data: jobs, error: claimError } = options.vacancyIds && options.vacancyIds.length > 0
+    ? await client.rpc("claim_fit_analysis_jobs_for_vacancies", { p_vacancy_ids: [...options.vacancyIds] })
+    : await client.rpc("claim_fit_analysis_job");
 
   if (claimError) {
     throw claimError;

@@ -118,9 +118,18 @@ select is_empty(
 set local role authenticated;
 set local request.jwt.claims to '{"sub":"aaaaaaaa-9241-1111-1111-111111111111"}';
 
--- 5. only verified + active vacancies appear, one row each (no join fan-out)
+-- 5. only verified + active vacancies appear, one row each (no join fan-out).
+--    Scoped to this file's four fixture vacancies: an unscoped count(*) also
+--    swept in every other visible vacancy in the database, so it only ever
+--    equalled 2 on an empty one. All four ids are listed rather than just the
+--    two expected ones, which keeps the "excluded ones stay out" half of the
+--    assertion here as well.
 select is(
-  (select count(*)::int from candidate_opportunities),
+  (select count(*)::int from candidate_opportunities
+     where id in ('d1111111-9241-1111-1111-111111111111',
+                  'd2222222-9241-1111-1111-111111111111',
+                  'd3333333-9241-1111-1111-111111111111',
+                  'd4444444-9241-1111-1111-111111111111')),
   2,
   'only the VERIFIED and VERIFIED_INCOMPLETE active vacancies appear, one row each'
 );

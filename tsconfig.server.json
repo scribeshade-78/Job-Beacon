@@ -11,6 +11,10 @@
     "outDir": "dist/server",
     "types": ["node"]
   },
-  "include": ["server", "shared"]
+  // "scripts" is included so the standalone utilities under it are actually
+  // type-checked. They were not covered by any tsconfig before Task W, which
+  // meant a tool an operator runs by hand — and which deletes data — was the
+  // one file in the repository the compiler never looked at.
+  "include": ["server", "shared", "scripts"]
 }
 

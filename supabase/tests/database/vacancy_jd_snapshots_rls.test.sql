@@ -66,8 +66,12 @@ select is_empty(
 -- 4. an authenticated user can read JD snapshots (public posting content, no candidate scoping)
 set local role authenticated;
 set local request.jwt.claims to '{"sub":"11111111-9210-1111-1111-111111111111"}';
+-- scoped to this file's own fixture vacancy: snapshots are public posting
+-- content, and the live database already has ~200 of them, so a global count
+-- only ever equalled 1 on an empty one
 select is(
-  (select count(*)::int from vacancy_jd_snapshots),
+  (select count(*)::int from vacancy_jd_snapshots
+     where vacancy_id = '33333333-9210-1111-1111-111111111111'),
   1,
   'authenticated can SELECT vacancy_jd_snapshots rows'
 );

@@ -146,7 +146,14 @@ export function AppShell({ email, onLogout, children, showModeratorLink, showAdm
       )}
 
       <div className="lg:pl-[260px]">
-        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-ios-separator bg-ios-card/80 px-4 backdrop-blur-md sm:px-6">
+        {/* Mobile/tablet only. At lg+ this bar held nothing at all: its two
+            children are both lg:hidden, so it rendered as a 64px empty band
+            with a border, pushing every page's content down by 64px of dead
+            white space while the sidebar already carried the branding two
+            inches to its left. Hidden at lg+, main starts at the top of the
+            viewport, and the brand row in the sidebar sits level with the
+            first card. */}
+        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-ios-separator bg-ios-card/80 px-4 backdrop-blur-md sm:px-6 lg:hidden">
           <button
             type="button"
             aria-label="Open navigation"

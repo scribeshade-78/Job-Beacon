@@ -24,6 +24,35 @@ import {
   type EditableSourcePolicyField,
 } from "./admin/sources.js";
 import { getRecentTrustScores } from "./admin/trustScores.js";
+import { getAdminBilling } from "./admin/billing.js";
+import {
+  findActivePrice,
+  isBillingInterval,
+  isBillingRegion,
+  listPlans,
+} from "./billing/plans.js";
+import {
+  createCheckoutSession,
+  readStripeConfig,
+  verifyStripeSignature,
+} from "./billing/stripe.js";
+import {
+  applyCheckoutCompleted,
+  applyProviderSubscriptionUpdate,
+  cancelCandidateSubscription,
+  getCandidateSubscription,
+} from "./billing/subscription.js";
+import { evaluateEntitlements } from "./billing/entitlements.js";
+import { listAuditEvents, recordAuditEvent } from "./audit/log.js";
+import { listSecurityEvents } from "./security/events.js";
+import {
+  listAtsCredentials,
+  setAtsCredentialActive,
+  storeAtsCredential,
+  ATS_SOURCE_CODES,
+  AtsCredentialKeyError,
+  type AtsSourceCode,
+} from "./ats/credentials.js";
 import { DIMENSION_WEIGHTS } from "./trust/trustScore.js";
 import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
 import { createOpenAIClient } from "./resumes/openaiClient.js";
@@ -32,6 +61,51 @@ import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+
+/**
+ * Task A2: how much fit analysis one "Fetch latest jobs" press may trigger.
+ *
+ * Each analysis is two model calls (JD extraction, then the fit itself), so the
+ * bound is what keeps a candidate's button from becoming an unbounded spend —
+ * the same reasoning as MAX_BULK_APPLY_VACANCIES and the per-batch caps the
+ * other workers already have. A run that creates more than this leaves the rest
+ * queued; the response says how many, and the UI says so too rather than
+ * implying every new job was scored.
+ */
+const MAX_FIT_ANALYSES_PER_DISCOVERY = 5;
+
+/**
+ * Wall-clock ceiling for that batch.
+ *
+ * The count bound alone is not enough for a request-scoped batch: five
+ * analyses at roughly ten seconds each is close to a minute of a held-open
+ * HTTP request. Analyses already started are never abandoned — this stops the
+ * batch from starting more — so the response reports what was scored and what
+ * was left queued rather than pretending the work finished.
+ */
+const FIT_ANALYSIS_BUDGET_MS = 45_000;
+import { runIngestionBatch } from "./ingestion/runner.js";
+import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
+import {
+  approveAttempt,
+  approveOwnedAttempt,
+  AttemptNotAwaitingReviewError,
+  AttemptNotOwnedError,
+  AttemptNotPreviewedError,
+  ApplicationAttemptNotFoundError,
+  generateAttemptPreview,
+} from "./applications/attemptReview.js";
+import { isMockEmployerEnabled, mountMockEmployer } from "./mockEmployer.js";
+import { listIntakeAdapters } from "./intake/adapters/registry.js";
+import {
+  dismissFollowUpDraft,
+  FollowUpDraftNotFoundError,
+  FollowUpDraftNotOwnedError,
+  FollowUpDraftNotPendingError,
+  listPendingFollowUps,
+  sendFollowUpDraft,
+} from "./mailbox/followUpReview.js";
+import { IntakePolicyError, runIntake } from "./intake/intake.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -49,6 +123,7 @@ import {
 } from "./mailbox/connect.js";
 import { readGoogleOAuthConfig, type GoogleOAuthConfig } from "./mailbox/oauth.js";
 import { readMailboxEncryptionKey } from "./mailbox/tokenCrypto.js";
+import { readMailboxCapability } from "./mailbox/capability.js";
 import {
   createRequireEmployerOf,
   hasVerifiedEmployerClaim,
@@ -111,6 +186,27 @@ export interface CreateAppOptions {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The subscription states the database CHECK accepts, so a Stripe status outside this set is refused rather than written. */
+const STRIPE_SUBSCRIPTION_STATUSES = ["incomplete", "trialing", "active", "past_due", "unpaid", "canceled"] as const;
+
+type StripeSubscriptionStatus = (typeof STRIPE_SUBSCRIPTION_STATUSES)[number];
+
+function isStripeSubscriptionStatus(value: unknown): value is StripeSubscriptionStatus {
+  return typeof value === "string" && (STRIPE_SUBSCRIPTION_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Stripe sends period bounds as Unix seconds. Anything that is not a finite
+ * number becomes null rather than a fabricated date — an absent period end is
+ * recoverable, a wrong one is not.
+ */
+function toIsoOrNull(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return new Date(value * 1000).toISOString();
+}
+
 export function createApp(options: CreateAppOptions = {}) {
   const app = express();
 
@@ -155,6 +251,134 @@ export function createApp(options: CreateAppOptions = {}) {
         isEmployer: userIsEmployer,
         isAdmin: userIsAdmin,
       });
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Stripe webhook — REGISTERED BEFORE express.json(), AND IT MUST STAY HERE.
+  //
+  // Stripe signs the exact bytes it sent. express.json() consumes the request
+  // stream and hands the route a parsed object; the original bytes are then
+  // unrecoverable, so a signature check running after it can never succeed and
+  // would have to be weakened to "trust the parsed body" — which for this
+  // endpoint means trusting anyone who can POST to it to grant themselves a paid
+  // plan. Registering with express.raw() ahead of the JSON parser is the only
+  // ordering that keeps both the parsed body everywhere else and the raw bytes
+  // here.
+  //
+  // Unauthenticated by design: the signature IS the authentication, which is why
+  // an unconfigured or absent webhook secret answers 503 rather than skipping
+  // verification.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/billing/webhook",
+    express.raw({ type: "application/json", limit: "1mb" }),
+    async (request, response) => {
+      const config = readStripeConfig();
+
+      if (!config || !config.webhookSecret) {
+        response.status(503).json({ error: "Billing webhook is not configured." });
+        return;
+      }
+
+      const raw = Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0);
+      const payload = raw.toString("utf8");
+
+      if (!verifyStripeSignature(payload, request.header("stripe-signature"), config.webhookSecret)) {
+        response.status(400).json({ error: "Invalid signature." });
+        return;
+      }
+
+      let event: { type?: unknown; data?: { object?: Record<string, unknown> } };
+      try {
+        event = JSON.parse(payload) as typeof event;
+      } catch {
+        response.status(400).json({ error: "Malformed event body." });
+        return;
+      }
+
+      const object = event.data?.object ?? {};
+
+      try {
+        const client = options.serviceClient ?? createSupabaseServiceRoleClient();
+
+        if (event.type === "checkout.session.completed") {
+          const metadata = (object.metadata ?? {}) as Record<string, unknown>;
+          const candidateId = typeof metadata.candidate_id === "string" ? metadata.candidate_id : null;
+          const planCode = typeof metadata.plan_code === "string" ? metadata.plan_code : null;
+          const region = typeof metadata.region === "string" ? metadata.region : null;
+          const currency = typeof metadata.currency === "string" ? metadata.currency : null;
+          const interval = metadata.billing_interval;
+
+          if (!candidateId || !planCode || !region || !currency || !isBillingInterval(interval)) {
+            // Configured-out metadata is a bug on OUR side, not a forged event —
+            // the signature already passed. Reported loudly and not recorded.
+            console.error("[billing:webhook] checkout session missing metadata", {
+              hasCandidate: candidateId !== null,
+              hasPlan: planCode !== null,
+              hasRegion: region !== null,
+              hasCurrency: currency !== null,
+              interval: String(interval),
+            });
+            response.status(200).json({ received: true, applied: false });
+            return;
+          }
+
+          const result = await applyCheckoutCompleted(client, {
+            candidateId,
+            planCode,
+            provider: "stripe",
+            providerCustomerId: typeof object.customer === "string" ? object.customer : null,
+            providerSubscriptionId: typeof object.subscription === "string" ? object.subscription : null,
+            region,
+            currency,
+            billingInterval: interval,
+            // Stripe sends the billing period on the subscription object, not on
+            // the session, so the period end is genuinely unknown at this point.
+            // Recorded as null rather than guessed from the plan interval.
+            currentPeriodStart: new Date().toISOString(),
+            currentPeriodEnd: null,
+          });
+
+          if (result.kind === "unknown_plan") {
+            console.error("[billing:webhook] checkout session named an unknown plan", { planCode: result.planCode });
+          }
+
+          response.status(200).json({ received: true, applied: result.kind === "applied" });
+          return;
+        }
+
+        if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
+          const providerSubscriptionId = typeof object.id === "string" ? object.id : null;
+          const status = event.type === "customer.subscription.deleted" ? "canceled" : object.status;
+
+          if (!providerSubscriptionId || !isStripeSubscriptionStatus(status)) {
+            response.status(200).json({ received: true, applied: false });
+            return;
+          }
+
+          const result = await applyProviderSubscriptionUpdate(client, {
+            providerSubscriptionId,
+            status,
+            currentPeriodStart: toIsoOrNull(object.current_period_start),
+            currentPeriodEnd: toIsoOrNull(object.current_period_end),
+            cancelAtPeriodEnd: object.cancel_at_period_end === true,
+          });
+
+          response.status(200).json({ received: true, applied: result.kind === "updated" });
+          return;
+        }
+
+        // Every other event type is acknowledged and ignored. Stripe retries on
+        // any non-2xx, so answering 400 for an event the product does not handle
+        // would produce a retry storm for correct behaviour.
+        response.status(200).json({ received: true, applied: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[billing:webhook] handler failed", { error: message });
+        // 500 so Stripe retries: this is our failure, not a bad event.
+        response.status(500).json({ error: "Failed to apply webhook event." });
+      }
     },
   );
 
@@ -206,6 +430,219 @@ export function createApp(options: CreateAppOptions = {}) {
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many extraction requests. Please try again later." },
   });
+
+  // Candidate-facing "Fetch latest jobs" trigger for the Opportunities page.
+  // Unlike the /api/worker/* routes below (external-scheduler driven, worker
+  // secret), this one is deliberately reachable by any signed-in candidate —
+  // that is the feature. The quota danger that creates is handled inside
+  // runIngestionBatch's per-target cooldown; this limiter only bounds request
+  // volume so one candidate cannot spin the endpoint.
+  const ingestionRefreshRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 6,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many refresh requests. Please try again later." },
+  });
+
+  app.post(
+    "/api/opportunities/refresh",
+    requireAuth,
+    ingestionRefreshRateLimit,
+    async (_request: AuthenticatedRequest, response) => {
+      try {
+        const result = await runIngestionBatch(resolveServiceClient());
+        response.set("Cache-Control", "no-store");
+        response.status(200).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Opportunity refresh failed:", message);
+        response.status(500).json({ error: "Failed to refresh opportunities" });
+      }
+    },
+  );
+
+  // Task A1: the "Fetch latest jobs" button's real backend.
+  //
+  // WHY THIS EXISTS SEPARATELY FROM /api/opportunities/refresh. That route
+  // drains the ingestion_jobs QUEUE, and nothing in this repository enqueues
+  // jobs — there is no scheduler ("no deployment/scheduling infrastructure
+  // exists yet in this repo", per runner.ts). So the button span the spinner,
+  // ran a batch over an empty queue, and changed nothing, every single time.
+  // This route runs discovery ON DEMAND instead, through the same runIntake
+  // the discover_live_jobs MCP tool calls, so the button and the agent use one
+  // implementation.
+  //
+  // Shares the refresh rate limiter rather than getting its own: both are
+  // "go and hit a third party for me" actions, and a candidate should have one
+  // budget for that rather than two.
+  app.post("/api/intake/discover", requireAuth, ingestionRefreshRateLimit, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const requestedSource = typeof body.sourceCode === "string" ? body.sourceCode.trim() : "";
+    const search = typeof body.search === "string" && body.search.trim() ? body.search.trim() : undefined;
+    const limit = typeof body.limit === "number" ? body.limit : undefined;
+
+    const registered = listIntakeAdapters();
+
+    if (registered.length === 0) {
+      response.status(503).json({ error: "No intake sources are configured on this server." });
+      return;
+    }
+
+    // Defaulted only when unambiguous — same refusal to guess as
+    // resolveCandidateId and the MCP tool.
+    const sourceCode =
+      requestedSource || (registered.length === 1 ? registered[0]!.sourceCode : "");
+
+    if (!sourceCode || !registered.some((adapter) => adapter.sourceCode === sourceCode)) {
+      response.status(400).json({
+        error: `Unknown intake source. Registered: ${registered.map((a) => a.sourceCode).join(", ")}.`,
+      });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      const result = await runIntake(client, { sourceCode, search, limit });
+      const created = result.outcomes.filter((outcome) => outcome.outcome === "created");
+      const updated = result.outcomes.filter((outcome) => outcome.outcome === "updated");
+      const newVacancyIds = created.map((outcome) => outcome.vacancyId);
+
+      // Task A2: score the new vacancies NOW, targeted at their own ids.
+      //
+      // Without this they carry a NULL priority_score and sort below every
+      // scored row, so "fetch latest jobs" produced jobs the candidate could
+      // not find. Draining the ordinary queue would not have fixed it either:
+      // that claim is FIFO, so a batch of any size would have worked through
+      // the existing backlog and never reached these.
+      //
+      // Best-effort by design. A scoring failure must not fail the fetch — the
+      // vacancies are already ingested and visible, and the fit queue will pick
+      // them up on the next scheduled drain. Same "AI step isolated from
+      // ingestion" stance the ingestion worker takes towards scoreVacancy.
+      let fit: { analyzed: number; failed: number; stoppedOnDeadline: boolean; error?: string } | null = null;
+
+      if (newVacancyIds.length > 0) {
+        try {
+          const fitResult = await runFitAnalysisBatch(
+            client,
+            { openai: resolveOpenAIClient() },
+            {
+              vacancyIds: newVacancyIds,
+              maxPerBatch: MAX_FIT_ANALYSES_PER_DISCOVERY,
+              deadlineMs: FIT_ANALYSIS_BUDGET_MS,
+            },
+          );
+
+          fit = {
+            analyzed: fitResult.analyzed,
+            failed: fitResult.failed,
+            stoppedOnDeadline: fitResult.stoppedOnDeadline === true,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("Post-discovery fit analysis failed:", message);
+          fit = { analyzed: 0, failed: 0, stoppedOnDeadline: false, error: message };
+        }
+      }
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({
+        sourceCode: result.sourceCode,
+        displayName: result.displayName,
+        attribution: result.attribution,
+        search: result.search,
+        received: result.received,
+        ingested: result.ingested,
+        created: created.length,
+        updated: updated.length,
+        // The client marks these rows as new; without the ids it can only say
+        // "something changed" while the list looks identical.
+        newVacancyIds,
+        /**
+         * How many of those were scored before this response, and whether the
+         * budget ran out first. The client uses this to decide what still needs
+         * hoisting: a scored vacancy ranks on its own, an unscored one would
+         * otherwise be invisible.
+         */
+        fitAnalyzed: fit?.analyzed ?? 0,
+        fitPending: Math.max((fit === null ? 0 : newVacancyIds.length - fit.analyzed), 0),
+        fitStoppedOnDeadline: fit?.stoppedOnDeadline ?? false,
+        fitError: fit?.error ?? null,
+        skippedByAdapter: result.skippedByAdapter,
+        trustStatusCounts: result.trustStatusCounts,
+        durationMs: result.durationMs,
+      });
+    } catch (error) {
+      if (error instanceof IntakePolicyError) {
+        // 409, not 500: the request is fine, the source is switched off.
+        response.status(409).json({ error: error.message });
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Live discovery failed:", message);
+      response.status(500).json({ error: "Could not fetch new jobs. Please try again." });
+    }
+  });
+
+  // Bulk enqueue for the Opportunities page. Deliberately NOT a second
+  // rate-limit implementation of the product's abuse cap: the 25/24h
+  // MAX_DAILY_APPLICATIONS_PER_CANDIDATE rule is enforced by
+  // planApplication's rate_and_abuse_controls gate, which this route reaches
+  // through the same funnel as every other enqueue path. This limiter bounds
+  // request VOLUME only — each call fans out to several queries per vacancy,
+  // the same reason /api/resumes/:id/extract and /api/opportunities/refresh
+  // carry one.
+  const bulkApplyRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many bulk apply requests. Please try again later." },
+  });
+
+  app.post(
+    "/api/opportunities/bulk-apply",
+    requireAuth,
+    bulkApplyRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const { vacancyIds } = (request.body ?? {}) as { vacancyIds?: unknown };
+
+      if (!Array.isArray(vacancyIds) || vacancyIds.length === 0) {
+        response.status(400).json({ error: "vacancyIds must be a non-empty array." });
+        return;
+      }
+
+      if (vacancyIds.length > MAX_BULK_APPLY_VACANCIES) {
+        response.status(400).json({
+          error: `vacancyIds must contain at most ${MAX_BULK_APPLY_VACANCIES} entries.`,
+        });
+        return;
+      }
+
+      if (!vacancyIds.every((id) => typeof id === "string" && UUID_PATTERN.test(id))) {
+        response.status(400).json({ error: "Every vacancyId must be a valid id." });
+        return;
+      }
+
+      try {
+        const result = await bulkApplyToVacancies(resolveServiceClient(), {
+          candidateId: request.user!.id,
+          vacancyIds: vacancyIds as string[],
+        });
+
+        response.set("Cache-Control", "no-store");
+        response.status(200).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Bulk apply failed:", message);
+        response.status(500).json({ error: "Failed to queue applications" });
+      }
+    },
+  );
 
   app.post("/api/vacancies/:vacancyId/reports", requireAuth, async (request: AuthenticatedRequest, response) => {
     const { category, description } = request.body ?? {};
@@ -269,6 +706,239 @@ export function createApp(options: CreateAppOptions = {}) {
     },
   );
 
+  // ---------------------------------------------------------------------------
+  // Task V: the candidate-facing review workflow.
+  //
+  // These two are the candidate's own actions, authenticated by their Supabase
+  // session (requireAuth) rather than by WORKER_TRIGGER_SECRET. Ownership is
+  // checked on every call by loadOwnedAttempt, which follows
+  // application_attempts -> application_plans.candidate_id and compares it to
+  // the verified token's user id.
+  //
+  // BOTH ROUTES READ THE ATTEMPT WITH THE SERVICE-ROLE CLIENT, so RLS is not
+  // doing the filtering for them — it has to be the explicit comparison. The
+  // RLS policies on application_attempts do already stop a candidate reading
+  // another candidate's rows (application_attempts_rls.test.sql asserts it),
+  // but a service-role connection is not subject to them, which is precisely
+  // why the check is written out rather than assumed.
+  //
+  // "Not yours" is answered with 404, never 403: a 403 would confirm that the
+  // id names a real attempt belonging to somebody else, turning this into an
+  // oracle for probing ids.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/candidate/attempts/:id/generate-preview",
+    requireAuth,
+    async (request: AuthenticatedRequest, response) => {
+      const attemptId = request.params.id as string;
+
+      if (!UUID_PATTERN.test(attemptId)) {
+        response.status(400).json({ error: "id must be a valid application attempt id." });
+        return;
+      }
+
+      try {
+        const preview = await generateAttemptPreview(
+          resolveServiceClient(),
+          { createOpenAIClient: resolveOpenAIClient },
+          { candidateId: request.user!.id, applicationAttemptId: attemptId },
+        );
+
+        response.status(200).json({
+          applicationAttemptId: preview.applicationAttemptId,
+          status: preview.status,
+          previewUrl: preview.previewUrl,
+          previewUrlExpiresInSeconds: preview.previewUrlExpiresInSeconds,
+          resumePrepared: preview.resumePrepared,
+          resume: {
+            documentId: preview.resume.documentId,
+            originalFilename: preview.resume.originalFilename,
+            tailored: preview.resume.tailored,
+            optimizationLevel: preview.resume.optimizationLevel,
+          },
+          /**
+           * The letter the candidate is about to approve, or the reason there
+           * isn't one. Passed through in both cases: a preview that silently
+           * omitted the letter would show someone less than they are approving,
+           * which is the one thing this endpoint exists to prevent.
+           *
+           * The per-paragraph factRefs are deliberately NOT sent. They are the
+           * audit record, stored on the row for later inspection — putting them
+           * in the response would invite a client to render citation ids next
+           * to prose the candidate is reading for its wording, not its ids.
+           */
+          coverLetter:
+            preview.coverLetter.kind === "generated"
+              ? {
+                  status: "generated",
+                  text: preview.coverLetter.text,
+                  promptVersion: preview.coverLetter.promptVersion,
+                  modelVersion: preview.coverLetter.modelVersion,
+                  citedFactCount: preview.coverLetter.citedFactCount,
+                  generatedAt: preview.coverLetter.generatedAt,
+                }
+              : { status: "failed", reason: preview.coverLetter.reason },
+        });
+      } catch (error) {
+        if (error instanceof ApplicationAttemptNotFoundError || error instanceof AttemptNotOwnedError) {
+          response.status(404).json({ error: "Application attempt not found." });
+          return;
+        }
+
+        if (error instanceof AttemptNotAwaitingReviewError) {
+          response.status(409).json({
+            error: "This application is not awaiting your review.",
+            status: error.status,
+          });
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Generate preview failed:", message);
+        response.status(500).json({ error: "Could not prepare your resume preview." });
+      }
+    },
+  );
+
+  app.post("/api/candidate/attempts/:id/approve", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const attemptId = request.params.id as string;
+
+    if (!UUID_PATTERN.test(attemptId)) {
+      response.status(400).json({ error: "id must be a valid application attempt id." });
+      return;
+    }
+
+    try {
+      const result = await approveOwnedAttempt(resolveServiceClient(), {
+        candidateId: request.user!.id,
+        applicationAttemptId: attemptId,
+      });
+
+      response.status(200).json({
+        applicationAttemptId: result.applicationAttemptId,
+        status: result.status,
+        reviewApprovedAt: result.reviewApprovedAt,
+      });
+    } catch (error) {
+      if (error instanceof ApplicationAttemptNotFoundError || error instanceof AttemptNotOwnedError) {
+        response.status(404).json({ error: "Application attempt not found." });
+        return;
+      }
+
+      if (error instanceof AttemptNotPreviewedError) {
+        response.status(409).json({
+          error: "Generate the resume preview before approving this application.",
+        });
+        return;
+      }
+
+      if (error instanceof AttemptNotAwaitingReviewError) {
+        response.status(409).json({
+          error: "This application is not awaiting your review.",
+          status: error.status,
+        });
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Candidate approval failed:", message);
+      response.status(500).json({ error: "Could not approve this application." });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task C2: the anti-ghosting review surface.
+  //
+  // Same shape as the attempt-review routes above: requireAuth, ownership
+  // resolved explicitly because the reads run on the service-role client and
+  // bypass the RLS policy that could otherwise scope them, and 404 rather than
+  // 403 for "not yours" so the id space cannot be probed.
+  // ---------------------------------------------------------------------------
+  app.get("/api/candidate/follow-ups/pending", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const followUps = await listPendingFollowUps(resolveServiceClient(), request.user!.id);
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({ followUps });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Listing follow-ups failed:", message);
+      response.status(500).json({ error: "Could not load your follow-ups. Please try again." });
+    }
+  });
+
+  app.post(
+    "/api/candidate/follow-ups/:id/send",
+    requireAuth,
+    async (request: AuthenticatedRequest, response) => {
+      const draftId = request.params.id as string;
+
+      if (!UUID_PATTERN.test(draftId)) {
+        response.status(400).json({ error: "id must be a valid follow-up draft id." });
+        return;
+      }
+
+      try {
+        const result = await sendFollowUpDraft(resolveServiceClient(), request.user!.id, draftId);
+
+        response.status(200).json(result);
+      } catch (error) {
+        if (error instanceof FollowUpDraftNotFoundError || error instanceof FollowUpDraftNotOwnedError) {
+          response.status(404).json({ error: "Follow-up draft not found." });
+          return;
+        }
+
+        if (error instanceof FollowUpDraftNotPendingError) {
+          response.status(409).json({
+            error: "This follow-up is no longer awaiting your review.",
+            status: error.status,
+          });
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Sending follow-up failed:", message);
+        response.status(500).json({ error: "Could not send this follow-up. Please try again." });
+      }
+    },
+  );
+
+  app.post(
+    "/api/candidate/follow-ups/:id/dismiss",
+    requireAuth,
+    async (request: AuthenticatedRequest, response) => {
+      const draftId = request.params.id as string;
+
+      if (!UUID_PATTERN.test(draftId)) {
+        response.status(400).json({ error: "id must be a valid follow-up draft id." });
+        return;
+      }
+
+      try {
+        const result = await dismissFollowUpDraft(resolveServiceClient(), request.user!.id, draftId);
+
+        response.status(200).json(result);
+      } catch (error) {
+        if (error instanceof FollowUpDraftNotFoundError || error instanceof FollowUpDraftNotOwnedError) {
+          response.status(404).json({ error: "Follow-up draft not found." });
+          return;
+        }
+
+        if (error instanceof FollowUpDraftNotPendingError) {
+          response.status(409).json({
+            error: "This follow-up is no longer awaiting your review.",
+            status: error.status,
+          });
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Dismissing follow-up failed:", message);
+        response.status(500).json({ error: "Could not dismiss this follow-up. Please try again." });
+      }
+    },
+  );
+
   app.get("/api/moderation/queue", requireAuth, requireModeratorOrAdmin, async (_request, response) => {
     try {
       const queue = await getModerationQueue(resolveServiceClient());
@@ -302,7 +972,9 @@ export function createApp(options: CreateAppOptions = {}) {
       }
 
       try {
-        const result = await submitModerationDecision(resolveServiceClient(), {
+        const client = resolveServiceClient();
+
+        const result = await submitModerationDecision(client, {
           caseId: request.params.caseId as string,
           reviewerId: request.user!.id,
           decision: decision as ModerationDecisionValue,
@@ -310,6 +982,30 @@ export function createApp(options: CreateAppOptions = {}) {
           policyVersion,
           appealId: typeof appealId === "string" ? appealId : undefined,
         });
+
+        // Task H4, PRD v3 §21.1/§29.3 ("Moderator decisions and appeals are
+        // auditable"). Recorded AFTER the decision commits, deliberately: an
+        // audit row for a decision that then failed to write would be a record
+        // of something that never happened, which is worse than a gap.
+        //
+        // The rationale is carried across because it IS the justification, and an
+        // audit trail of moderation without the reasons is a list of verdicts
+        // nobody can review.
+        await recordAuditEvent(client, {
+          actorId: request.user!.id,
+          actorRole: "moderator",
+          action: "moderation.decision.recorded",
+          entityType: "moderation_case",
+          entityId: request.params.caseId as string,
+          summary: "Recorded a moderation decision: " + String(decision),
+          reason: rationale,
+          newValues: {
+            decision,
+            policyVersion,
+            appealId: typeof appealId === "string" ? appealId : null,
+          },
+        });
+
         response.status(201).json(result);
       } catch (error) {
         if (error instanceof ReviewerSeparationError) {
@@ -325,6 +1021,20 @@ export function createApp(options: CreateAppOptions = {}) {
   // R6.1: starts the Gmail connect handshake — mints a signed `state` and
   // hands back the Google consent URL for the client to navigate to.
   app.post("/api/mailbox/connect/start", requireAuth, (request: AuthenticatedRequest, response) => {
+    // Task H2: a deployment with no Google credentials is a configuration state,
+    // not a server fault, and the two deserve different answers. 503 with the
+    // reader's own reason tells the caller what to fix; the 500 this used to
+    // return read as a bug in the server. The capability probe is what makes the
+    // distinction possible without catching a message string.
+    const capability = readMailboxCapability();
+    if (!capability.googleMail.enabled) {
+      response.status(503).json({
+        error: "Mailbox connection is not configured on this deployment.",
+        reason: capability.googleMail.reason,
+      });
+      return;
+    }
+
     try {
       const { authorizeUrl } = startMailboxConnect(
         request.user!.id,
@@ -668,6 +1378,72 @@ export function createApp(options: CreateAppOptions = {}) {
     }
   });
 
+  // Task U: releases one application_attempts row that is being held for the
+  // candidate's review, preparing its resume first so the worker that later
+  // claims it dispatches a file that already exists rather than generating one
+  // at that moment.
+  //
+  // AUTHENTICATED BY WORKER SECRET, NOT BY A CANDIDATE SESSION, and that is a
+  // limitation worth naming rather than hiding: the caller cannot be tied to
+  // the candidate who owns the attempt, so this route can approve any held
+  // attempt. It is the stand-in for the candidate's own approval until a
+  // candidate-authenticated route exists (requireAuth + an ownership check on
+  // application_plans.candidate_id), which is the natural next step — see the
+  // summary. Kept behind the worker secret rather than left unauthenticated so
+  // that the interim state is at least not open to the internet.
+  app.post("/api/worker/approve-attempt", requireWorkerSecret, async (request, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const applicationAttemptId =
+      typeof body.applicationAttemptId === "string" ? body.applicationAttemptId.trim() : "";
+
+    if (!applicationAttemptId) {
+      response.status(400).json({ error: "applicationAttemptId is required" });
+      return;
+    }
+
+    try {
+      const result = await approveAttempt(
+        resolveServiceClient(),
+        { createOpenAIClient: resolveOpenAIClient },
+        { applicationAttemptId },
+      );
+
+      response.status(200).json({
+        applicationAttemptId: result.applicationAttemptId,
+        status: result.status,
+        reviewApprovedAt: result.reviewApprovedAt,
+        resumePrepared: result.resumePrepared,
+        resume: {
+          documentId: result.resume.documentId,
+          originalFilename: result.resume.originalFilename,
+          tailored: result.resume.tailored,
+          optimizationLevel: result.resume.optimizationLevel,
+        },
+      });
+    } catch (error) {
+      if (error instanceof ApplicationAttemptNotFoundError) {
+        response.status(404).json({ error: "Application attempt not found" });
+        return;
+      }
+
+      if (error instanceof AttemptNotAwaitingReviewError) {
+        // 409, not 400: the request is well-formed, it just conflicts with the
+        // row's current state — already approved, already submitted, or never
+        // held. The status is echoed so the caller can tell those apart.
+        response.status(409).json({
+          error: "Application attempt is not awaiting review",
+          status: error.status,
+          detail: error.detail ?? null,
+        });
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Approve attempt failed:", message);
+      response.status(500).json({ error: "Failed to approve application attempt" });
+    }
+  });
+
   // R6.3 Response Intelligence: backfill/retry classification of stored
   // messages, for the same external scheduler as /api/worker/run. Fresh
   // mail is classified inline during the mailbox poll; this drains the
@@ -792,6 +1568,366 @@ export function createApp(options: CreateAppOptions = {}) {
     response.status(200).json(DIMENSION_WEIGHTS);
   });
 
+  // -------------------------------------------------------------------------
+  // Task H1 — billing.
+  // -------------------------------------------------------------------------
+
+  // The same origin the mailbox OAuth flow redirects to. CLIENT_APP_URL is a
+  // general setting; mailboxClientAppUrl's name is historical.
+  const clientAppUrl = mailboxClientAppUrl;
+
+  // Candidate-facing plan catalogue. Every region and interval is returned,
+  // including the ones that are deliberately unpriced, so the pricing screen can
+  // show "not priced yet" for a region instead of silently omitting it and
+  // looking broken.
+  app.get("/api/billing/plans", requireAuth, async (_request, response) => {
+    try {
+      const plans = await listPlans(resolveServiceClient());
+      response.status(200).json({
+        plans: plans.filter((plan) => plan.isActive).map((plan) => ({
+          code: plan.code,
+          displayName: plan.displayName,
+          description: plan.description,
+          tierRank: plan.tierRank,
+          limits: plan.limits,
+          prices: plan.prices,
+        })),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Billing plans read failed:", message);
+      response.status(500).json({ error: "Failed to load plans" });
+    }
+  });
+
+  // The caller's own subscription plus every §27.2 dimension evaluated against
+  // their current usage. Read-only.
+  app.get("/api/billing/subscription", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const client = resolveServiceClient();
+      const [subscription, entitlements] = await Promise.all([
+        getCandidateSubscription(client, request.user!.id),
+        evaluateEntitlements(client, request.user!.id),
+      ]);
+
+      response.status(200).json({ subscription, entitlements });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Billing subscription read failed:", message);
+      response.status(500).json({ error: "Failed to load subscription" });
+    }
+  });
+
+  // Plan selection. Creates a real Stripe Checkout Session, or explains that
+  // billing is not configured — it never returns a placeholder URL.
+  app.post("/api/billing/checkout-session", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
+    const region = body.region;
+    const interval = body.billingInterval;
+
+    if (!planCode) {
+      response.status(400).json({ error: "planCode is required" });
+      return;
+    }
+
+    if (!isBillingRegion(region)) {
+      response.status(400).json({ error: "region must be one of IN, US, EU" });
+      return;
+    }
+
+    if (!isBillingInterval(interval)) {
+      response.status(400).json({ error: "billingInterval must be one of month, year" });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+
+      const existing = await getCandidateSubscription(client, request.user!.id);
+      if (existing) {
+        response.status(409).json({ error: "You already have an active subscription.", status: existing.status });
+        return;
+      }
+
+      const plans = await listPlans(client);
+      const plan = plans.find((entry) => entry.code === planCode && entry.isActive);
+
+      if (!plan) {
+        response.status(404).json({ error: "No such plan" });
+        return;
+      }
+
+      const price = findActivePrice(plan, region, interval);
+
+      if (!price || price.amountMinor === null) {
+        // A real, common state: this region/interval has no founder-set price.
+        // 409 rather than 400 because the request was well-formed and the
+        // catalogue is what lacks the answer.
+        response.status(409).json({ error: "This plan is not priced for that region and billing period yet." });
+        return;
+      }
+
+      const result = await createCheckoutSession(readStripeConfig(), {
+        planCode: plan.code,
+        planDisplayName: plan.displayName,
+        amountMinor: price.amountMinor,
+        region: price.region,
+        currency: price.currency,
+        billingInterval: price.billingInterval,
+        candidateId: request.user!.id,
+        successUrl: clientAppUrl + "/#/billing?checkout=success",
+        cancelUrl: clientAppUrl + "/#/billing?checkout=cancelled",
+      });
+
+      if (result.kind === "not_configured") {
+        response.status(503).json({
+          error: "Card payments are not configured yet. No payment provider credentials are set on this deployment.",
+        });
+        return;
+      }
+
+      if (result.kind === "error") {
+        response.status(502).json({ error: result.message });
+        return;
+      }
+
+      response.status(200).json({ sessionId: result.sessionId, url: result.url });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Checkout session creation failed:", message);
+      response.status(500).json({ error: "Failed to start checkout" });
+    }
+  });
+
+  // Cancellation. Schedule-to-end when there is a paid period, immediate when
+  // there is not — see cancelCandidateSubscription.
+  app.post("/api/billing/cancel", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const result = await cancelCandidateSubscription(resolveServiceClient(), request.user!.id);
+
+      if (result.kind === "no_subscription") {
+        response.status(404).json({ error: "No active subscription to cancel." });
+        return;
+      }
+
+      // Task H4: a billing change is a money-affecting action on a candidate's
+      // account, so it is audited with the previous state.
+      await recordAuditEvent(resolveServiceClient(), {
+        actorId: request.user!.id,
+        actorRole: "candidate",
+        action: "subscription.cancelled",
+        entityType: "subscription",
+        entityId: result.subscription.id,
+        summary: "Cancelled the " + result.subscription.planCode + " subscription",
+        previousValues: { status: "active", cancelAtPeriodEnd: false },
+        newValues: {
+          status: result.subscription.status,
+          cancelAtPeriodEnd: result.subscription.cancelAtPeriodEnd,
+        },
+      });
+
+      response.status(200).json({
+        subscription: result.subscription,
+        note: result.subscription.cancelAtPeriodEnd
+          ? "Your plan will end at the close of the current billing period."
+          : "Your plan has been cancelled.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Subscription cancellation failed:", message);
+      response.status(500).json({ error: "Failed to cancel subscription" });
+    }
+  });
+
+  // R8.1's "Users & Billing" section. Replaces a hardcoded mock; every figure
+  // is computed from the tables above, and MRR is per currency because no
+  // exchange-rate source exists to blend them.
+  app.get("/api/admin/billing", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const billing = await getAdminBilling(resolveServiceClient());
+      response.status(200).json(billing);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Admin billing read failed:", message);
+      response.status(500).json({ error: "Failed to load billing data" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task H4 — audit, security events, and ATS credential administration.
+  // -------------------------------------------------------------------------
+
+  /** The system audit trail (PRD v3 §21.1). Read-only: nothing can write through this route. */
+  app.get("/api/admin/audit-events", requireAuth, requireAdmin, async (request, response) => {
+    const rawLimit = (request.query as Record<string, unknown>).limit;
+    const limit = typeof rawLimit === "string" ? Number.parseInt(rawLimit, 10) : undefined;
+
+    try {
+      const events = await listAuditEvents(resolveServiceClient(), { limit });
+      response.status(200).json({ events });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Audit events read failed:", message);
+      response.status(500).json({ error: "Failed to load audit events" });
+    }
+  });
+
+  /** Detections from the RI PRD §10.3 defences. Read-only. */
+  app.get("/api/admin/security-events", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const events = await listSecurityEvents(resolveServiceClient());
+      response.status(200).json({ events });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Security events read failed:", message);
+      response.status(500).json({ error: "Failed to load security events" });
+    }
+  });
+
+  /**
+   * ATS credentials, summaries only.
+   *
+   * THE SECRET IS NEVER IN THIS RESPONSE, and that is the whole design of this
+   * route. listAtsCredentials does not select secret_ciphertext at all, so there
+   * is no code path here that could return a key even by accident, and no
+   * "include the secret?" flag for a later change to get wrong. An operator sees
+   * which source, which employer, and the last four characters — enough to
+   * manage a rotation, useless for using the key.
+   */
+  app.get("/api/admin/ats-credentials", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const credentials = await listAtsCredentials(resolveServiceClient());
+      response.status(200).json({ credentials });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("ATS credentials read failed:", message);
+      response.status(500).json({ error: "Failed to load ATS credentials" });
+    }
+  });
+
+  /**
+   * Install or rotate an employer credential.
+   *
+   * The secret arrives in full exactly once, is encrypted immediately, and is
+   * never returned. Audited, because "who installed the key that submitted this
+   * application" is the first question anyone asks when an application turns out
+   * to be wrong.
+   */
+  app.post("/api/admin/ats-credentials", requireAuth, requireAdmin, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const sourceCode = typeof body.sourceCode === "string" ? body.sourceCode.trim() : "";
+    const employerKey = typeof body.employerKey === "string" ? body.employerKey.trim() : "";
+    const secret = typeof body.secret === "string" ? body.secret : "";
+    const label = typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : null;
+
+    if (!(ATS_SOURCE_CODES as readonly string[]).includes(sourceCode)) {
+      response.status(400).json({ error: "sourceCode must be one of " + ATS_SOURCE_CODES.join(", ") });
+      return;
+    }
+
+    if (!employerKey) {
+      // Named explicitly because it is the field people skip: the key is scoped
+      // to one employer, so storing it without knowing whose it is makes it
+      // unusable and dangerous at the same time.
+      response.status(400).json({ error: "employerKey is required — a credential authorizes one employer's board or account." });
+      return;
+    }
+
+    if (secret.trim() === "") {
+      response.status(400).json({ error: "secret is required" });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      const stored = await storeAtsCredential(client, {
+        sourceCode: sourceCode as AtsSourceCode,
+        employerKey,
+        secret,
+        label,
+      });
+
+      await recordAuditEvent(client, {
+        actorId: request.user!.id,
+        actorRole: "admin",
+        action: "ats_credential.stored",
+        entityType: "ats_credential",
+        entityId: stored.id,
+        // The hint identifies the key; the key itself must never reach this table.
+        summary: "Installed a " + sourceCode + " credential for employer " + employerKey + " (key ending " + secret.trim().slice(-4) + ")",
+        newValues: { sourceCode, employerKey, label, keyHint: secret.trim().slice(-4) },
+      });
+
+      response.status(200).json({ id: stored.id, sourceCode, employerKey, keyHint: secret.trim().slice(-4) });
+    } catch (error) {
+      if (error instanceof AtsCredentialKeyError) {
+        // A deployment problem, not the caller's fault, and the fix is an
+        // environment variable — so say so rather than returning a generic 500.
+        response.status(503).json({ error: "ATS credential storage is not configured on this deployment.", reason: error.message });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("ATS credential store failed:", message);
+      response.status(500).json({ error: "Failed to store the credential" });
+    }
+  });
+
+  /** Activate or deactivate a credential. Deactivating is how an employer's authorization is withdrawn, so it is audited. */
+  app.post("/api/admin/ats-credentials/:id/active", requireAuth, requireAdmin, async (request: AuthenticatedRequest, response) => {
+    const id = request.params.id as string;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+
+    if (!UUID_PATTERN.test(id)) {
+      response.status(400).json({ error: "id must be a uuid" });
+      return;
+    }
+
+    if (typeof body.isActive !== "boolean") {
+      response.status(400).json({ error: "isActive must be a boolean" });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      await setAtsCredentialActive(client, id, body.isActive);
+
+      await recordAuditEvent(client, {
+        actorId: request.user!.id,
+        actorRole: "admin",
+        action: body.isActive ? "ats_credential.activated" : "ats_credential.deactivated",
+        entityType: "ats_credential",
+        entityId: id,
+        summary: (body.isActive ? "Activated" : "Deactivated") + " an ATS credential",
+        previousValues: { isActive: !body.isActive },
+        newValues: { isActive: body.isActive },
+      });
+
+      // The trigger on ats_credentials has already re-derived the source policy
+      // by now, so the caller is told the consequence rather than having to
+      // re-read the source list to discover it.
+      response.status(200).json({
+        id,
+        isActive: body.isActive,
+        note: body.isActive
+          ? "Automated application is now enabled for this source."
+          : "Automated application is now disabled for this source.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("ATS credential activation failed:", message);
+      response.status(500).json({ error: "Failed to update the credential" });
+    }
+  });
+
+  // Mini-Phase 8: the local fixture submission target that the
+  // local_fixture adapter drives. Mounted everywhere except production, and
+  // switchable off entirely with DISABLE_MOCK_EMPLOYER=true — see
+  // server/mockEmployer.ts for why this exists and what it does (nothing).
+  if (isMockEmployerEnabled()) {
+    mountMockEmployer(app);
+  }
+
   const clientBuildPath = path.resolve(process.cwd(), "dist/client");
 
   if (existsSync(clientBuildPath)) {
@@ -815,6 +1951,12 @@ const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {
   app.listen(port, host, () => {
     console.log(`${APP_NAME} server listening at http://${host}:${port}`);
+
+    if (isMockEmployerEnabled()) {
+      console.log(
+        `[mock-employer] fixture submission target mounted at http://${host}:${port}/mock-employer/apply — development only, submits nowhere.`,
+      );
+    }
   });
 }
 

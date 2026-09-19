@@ -1,0 +1,25 @@
+-- service_role read access to candidate_exclusions.
+--
+-- WHY. evaluateEligibilityGates reads candidate_exclusions for the candidate
+-- eligibility gate, and planApplication is only ever called server-side with
+-- the service-role client (server/applications/runner.ts, the MP-W1 CLI, and
+-- POST /api/worker/run). 20260813184939 granted the table to authenticated
+-- only, so that read fails:
+--
+--   permission denied for table candidate_exclusions   (PostgreSQL 42501)
+--
+-- which makes planApplication throw for EVERY caller before it can create a
+-- plan or an attempt. Confirmed against the live local stack by calling
+-- planApplication directly, not inferred from reading the two files. The
+-- existing worker swallows this per-pair (runApplicationBatch records
+-- planningFailures), so the symptom was a silently empty run rather than a
+-- visible crash.
+--
+-- candidate_exclusions is the only table the gates read that service_role
+-- lacked SELECT on; the other ten were probed and already granted. Same
+-- one-line class of fix as 20260917150000 did for candidate_profiles.
+--
+-- SELECT only. The table's writers are the candidate's own browser session
+-- (lib/exclusions.ts) and the service-role ingestion/planning paths, which
+-- already hold their own grants.
+grant select on public.candidate_exclusions to service_role;

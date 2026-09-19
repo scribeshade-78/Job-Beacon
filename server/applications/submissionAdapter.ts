@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ActionRequiredExceptionType } from "./actionRequired.js";
 import { resolveApplicationAdapter } from "./adapters/registry.js";
 import type { ApplicationSubmissionContext, ApplicationSubmissionResult } from "./adapters/types.js";
+import { resolveSubmissionResume, type ResumeForSubmissionDeps } from "./resumeForSubmission.js";
 
 export type SubmissionContext = ApplicationSubmissionContext;
 export type SubmissionResult = ApplicationSubmissionResult;
@@ -69,6 +70,7 @@ export class AuthorizationWithdrawnError extends Error {
 export async function submitApplicationAttempt(
   client: SupabaseClient,
   context: SubmissionContext,
+  deps: ResumeForSubmissionDeps = {},
 ): Promise<SubmissionResult> {
   const { data: plan, error: planError } = await client
     .from("application_plans")
@@ -113,5 +115,25 @@ export async function submitApplicationAttempt(
 
   const adapter = resolveApplicationAdapter((vacancy as { source_code: string }).source_code);
 
-  return adapter.submit(client, context);
+  // Mini-Phase 11: the resume is resolved here, in the one place every adapter
+  // is dispatched from, so "which file does this application send" has exactly
+  // one answer — the same reason the authorization recheck above lives here
+  // rather than in each adapter.
+  //
+  // Guarded on the adapter's own capability flag: an adapter that cannot submit
+  // automatically will throw on the next line regardless, and generating a
+  // tailored resume (a model call plus a browser render) for an application
+  // that cannot be made is work with no outcome. The flag is the adapter's, not
+  // a second opinion derived here.
+  if (!adapter.isAutomatedSubmissionSupported) {
+    return adapter.submit(client, context);
+  }
+
+  const resume = await resolveSubmissionResume(client, deps, {
+    applicationAttemptId: context.applicationAttemptId,
+    candidateId,
+    vacancyId,
+  });
+
+  return adapter.submit(client, { ...context, resume });
 }

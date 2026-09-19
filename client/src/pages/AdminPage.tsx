@@ -1,7 +1,10 @@
 import { useState } from "react";
+import { Link } from "wouter";
 import {
   Activity,
+  ArrowLeft,
   Gauge,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Rss,
@@ -14,8 +17,11 @@ import {
 import { APP_NAME } from "../../../shared/app";
 import { OverviewSection } from "./admin/OverviewSection";
 import { SourcesSection } from "./admin/SourcesSection";
+import { AtsCredentialsSection } from "./admin/AtsCredentialsSection";
+import { AuditSection } from "./admin/AuditSection";
 import { ModerationSection } from "./admin/ModerationSection";
 import { TrustScoringSection } from "./admin/TrustScoringSection";
+import { UsersBillingSection } from "./admin/UsersBillingSection";
 import { AdminCard, MockBadge } from "./admin/shared";
 
 interface AdminPageProps {
@@ -25,6 +31,7 @@ interface AdminPageProps {
 type SectionId =
   | "overview"
   | "sources"
+  | "ats"
   | "moderation"
   | "trust"
   | "users"
@@ -35,6 +42,7 @@ type SectionId =
 const NAV: Array<{ id: SectionId; label: string; Icon: LucideIcon }> = [
   { id: "overview", label: "Overview", Icon: LayoutDashboard },
   { id: "sources", label: "Sources & Ingestion", Icon: Rss },
+  { id: "ats", label: "ATS Credentials", Icon: KeyRound },
   { id: "moderation", label: "Moderation Queue", Icon: ShieldAlert },
   { id: "trust", label: "Trust Scoring", Icon: Gauge },
   { id: "users", label: "Users & Billing", Icon: Users },
@@ -77,25 +85,59 @@ export function AdminPage({ onLogout }: AdminPageProps) {
           </button>
         </aside>
 
-        <div className="flex-1">
-          <header className="flex h-14 items-center justify-between border-b border-slate-800 px-5">
-            <div className="flex gap-1 overflow-x-auto lg:hidden">
-              {NAV.map(({ id, label }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setSection(id)}
-                  className={`whitespace-nowrap rounded px-2 py-1 text-xs ${
-                    section === id ? "bg-sky-500/15 text-sky-300" : "text-slate-500"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+        {/* min-w-0 is load-bearing: a flex item defaults to min-width:auto
+            (= its content width), so without it this column refuses to shrink
+            below its widest child and the whole console scrolls sideways on
+            a phone — the mobile header and its section tabs were 944px wide
+            inside a 375px viewport. With it, the content that genuinely needs
+            width (the sources table, already wrapped in overflow-x-auto)
+            scrolls in its own box instead of dragging the page with it. */}
+        <div className="min-w-0 flex-1">
+          {/* Same bare-layout dead end as /employer and /moderator: this
+              console renders outside AppShell and its sidebar nav has no
+              route back to the candidate dashboard. A real Link to "/"
+              rather than history.back(), which is undefined behaviour when
+              this page is the first history entry. Styled in the console's
+              own slate palette — the ios-* tokens the other two pages use
+              hard-code text-black and would be unreadable on slate-950. */}
+          <header className="flex h-14 items-center justify-between gap-3 border-b border-slate-800 px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <Link
+                href="/"
+                aria-label="Back to Dashboard"
+                className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800/60"
+              >
+                <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                {/* Long label only once the layout has room for it (the lg
+                    breakpoint this console's own sidebar appears at);
+                    shortened below, never dropped. */}
+                <span className="hidden lg:inline">Back to Dashboard</span>
+                <span className="lg:hidden">Back</span>
+              </Link>
+              {/* min-w-0 is load-bearing, not decoration: a flex item
+                  defaults to min-width:auto (= its content width), so without
+                  it this row never shrinks below all nine section tabs and
+                  the whole header — and the page — scrolls sideways on a
+                  phone. overflow-x-auto only does its job once the box is
+                  allowed to be narrower than its content. */}
+              <div className="flex min-w-0 gap-1 overflow-x-auto lg:hidden">
+                {NAV.map(({ id, label }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setSection(id)}
+                    className={`whitespace-nowrap rounded px-2 py-1 text-xs ${
+                      section === id ? "bg-sky-500/15 text-sky-300" : "text-slate-500"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <span className="hidden text-sm font-semibold text-slate-100 lg:inline">
+                {NAV.find((item) => item.id === section)?.label}
+              </span>
             </div>
-            <span className="hidden text-sm font-semibold text-slate-100 lg:inline">
-              {NAV.find((item) => item.id === section)?.label}
-            </span>
             <button
               type="button"
               onClick={onLogout}
@@ -108,11 +150,12 @@ export function AdminPage({ onLogout }: AdminPageProps) {
           <main className="mx-auto max-w-[1100px] space-y-4 p-5">
             {section === "overview" && <OverviewSection />}
             {section === "sources" && <SourcesSection />}
+            {section === "ats" && <AtsCredentialsSection />}
             {section === "moderation" && <ModerationSection />}
             {section === "trust" && <TrustScoringSection />}
-            {section === "users" && <UsersBillingMock />}
+            {section === "users" && <UsersBillingSection />}
             {section === "errors" && <ErrorsHealthMock />}
-            {section === "audit" && <AuditLogMock />}
+            {section === "audit" && <AuditSection />}
             {section === "settings" && <SettingsMock />}
           </main>
         </div>
@@ -121,44 +164,22 @@ export function AdminPage({ onLogout }: AdminPageProps) {
   );
 }
 
-/* ---- Mock sections: no backing schema yet (subscriptions in R7,
-   error_events / audit_logs later). Static placeholders so the console
-   shell is complete; deleted wholesale when their real routes land. ---- */
+/* ---- Mock sections: no backing schema yet (error_events later). Static
+   placeholders so the console shell is complete; deleted wholesale when their
+   real routes land.
 
-function UsersBillingMock() {
-  const rows = [
-    { email: "priya@example.com", plan: "Pro", status: "active", mrr: "₹1,499" },
-    { email: "arjun@example.com", plan: "Free", status: "—", mrr: "₹0" },
-    { email: "meera@example.com", plan: "Pro", status: "past_due", mrr: "₹1,499" },
-  ];
-  return (
-    <AdminCard title="Users & billing" description="Wired to a real subscriptions table in R7.">
-      <div className="mb-3">
-        <MockBadge />
-      </div>
-      <table className="w-full min-w-[480px] border-collapse text-left">
-        <thead>
-          <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
-            <th className="py-2 pr-4 font-medium">User</th>
-            <th className="py-2 pr-4 font-medium">Plan</th>
-            <th className="py-2 pr-4 font-medium">Status</th>
-            <th className="py-2 pr-4 font-medium">MRR</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.email} className="border-b border-slate-900">
-              <td className="py-2 pr-4 text-sm text-slate-300">{row.email}</td>
-              <td className="py-2 pr-4 text-xs text-slate-400">{row.plan}</td>
-              <td className="py-2 pr-4 text-xs text-slate-400">{row.status}</td>
-              <td className="py-2 pr-4 font-mono text-xs text-slate-300">{row.mrr}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </AdminCard>
-  );
-}
+   Users & Billing used to live here. Task H1 removed it: subscriptions,
+   regional_prices, subscription_plans and plan_limits now exist, so the section
+   reads real data and carries no mock badge.
+
+   Audit Log used to live here too, and never should have been called one: the
+   brief named audit_logs, but audit_logs is a table from a DIFFERENT codebase's
+   document — PRD v3 §21.1's Audit domain names audit_events, and Task H4 built
+   it. The section now reads audit_events and security_events through the real
+   routes and carries no badge.
+
+   What is left below is Errors & Health and Settings, both still waiting on
+   tables (error_events, and any admin-config table). ---- */
 
 function ErrorsHealthMock() {
   const rows = [
@@ -177,29 +198,6 @@ function ErrorsHealthMock() {
             <span className={row.level === "error" ? "text-rose-400" : "text-amber-400"}>{row.level}</span>{" "}
             <span className="text-slate-400">{row.service}</span>
             <p className="mt-1 text-slate-300">{row.message}</p>
-          </li>
-        ))}
-      </ul>
-    </AdminCard>
-  );
-}
-
-function AuditLogMock() {
-  const rows = [
-    { at: "10:12", actor: "admin@jobbeacon", action: "source_policies.kill_switch → true (indeed)" },
-    { at: "09:55", actor: "mod@jobbeacon", action: "moderation_decision: blocked case 8f2c" },
-  ];
-  return (
-    <AdminCard title="Audit log" description="Wired to a real audit_logs table in a later phase.">
-      <div className="mb-3">
-        <MockBadge />
-      </div>
-      <ul className="space-y-2">
-        {rows.map((row) => (
-          <li key={row.at} className="rounded border border-slate-800 bg-slate-950/40 p-3 text-sm">
-            <span className="font-mono text-xs text-slate-500">{row.at}</span>{" "}
-            <span className="text-slate-400">{row.actor}</span>
-            <p className="mt-1 text-slate-300">{row.action}</p>
           </li>
         ))}
       </ul>

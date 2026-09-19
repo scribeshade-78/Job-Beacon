@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isResponseCategory, type ResponseCategory } from "../../../shared/priorityScore";
 
 /**
  * §16.4 worker lifecycle states (application_attempts.status check
@@ -8,6 +9,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  */
 export const APPLICATION_ATTEMPT_STATUSES = [
   "pending",
+  // Task U: held for the candidate's approval. It is a real lifecycle state,
+  // not a derived one — the claim query in claim_application_attempt() will not
+  // lease a row in it until the candidate approves.
+  "pending_review",
   "leased",
   "succeeded",
   "failed",
@@ -16,6 +21,24 @@ export const APPLICATION_ATTEMPT_STATUSES = [
 ] as const;
 
 export type ApplicationAttemptStatus = (typeof APPLICATION_ATTEMPT_STATUSES)[number];
+
+/**
+ * How each lifecycle status reads to the candidate.
+ *
+ * The panel used to print the raw column value, which was tolerable while
+ * every value was a single lowercase word. "pending_review" is not: shown
+ * as-is it looks like a database token rather than the one status the
+ * candidate is actually expected to act on.
+ */
+export const ATTEMPT_STATUS_LABELS: Record<ApplicationAttemptStatus, string> = {
+  pending: "Queued",
+  pending_review: "Awaiting your review",
+  leased: "Submitting",
+  succeeded: "Submitted",
+  failed: "Could not be submitted",
+  action_required: "Needs your input",
+  cancelled: "Cancelled",
+};
 
 export interface ApplicationAttemptSummary {
   id: string;
@@ -35,6 +58,12 @@ export interface ApplicationSummary {
   eligible: boolean;
   createdAt: string;
   attempts: ApplicationAttemptSummary[];
+  /**
+   * Mini-Phase 4: employer-side response stages, derived from the candidate's
+   * own classified mail. Empty when no reply has been matched to this
+   * application yet — which is the normal state, not an error.
+   */
+  responseCategories: ResponseCategory[];
 }
 
 interface ApplicationPlanRow {
@@ -51,7 +80,47 @@ interface ApplicationPlanRow {
     last_error: string | null;
     created_at: string;
     updated_at: string;
+    // messages.application_attempt_id is a nullable FK onto the attempt, so
+    // this embeds as a reverse relationship. A message can be captured before
+    // matching happens, hence the nulls.
+    messages: Array<{
+      // PostgREST returns an array for every embed, even though the unique
+      // index on message_id means response_classifications holds at most one
+      // row here.
+      response_classifications: Array<{ category: string }> | null;
+    }> | null;
   }> | null;
+}
+
+/**
+ * Employer-side response categories, collected from the candidate's own
+ * classified mail.
+ *
+ * There is no "latest of several" to resolve: response_classifications carries
+ * a unique index on message_id (20260828060000), so a message holds at most
+ * ONE classification and re-classifying upserts that row rather than
+ * appending. An earlier draft of this function sorted by classified_at for a
+ * case the schema makes impossible; the unique index is the actual guarantee,
+ * and deduplicating across messages is all that is left to do.
+ *
+ * category has no CHECK constraint — the taxonomy is code-owned in
+ * server/mailbox/classifyMessage.ts — so an unrecognised value from a newer
+ * taxonomy is dropped rather than surfaced as a stage the UI has no chip for.
+ */
+function collectResponseCategories(attempts: ApplicationPlanRow["application_attempts"]): ResponseCategory[] {
+  const categories: ResponseCategory[] = [];
+
+  for (const attempt of attempts ?? []) {
+    for (const message of attempt.messages ?? []) {
+      for (const classification of message.response_classifications ?? []) {
+        if (isResponseCategory(classification.category) && !categories.includes(classification.category)) {
+          categories.push(classification.category);
+        }
+      }
+    }
+  }
+
+  return categories;
 }
 
 const GENERIC_FAILURE_MESSAGE = "Could not load your applications. Please try again.";
@@ -75,8 +144,13 @@ export async function listApplications(
   try {
     const { data, error } = await client
       .from("application_plans")
+      // Three levels deep: plan -> attempts -> messages -> classifications.
+      // Both hops are RLS-scoped to the caller (messages_select_own via
+      // mailbox_connections.candidate_id, response_classifications_select_own
+      // transitively through the same join), so this stays a direct
+      // candidate-scoped read with no privileged route.
       .select(
-        "id, vacancy_id, gate_results, created_at, vacancies (raw_title, authoritative_url), application_attempts (id, status, attempts, max_attempts, last_error, created_at, updated_at)",
+        "id, vacancy_id, gate_results, created_at, vacancies (raw_title, authoritative_url), application_attempts (id, status, attempts, max_attempts, last_error, created_at, updated_at, messages (id, response_classifications (category, classified_at)))",
       )
       .order("created_at", { ascending: false });
 
@@ -95,6 +169,7 @@ export async function listApplications(
         vacancyUrl: row.vacancies?.authoritative_url ?? "",
         eligible: row.gate_results.eligible,
         createdAt: row.created_at,
+        responseCategories: collectResponseCategories(row.application_attempts),
         attempts: (row.application_attempts ?? []).map((attempt) => ({
           id: attempt.id,
           status: attempt.status,

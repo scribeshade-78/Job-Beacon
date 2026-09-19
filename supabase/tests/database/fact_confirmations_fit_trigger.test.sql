@@ -35,9 +35,13 @@ values
   ('f2222222-9213-1111-1111-111111111111', 'greenhouse', 'eeeeeeee-9213-1111-1111-111111111111', 'gh-review',
    'https://boards.greenhouse.io/acme/jobs/2', 'Under Review Role', 'UNDER_REVIEW');
 
--- 0. no jobs yet
+-- 0. no jobs yet. Scoped to this file's own two fixture vacancies: the live
+--    database already holds fit_analysis_jobs rows for real candidates, so a
+--    global count only ever equalled 0 on an empty one.
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   0,
   'no fit_analysis_jobs before any fact is confirmed'
 );
@@ -49,30 +53,43 @@ update fact_confirmations set status = 'confirmed'
   where extracted_fact_id = 'dddddddd-9213-1111-1111-111111111111';
 reset role;
 
--- 1. exactly one job was enqueued (for the VERIFIED vacancy only)
+-- 1. exactly one job was enqueued (for the VERIFIED vacancy only). The trigger
+--    fans out over every VERIFIED vacancy for the confirming candidate, so the
+--    assertion is scoped to this file's two fixture vacancies — a global count
+--    only held on an empty database.
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   1,
   'confirming a fact enqueues one fit_analysis_jobs row'
 );
 
--- 2. it targets the VERIFIED vacancy
+-- 2. it targets the VERIFIED vacancy — scoped to the fixture's own vacancies,
+--    since the fan-out also touches every real VERIFIED vacancy
 select is(
-  (select vacancy_id::text from fit_analysis_jobs),
+  (select vacancy_id::text from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   'f1111111-9213-1111-1111-111111111111',
   'the enqueued job targets the VERIFIED vacancy'
 );
 
--- 3. it targets the confirming candidate
+-- 3. it targets the confirming candidate — asserted across the fixture
+--    vacancies, which no other candidate can hold a job on
 select is(
-  (select candidate_id::text from fit_analysis_jobs),
+  (select candidate_id::text from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   'aaaaaaaa-9213-1111-1111-111111111111',
   'the enqueued job targets the confirming candidate'
 );
 
--- 4. it is pending
+-- 4. it is pending (same fixture scoping)
 select is(
-  (select status from fit_analysis_jobs),
+  (select status from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   'pending',
   'the enqueued job is pending'
 );
@@ -84,7 +101,9 @@ update fact_confirmations set status = 'confirmed', updated_at = now()
   where extracted_fact_id = 'dddddddd-9213-1111-1111-111111111111';
 reset role;
 select is(
-  (select count(*)::int from fit_analysis_jobs),
+  (select count(*)::int from fit_analysis_jobs
+     where vacancy_id in ('f1111111-9213-1111-1111-111111111111',
+                          'f2222222-9213-1111-1111-111111111111')),
   1,
   're-confirming an already-confirmed fact does not add another job'
 );

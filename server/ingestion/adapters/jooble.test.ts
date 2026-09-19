@@ -3,6 +3,7 @@ import {
   discoverJooble,
   joobleAdapter,
   normalizeJoobleJob,
+  parseJoobleRemoteType,
   parseJoobleSalary,
   readJoobleCredentials,
   redactJoobleEndpoint,
@@ -212,6 +213,53 @@ describe("normalizeJoobleJob", () => {
     expect(normalizeJoobleJob({ link: "https://ua.jooble.org/jdp/1" }, null)).toBeNull();
     expect(normalizeJoobleJob({ id: 1 }, null)).toBeNull();
     expect(normalizeJoobleJob({ id: "", link: " " }, null)).toBeNull();
+  });
+});
+
+describe("parseJoobleRemoteType (Mini-Phase 3)", () => {
+  it("maps a location that mentions remote to 'remote'", () => {
+    expect(parseJoobleRemoteType("Remote")).toBe("remote");
+    expect(parseJoobleRemoteType("remote")).toBe("remote");
+    expect(parseJoobleRemoteType("Fully Remote")).toBe("remote");
+    expect(parseJoobleRemoteType("Remote - must live in NY")).toBe("remote");
+  });
+
+  it("leaves a plain place name null rather than inferring on_site", () => {
+    // 38 of the 64 live Jooble vacancies carry a bare place name. 'on_site'
+    // could only be inferred from "the location is a city", which asserts a
+    // work arrangement Jooble never stated.
+    expect(parseJoobleRemoteType("North Dakota")).toBeNull();
+    expect(parseJoobleRemoteType("Chicago, IL")).toBeNull();
+    expect(parseJoobleRemoteType("Kyiv")).toBeNull();
+  });
+
+  it("never produces 'hybrid' — no location value in the corpus says it", () => {
+    expect(parseJoobleRemoteType("Hybrid - Madison, WI")).toBeNull();
+  });
+
+  it("treats a missing or non-string location as null", () => {
+    expect(parseJoobleRemoteType(undefined)).toBeNull();
+    expect(parseJoobleRemoteType(null)).toBeNull();
+    expect(parseJoobleRemoteType(42)).toBeNull();
+  });
+
+  it("is wired into normalizeJoobleJob", () => {
+    expect(normalizeJoobleJob({ ...fixtureJob, location: "Remote" }, "US")?.remoteType).toBe("remote");
+    // The documented fixture's location is "Kyiv".
+    expect(normalizeJoobleJob(fixtureJob, "UA")?.remoteType).toBeNull();
+  });
+
+  it("ignores the snippet even when the snippet says remote", () => {
+    // The regression guard for the explicit product decision: 16 live rows
+    // pair a place-name location with a truncated snippet that mentions
+    // remote, and the snippet contradicts the location field in those cases.
+    const contradictory = {
+      ...fixtureJob,
+      location: "North Dakota",
+      snippet: "&nbsp;...Lead AiML <b>Engineer:</b> Remote Key Responsibilities ...&nbsp;",
+    };
+
+    expect(normalizeJoobleJob(contradictory, "US")?.remoteType).toBeNull();
   });
 });
 

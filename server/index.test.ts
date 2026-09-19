@@ -1,12 +1,29 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME } from "../shared/app.js";
 import type { CreateAppOptions } from "./index.js";
 import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { runIngestionBatch } from "./ingestion/runner.js";
+import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
+import { IntakePolicyError } from "./intake/intake.js";
+import {
+  approveAttempt,
+  approveOwnedAttempt,
+  ApplicationAttemptNotFoundError,
+  AttemptNotAwaitingReviewError,
+  AttemptNotOwnedError,
+  AttemptNotPreviewedError,
+  generateAttemptPreview,
+} from "./applications/attemptReview.js";
+import { listPlans } from "./billing/plans.js";
+import { createCheckoutSession, readStripeConfig } from "./billing/stripe.js";
+import { cancelCandidateSubscription, getCandidateSubscription } from "./billing/subscription.js";
+import { evaluateEntitlements } from "./billing/entitlements.js";
+import { getAdminBilling } from "./admin/billing.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
 // these route-level tests only care about auth/ownership/rate-limit/status-
@@ -42,7 +59,91 @@ vi.mock("./opportunities/runner.js", () => ({
   runFitAnalysisBatch: vi.fn(),
 }));
 
+// Task H1 billing. The pure logic is covered directly by
+// server/billing/*.test.ts; these route tests care about validation,
+// auth-gating and status mapping, so the data layers are stubbed.
+// verifyStripeSignature is deliberately NOT stubbed — the webhook tests exercise
+// the real verification, which is the whole point of that route.
+vi.mock("./admin/billing.js", () => ({ getAdminBilling: vi.fn() }));
+vi.mock("./billing/entitlements.js", () => ({ evaluateEntitlements: vi.fn() }));
+vi.mock("./billing/plans.js", async () => {
+  const actual = await vi.importActual<typeof import("./billing/plans.js")>("./billing/plans.js");
+  return { ...actual, listPlans: vi.fn() };
+});
+vi.mock("./billing/subscription.js", () => ({
+  getCandidateSubscription: vi.fn(),
+  cancelCandidateSubscription: vi.fn(),
+  applyCheckoutCompleted: vi.fn(),
+  applyProviderSubscriptionUpdate: vi.fn(),
+}));
+vi.mock("./billing/stripe.js", async () => {
+  const actual = await vi.importActual<typeof import("./billing/stripe.js")>("./billing/stripe.js");
+  return { ...actual, readStripeConfig: vi.fn(), createCheckoutSession: vi.fn() };
+});
+
+// POST /api/opportunities/refresh — internals covered by
+// server/ingestion/runner.test.ts; here only auth-gating and response wiring.
+vi.mock("./ingestion/runner.js", () => ({
+  runIngestionBatch: vi.fn(),
+}));
+
+// POST /api/opportunities/bulk-apply — internals covered by
+// server/applications/bulkApply.test.ts; here only validation, auth-gating and
+// response wiring. MAX_BULK_APPLY_VACANCIES is re-exported for the limit test.
+vi.mock("./applications/bulkApply.js", async () => {
+  const actual = await vi.importActual<typeof import("./applications/bulkApply.js")>(
+    "./applications/bulkApply.js",
+  );
+  return { ...actual, bulkApplyToVacancies: vi.fn() };
+});
+
+// POST /api/worker/approve-attempt — internals covered by
+// server/applications/attemptReview.test.ts; here only auth-gating,
+// validation and status mapping.
+// Task V's two candidate-facing routes are mocked for the same reason: their
+// logic is covered by attemptReview.test.ts, and what these tests are about is
+// auth-gating, ownership status mapping and response wiring.
+vi.mock("./applications/attemptReview.js", async () => {
+  const actual = await vi.importActual<typeof import("./applications/attemptReview.js")>(
+    "./applications/attemptReview.js",
+  );
+  return {
+    ...actual,
+    approveAttempt: vi.fn(),
+    generateAttemptPreview: vi.fn(),
+    approveOwnedAttempt: vi.fn(),
+  };
+});
+
+// POST /api/intake/discover — internals covered by server/intake/intake.test.ts;
+// here only auth-gating, source resolution and response wiring.
+vi.mock("./intake/intake.js", async () => {
+  const actual = await vi.importActual<typeof import("./intake/intake.js")>("./intake/intake.js");
+  return { ...actual, runIntake: vi.fn() };
+});
+
+// Task C2's follow-up routes — internals covered by
+// server/mailbox/followUpReview.test.ts; here only auth, validation and status
+// mapping.
+vi.mock("./mailbox/followUpReview.js", async () => {
+  const actual = await vi.importActual<typeof import("./mailbox/followUpReview.js")>(
+    "./mailbox/followUpReview.js",
+  );
+  return { ...actual, listPendingFollowUps: vi.fn(), sendFollowUpDraft: vi.fn(), dismissFollowUpDraft: vi.fn() };
+});
+
 const { app, createApp } = await import("./index.js");
+
+import {
+  dismissFollowUpDraft,
+  FollowUpDraftNotFoundError,
+  FollowUpDraftNotOwnedError,
+  FollowUpDraftNotPendingError,
+  listPendingFollowUps,
+  sendFollowUpDraft,
+} from "./mailbox/followUpReview.js";
+
+import { runIntake } from "./intake/intake.js";
 
 let baseUrl: string;
 let server: ReturnType<typeof app.listen>;
@@ -290,6 +391,199 @@ describe("POST /api/vacancies/:vacancyId/reports", () => {
         expect(await response.json()).toEqual({ id: "report-1" });
         const insertCall = calls.find((call) => call.method === "insert");
         expect((insertCall?.args[0] as { reporter_id: string }).reporter_id).toBe("user-123");
+      },
+    );
+  });
+});
+
+describe("POST /api/opportunities/refresh", () => {
+  const mockedRunIngestionBatch = vi.mocked(runIngestionBatch);
+
+  beforeEach(() => {
+    mockedRunIngestionBatch.mockReset();
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockedRunIngestionBatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the batch summary for a signed-in candidate", async () => {
+    const batchResult = {
+      targets: [
+        { sourceCode: "jooble", targetKey: "us-data-engineer", status: "fetched" as const, vacanciesFetched: 50 },
+        { sourceCode: "usajobs", targetKey: "us-data-engineer", status: "skipped_recent" as const, vacanciesFetched: 0 },
+      ],
+      vacanciesFetched: 50,
+      failed: 0,
+      skippedRecent: 1,
+      skippedQueued: 0,
+    };
+    mockedRunIngestionBatch.mockResolvedValueOnce(batchResult);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(batchResult);
+        // The route must hand the batch the service-role client, never a
+        // request-scoped one — ingestion reads source_policies/vacancy_sources.
+        expect(mockedRunIngestionBatch).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  it("returns 500 with a generic message when the batch throws", async () => {
+    mockedRunIngestionBatch.mockRejectedValueOnce(new Error("claim_ingestion_job exploded"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "Failed to refresh opportunities" });
+      },
+    );
+  });
+});
+
+describe("POST /api/opportunities/bulk-apply", () => {
+  const mockedBulkApply = vi.mocked(bulkApplyToVacancies);
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+  beforeEach(() => {
+    mockedBulkApply.mockReset();
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vacancyIds: [uuid(1)] }),
+      });
+
+      expect(response.status).toBe(401);
+      expect(mockedBulkApply).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 when vacancyIds is missing, not an array, or empty", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        for (const body of [{}, { vacancyIds: "nope" }, { vacancyIds: [] }]) {
+          const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+            body: JSON.stringify(body),
+          });
+
+          expect(response.status).toBe(400);
+        }
+
+        expect(mockedBulkApply).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns 400 when any vacancy id is not a valid id", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ vacancyIds: [uuid(1), "not-an-id"] }),
+        });
+
+        expect(response.status).toBe(400);
+        expect(mockedBulkApply).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns 400 above the per-request cap", async () => {
+    const tooMany = Array.from({ length: MAX_BULK_APPLY_VACANCIES + 1 }, (_, index) => uuid(index + 1));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ vacancyIds: tooMany }),
+        });
+
+        expect(response.status).toBe(400);
+        expect(mockedBulkApply).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns 200 with the per-vacancy gate outcomes for a valid request", async () => {
+    const batchResult = {
+      requested: 1,
+      queued: 0,
+      blocked: 1,
+      errors: 0,
+      outcomes: [
+        {
+          vacancyId: uuid(1),
+          status: "blocked" as const,
+          blockingGates: [{ gate: "application_support", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" }],
+        },
+      ],
+    };
+    mockedBulkApply.mockResolvedValueOnce(batchResult);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ vacancyIds: [uuid(1)] }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(batchResult);
+        // The candidate identity comes from the verified token, never the body.
+        expect(mockedBulkApply).toHaveBeenCalledWith(expect.anything(), {
+          candidateId: "user-123",
+          vacancyIds: [uuid(1)],
+        });
+      },
+    );
+  });
+
+  it("returns 500 with a generic message when the batch throws", async () => {
+    mockedBulkApply.mockRejectedValueOnce(new Error("plan exploded"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+          body: JSON.stringify({ vacancyIds: [uuid(1)] }),
+        });
+
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "Failed to queue applications" });
       },
     );
   });
@@ -937,6 +1231,869 @@ describe("POST /api/worker/run", () => {
   });
 });
 
+describe("GET /api/candidate/follow-ups/pending", () => {
+  const mockList = vi.mocked(listPendingFollowUps);
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  beforeEach(() => {
+    mockList.mockReset();
+    mockList.mockResolvedValue([]);
+  });
+
+  it("returns 401 without a token, and reads nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/pending`);
+
+      expect(response.status).toBe(401);
+      expect(mockList).not.toHaveBeenCalled();
+    });
+  });
+
+  it("passes the verified user id as the candidate", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      await fetch(`${testBaseUrl}/api/candidate/follow-ups/pending`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(mockList).toHaveBeenCalledWith(expect.anything(), "cand-1");
+    });
+  });
+
+  it("returns the drafts", async () => {
+    mockList.mockResolvedValueOnce([
+      {
+        draftId: "draft-1",
+        applicationAttemptId: "attempt-1",
+        companyName: "Acme",
+        vacancyTitle: "Data Engineer III",
+        vacancyUrl: "https://acme.test/jobs/3",
+        daysSinceSubmission: 20,
+        submittedAt: "2026-08-30T00:00:00.000Z",
+        draftText: "Following up.",
+        generatedAt: "2026-09-18T22:00:00.000Z",
+        modelVersion: "test/model",
+        promptVersion: "follow-up-v1",
+      },
+    ] as never);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/pending`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { followUps: unknown[] };
+      expect(body.followUps).toHaveLength(1);
+    });
+  });
+
+  it("returns 500 with generic copy when the read fails", async () => {
+    mockList.mockRejectedValueOnce(new Error("db down"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/pending`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Could not load your follow-ups. Please try again." });
+    });
+  });
+});
+
+describe("POST /api/candidate/follow-ups/:id/send", () => {
+  const mockSend = vi.mocked(sendFollowUpDraft);
+  const draftId = "11111111-2222-4333-8444-555555555555";
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  beforeEach(() => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValue({
+      draftId,
+      status: "sent",
+      transmitted: false,
+      note: "Marked as sent. No email was transmitted.",
+    });
+  });
+
+  it("returns 401 without a token, and sends nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 for a non-uuid id", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/nope/send`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 and reports that nothing was transmitted", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      // The response must never let a client conclude an email went out.
+      expect(await response.json()).toMatchObject({ status: "sent", transmitted: false });
+    });
+  });
+
+  it("returns 404, not 403, for another candidate's draft", async () => {
+    mockSend.mockRejectedValueOnce(new FollowUpDraftNotOwnedError(draftId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Follow-up draft not found." });
+    });
+  });
+
+  it("returns the same 404 for a draft that does not exist", async () => {
+    mockSend.mockRejectedValueOnce(new FollowUpDraftNotFoundError(draftId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  it("returns 409 when the draft is no longer awaiting review", async () => {
+    mockSend.mockRejectedValueOnce(new FollowUpDraftNotPendingError(draftId, "sent"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "This follow-up is no longer awaiting your review.",
+        status: "sent",
+      });
+    });
+  });
+});
+
+describe("POST /api/candidate/follow-ups/:id/dismiss", () => {
+  const mockDismiss = vi.mocked(dismissFollowUpDraft);
+  const draftId = "11111111-2222-4333-8444-555555555555";
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  beforeEach(() => {
+    mockDismiss.mockReset();
+    mockDismiss.mockResolvedValue({ draftId, status: "dismissed" });
+  });
+
+  it("returns 401 without a token", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/dismiss`, { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockDismiss).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the dismissed status", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/dismiss`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ draftId, status: "dismissed" });
+    });
+  });
+
+  it("returns 404 for another candidate's draft", async () => {
+    mockDismiss.mockRejectedValueOnce(new FollowUpDraftNotOwnedError(draftId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/dismiss`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  it("returns 409 when the draft is no longer awaiting review", async () => {
+    mockDismiss.mockRejectedValueOnce(new FollowUpDraftNotPendingError(draftId, "dismissed"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/dismiss`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+    });
+  });
+});
+
+describe("POST /api/intake/discover", () => {
+  const mockIntake = vi.mocked(runIntake);
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  const intakeResult = {
+    sourceCode: "remotive",
+    displayName: "Remotive (public remote-job API)",
+    attribution: "Job data from Remotive (https://remotive.com), delayed by 24 hours.",
+    search: null,
+    received: 16,
+    skippedByAdapter: 0,
+    ingested: 3,
+    trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
+    outcomes: [
+      { vacancyId: "new-1", title: "Data Engineer", companyName: "Acme", outcome: "created", trustStatus: "VERIFIED_INCOMPLETE" },
+      { vacancyId: "new-2", title: "Data Analyst", companyName: "Acme", outcome: "created", trustStatus: "VERIFIED_INCOMPLETE" },
+      { vacancyId: "old-1", title: "Old Job", companyName: "Acme", outcome: "updated", trustStatus: "VERIFIED_INCOMPLETE" },
+    ],
+    durationMs: 1234,
+  };
+
+  beforeEach(() => {
+    mockIntake.mockReset();
+    mockIntake.mockResolvedValue(intakeResult as never);
+  });
+
+  it("returns 401 without a token, and fetches nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockIntake).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for a token that does not verify", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer expired" },
+      });
+
+      expect(response.status).toBe(401);
+      expect(mockIntake).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the counts and the ids of what was created", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        sourceCode: "remotive",
+        received: 16,
+        ingested: 3,
+        // 3 written, 2 of them new — the distinction the toast depends on.
+        created: 2,
+        updated: 1,
+        newVacancyIds: ["new-1", "new-2"],
+      });
+    });
+  });
+
+  it("defaults to the only registered source rather than requiring one", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(mockIntake).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourceCode: "remotive" }),
+      );
+    });
+  });
+
+  it("returns 400 for a source that is not registered, without calling intake", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceCode: "not-a-source" }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockIntake).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 409, not 500, when the source's policy refuses the fetch", async () => {
+    mockIntake.mockRejectedValueOnce(
+      new IntakePolicyError("remotive", "its kill_switch is on"),
+    );
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("kill_switch is on");
+    });
+  });
+
+  it("returns 500 with generic copy when the source itself fails", async () => {
+    mockIntake.mockRejectedValueOnce(new Error("HTTP 503 from remotive.com"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Could not fetch new jobs. Please try again." });
+    });
+  });
+});
+
+describe("POST /api/candidate/attempts/:id/generate-preview", () => {
+  const mockPreview = vi.mocked(generateAttemptPreview);
+  const attemptId = "11111111-2222-4333-8444-555555555555";
+  const previewPath = (base: string) => base + "/api/candidate/attempts/" + attemptId + "/generate-preview";
+
+  const previewResult = {
+    applicationAttemptId: attemptId,
+    status: "pending_review",
+    resume: {
+      documentId: "doc-1",
+      storagePath: "cand-1/tailored.pdf",
+      originalFilename: "resume-staff-data-engineer.pdf",
+      mimeType: "application/pdf",
+      tailored: true,
+      optimizationLevel: "honest" as const,
+    },
+    previewUrl: "https://storage.test/cand-1/tailored.pdf?token=signed",
+    previewUrlExpiresInSeconds: 300,
+    resumePrepared: true,
+    coverLetter: {
+      kind: "generated" as const,
+      text: "I am a Senior Data Engineer.\n\nMost of that work has been in Apache Spark.",
+      paragraphs: [{ text: "I am a Senior Data Engineer.", factRefs: ["fact-1"] }],
+      promptVersion: "cover-letter-v2",
+      modelVersion: "openai/gpt-4o-mini",
+      citedFactCount: 1,
+      generatedAt: "2026-09-18T22:00:00.000Z",
+    },
+  };
+
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  beforeEach(() => {
+    mockPreview.mockReset();
+  });
+
+  it("returns 401 without a token, and prepares nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockPreview).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for a token that does not verify", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer not-a-real-token" },
+      });
+
+      expect(response.status).toBe(401);
+      expect(mockPreview).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 for a non-uuid attempt id, without touching the database", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(testBaseUrl + "/api/candidate/attempts/not-a-uuid/generate-preview", {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockPreview).not.toHaveBeenCalled();
+    });
+  });
+
+  it("passes the verified user id as the candidate, never anything from the client", async () => {
+    mockPreview.mockResolvedValueOnce(previewResult);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token", "Content-Type": "application/json" },
+        // A forged candidateId in the body must be ignored entirely: this route
+        // reads no body at all.
+        body: JSON.stringify({ candidateId: "somebody-else" }),
+      });
+
+      expect(mockPreview).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+        candidateId: "cand-1",
+        applicationAttemptId: attemptId,
+      });
+    });
+  });
+
+  it("returns 200 with the signed URL and the prepared document", async () => {
+    mockPreview.mockResolvedValueOnce(previewResult);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        applicationAttemptId: attemptId,
+        status: "pending_review",
+        previewUrl: "https://storage.test/cand-1/tailored.pdf?token=signed",
+        previewUrlExpiresInSeconds: 300,
+        resumePrepared: true,
+        resume: {
+          documentId: "doc-1",
+          originalFilename: "resume-staff-data-engineer.pdf",
+          tailored: true,
+          optimizationLevel: "honest",
+        },
+        coverLetter: {
+          status: "generated",
+          text: "I am a Senior Data Engineer.\n\nMost of that work has been in Apache Spark.",
+          promptVersion: "cover-letter-v2",
+          modelVersion: "openai/gpt-4o-mini",
+          citedFactCount: 1,
+          generatedAt: "2026-09-18T22:00:00.000Z",
+        },
+      });
+    });
+  });
+
+  it("returns no separate storage path or mime type, only the signed URL", async () => {
+    mockPreview.mockResolvedValueOnce(previewResult);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      const body = (await response.json()) as { resume: Record<string, unknown>; previewUrl: string };
+
+      // The object path IS inside a signed URL — that is how Supabase signs,
+      // and the path alone grants nothing without the token that follows it.
+      // What must not appear is the path as its own reusable field, which
+      // would be a durable reference to a private object with no expiry.
+      expect(body.resume).not.toHaveProperty("storagePath");
+      expect(body.resume).not.toHaveProperty("mimeType");
+      expect(body.previewUrl).toBe(previewResult.previewUrl);
+      expect(body.previewUrl).toContain("token=");
+    });
+  });
+
+  it("returns 404, not 403, for another candidate's attempt, so the endpoint is not an id oracle", async () => {
+    mockPreview.mockRejectedValueOnce(new AttemptNotOwnedError(attemptId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Application attempt not found." });
+    });
+  });
+
+  it("returns the same 404 for an attempt that does not exist at all", async () => {
+    mockPreview.mockRejectedValueOnce(new ApplicationAttemptNotFoundError(attemptId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      // Byte-identical to the not-owned case above: nothing distinguishes them.
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Application attempt not found." });
+    });
+  });
+
+  it("returns 409 when the attempt is not awaiting review", async () => {
+    mockPreview.mockRejectedValueOnce(new AttemptNotAwaitingReviewError(attemptId, "succeeded"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "This application is not awaiting your review.",
+        status: "succeeded",
+      });
+    });
+  });
+
+  it("returns 500 with generic copy when preparation fails", async () => {
+    mockPreview.mockRejectedValueOnce(new Error("openrouter rejected the key"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Could not prepare your resume preview." });
+    });
+  });
+});
+
+describe("POST /api/candidate/attempts/:id/approve", () => {
+  const mockApprove = vi.mocked(approveOwnedAttempt);
+  const attemptId = "11111111-2222-4333-8444-555555555555";
+  const approvePath = (base: string) => base + "/api/candidate/attempts/" + attemptId + "/approve";
+
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  beforeEach(() => {
+    mockApprove.mockReset();
+  });
+
+  it("returns 401 without a token, and approves nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for a token that does not verify", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer expired-token" },
+      });
+
+      expect(response.status).toBe(401);
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 for a non-uuid attempt id", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(testBaseUrl + "/api/candidate/attempts/nope/approve", {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 and the approval timestamp on success", async () => {
+    mockApprove.mockResolvedValueOnce({
+      applicationAttemptId: attemptId,
+      status: "pending",
+      reviewApprovedAt: "2026-09-18T19:00:00.000Z",
+    });
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        applicationAttemptId: attemptId,
+        status: "pending",
+        reviewApprovedAt: "2026-09-18T19:00:00.000Z",
+      });
+      expect(mockApprove).toHaveBeenCalledWith(expect.anything(), {
+        candidateId: "cand-1",
+        applicationAttemptId: attemptId,
+      });
+    });
+  });
+
+  it("returns 404, not 403, for another candidate's attempt", async () => {
+    mockApprove.mockRejectedValueOnce(new AttemptNotOwnedError(attemptId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Application attempt not found." });
+    });
+  });
+
+  it("returns 409 telling the candidate to preview first when nothing was prepared", async () => {
+    mockApprove.mockRejectedValueOnce(new AttemptNotPreviewedError(attemptId));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "Generate the resume preview before approving this application.",
+      });
+    });
+  });
+
+  it("returns 409 when the attempt is no longer awaiting review", async () => {
+    mockApprove.mockRejectedValueOnce(new AttemptNotAwaitingReviewError(attemptId, "succeeded"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "This application is not awaiting your review.",
+        status: "succeeded",
+      });
+    });
+  });
+
+  it("returns 500 with generic copy when the release fails", async () => {
+    mockApprove.mockRejectedValueOnce(new Error("db down"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(approvePath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Could not approve this application." });
+    });
+  });
+});
+
+describe("POST /api/worker/approve-attempt", () => {
+  const mockApprove = vi.mocked(approveAttempt);
+
+  const approvalResult = {
+    applicationAttemptId: "attempt-1",
+    status: "pending" as const,
+    reviewApprovedAt: "2026-09-18T18:00:00.000Z",
+    resumePrepared: true,
+    resume: {
+      documentId: "doc-1",
+      storagePath: "cand-1/tailored.pdf",
+      originalFilename: "resume-staff-data-engineer.pdf",
+      mimeType: "application/pdf",
+      tailored: true,
+      optimizationLevel: "honest" as const,
+    },
+  };
+
+  beforeEach(() => {
+    mockApprove.mockReset();
+  });
+
+  it("returns 500 without approving anything when no secret is configured", async () => {
+    await withTestServer({ workerSecret: undefined }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+
+      expect(response.status).toBe(500);
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 401 for a missing or wrong secret without approving anything", async () => {
+    await withTestServer({ workerSecret: "correct-secret" }, async (testBaseUrl) => {
+      const missing = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+      expect(missing.status).toBe(401);
+
+      const wrong = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer wrong", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+      expect(wrong.status).toBe(401);
+
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 when applicationAttemptId is missing or blank", async () => {
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const missing = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(missing.status).toBe(400);
+      expect(await missing.json()).toEqual({ error: "applicationAttemptId is required" });
+
+      const blank = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "   " }),
+      });
+      expect(blank.status).toBe(400);
+
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 200 with the released attempt for the correct secret", async () => {
+    mockApprove.mockResolvedValueOnce(approvalResult);
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        applicationAttemptId: "attempt-1",
+        status: "pending",
+        reviewApprovedAt: "2026-09-18T18:00:00.000Z",
+        resumePrepared: true,
+        resume: {
+          documentId: "doc-1",
+          originalFilename: "resume-staff-data-engineer.pdf",
+          tailored: true,
+          optimizationLevel: "honest",
+        },
+      });
+      expect(mockApprove).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        { applicationAttemptId: "attempt-1" },
+      );
+    });
+  });
+
+  it("does not leak the storage path or mime type into the response", async () => {
+    mockApprove.mockResolvedValueOnce(approvalResult);
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+
+      const body = (await response.json()) as { resume: Record<string, unknown> };
+      expect(body.resume).not.toHaveProperty("storagePath");
+      expect(body.resume).not.toHaveProperty("mimeType");
+    });
+  });
+
+  it("returns 409, echoing the actual status, when the attempt is not awaiting review", async () => {
+    mockApprove.mockRejectedValueOnce(new AttemptNotAwaitingReviewError("attempt-1", "succeeded"));
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "Application attempt is not awaiting review",
+        status: "succeeded",
+        detail: null,
+      });
+    });
+  });
+
+  it("returns 404 when no such attempt exists", async () => {
+    mockApprove.mockRejectedValueOnce(new ApplicationAttemptNotFoundError("missing"));
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "missing" }),
+      });
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  it("returns 500 with a generic message when preparation fails, so no internals leak", async () => {
+    mockApprove.mockRejectedValueOnce(new Error("openrouter key sk-live-1234 rejected"));
+
+    await withTestServer({ workerSecret: "correct-secret", serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/worker/approve-attempt`, {
+        method: "POST",
+        headers: { Authorization: "Bearer correct-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ applicationAttemptId: "attempt-1" }),
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Failed to approve application attempt" });
+    });
+  });
+});
+
 describe("POST /api/worker/classify-messages", () => {
   const mockRun = vi.mocked(runMessageClassificationBatch);
   const batchResult = { scanned: 3, classified: 2, malformed: 0, errors: 1 };
@@ -1089,3 +2246,264 @@ describe("POST /api/worker/run-fit", () => {
     );
   });
 });
+
+describe("Task H1 billing routes", () => {
+  const PRICED_PLAN = {
+    code: "pro",
+    displayName: "Pro",
+    description: null,
+    tierRank: 2,
+    isActive: true,
+    limits: null,
+    prices: [
+      { region: "IN", currency: "INR", billingInterval: "month" as const, amountMinor: 249900, isActive: true },
+      { region: "US", currency: "USD", billingInterval: "month" as const, amountMinor: null, isActive: false },
+    ],
+  };
+
+  function withAuth(extra: Partial<CreateAppOptions> = {}): CreateAppOptions {
+    return { verifyAccessToken: testVerifier, serviceClient: {} as never, ...extra };
+  }
+
+  beforeEach(() => {
+    vi.mocked(listPlans).mockReset();
+    vi.mocked(readStripeConfig).mockReset();
+    vi.mocked(createCheckoutSession).mockReset();
+    vi.mocked(getCandidateSubscription).mockReset();
+    vi.mocked(cancelCandidateSubscription).mockReset();
+    vi.mocked(evaluateEntitlements).mockReset();
+    vi.mocked(getAdminBilling).mockReset();
+
+    vi.mocked(listPlans).mockResolvedValue([PRICED_PLAN]);
+    // Default: no STRIPE_SECRET_KEY, which is this deployment's real state.
+    // The stub returns not_configured to mirror what the real
+    // createCheckoutSession does with a null config — a vi.fn() returning
+    // undefined would test a shape the function cannot actually produce.
+    vi.mocked(readStripeConfig).mockReturnValue(null);
+    vi.mocked(createCheckoutSession).mockResolvedValue({ kind: "not_configured" });
+    vi.mocked(getCandidateSubscription).mockResolvedValue(null);
+    vi.mocked(evaluateEntitlements).mockResolvedValue({
+      hasLiveSubscription: false,
+      planCode: null,
+      planDisplayName: null,
+      evaluations: [],
+      allUnconfigured: true,
+    });
+  });
+
+  describe("GET /api/billing/plans", () => {
+    it("returns 401 when unauthenticated", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        expect((await fetch(base + "/api/billing/plans")).status).toBe(401);
+      });
+    });
+
+    it("returns the catalogue including deliberately unpriced regions", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        const response = await fetch(base + "/api/billing/plans", {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+
+        const body = (await response.json()) as { plans: Array<{ code: string; prices: unknown[] }> };
+        expect(body.plans).toHaveLength(1);
+        // The unpriced US row is present rather than omitted, so the pricing
+        // screen can say "not priced yet" instead of looking broken.
+        expect(body.plans[0]?.prices).toHaveLength(2);
+      });
+    });
+  });
+
+  describe("POST /api/billing/checkout-session", () => {
+    async function post(base: string, body: unknown) {
+      return fetch(base + "/api/billing/checkout-session", {
+        method: "POST",
+        headers: { Authorization: "Bearer valid-test-token", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it("rejects a missing plan code", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        expect((await post(base, { region: "IN", billingInterval: "month" })).status).toBe(400);
+      });
+    });
+
+    it("rejects a region outside the supported trio", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        expect((await post(base, { planCode: "pro", region: "XX", billingInterval: "month" })).status).toBe(400);
+      });
+    });
+
+    it("rejects an unknown billing interval", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        expect((await post(base, { planCode: "pro", region: "IN", billingInterval: "week" })).status).toBe(400);
+      });
+    });
+
+    it("reports 404 for a plan that does not exist", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        expect((await post(base, { planCode: "nope", region: "IN", billingInterval: "month" })).status).toBe(404);
+      });
+    });
+
+    it("refuses a region the plan is not priced for, rather than creating a free session", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        const response = await post(base, { planCode: "pro", region: "US", billingInterval: "month" });
+        expect(response.status).toBe(409);
+        expect(vi.mocked(createCheckoutSession)).not.toHaveBeenCalled();
+      });
+    });
+
+    it("answers 503 when no payment provider is configured, and invents no url", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        const response = await post(base, { planCode: "pro", region: "IN", billingInterval: "month" });
+        expect(response.status).toBe(503);
+
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toContain("not configured");
+        expect(JSON.stringify(body)).not.toContain("http");
+      });
+    });
+
+    it("returns the real Stripe session url when billing is configured", async () => {
+      vi.mocked(readStripeConfig).mockReturnValue({ secretKey: "sk_test", webhookSecret: null });
+      vi.mocked(createCheckoutSession).mockResolvedValue({
+        kind: "created",
+        sessionId: "cs_1",
+        url: "https://checkout.stripe.test/cs_1",
+      });
+
+      await withTestServer(withAuth(), async (base) => {
+        const response = await post(base, { planCode: "pro", region: "IN", billingInterval: "month" });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ sessionId: "cs_1", url: "https://checkout.stripe.test/cs_1" });
+      });
+    });
+
+    it("refuses a second subscription for a candidate who already has one", async () => {
+      vi.mocked(getCandidateSubscription).mockResolvedValue({
+        id: "sub-1",
+        planCode: "starter",
+        planDisplayName: "Starter",
+        provider: "stripe",
+        status: "active",
+        region: "IN",
+        currency: "INR",
+        billingInterval: "month",
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        cancelAtPeriodEnd: false,
+      });
+
+      await withTestServer(withAuth(), async (base) => {
+        expect((await post(base, { planCode: "pro", region: "IN", billingInterval: "month" })).status).toBe(409);
+      });
+    });
+  });
+
+  describe("POST /api/billing/cancel", () => {
+    it("returns 404 when there is nothing to cancel", async () => {
+      vi.mocked(cancelCandidateSubscription).mockResolvedValue({ kind: "no_subscription" });
+
+      await withTestServer(withAuth(), async (base) => {
+        const response = await fetch(base + "/api/billing/cancel", {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(404);
+      });
+    });
+
+    it("explains that a paid period runs to its end", async () => {
+      vi.mocked(cancelCandidateSubscription).mockResolvedValue({
+        kind: "canceled",
+        subscription: {
+          id: "sub-1",
+          planCode: "pro",
+          planDisplayName: "Pro",
+          provider: "stripe",
+          status: "active",
+          region: "IN",
+          currency: "INR",
+          billingInterval: "month",
+          currentPeriodStart: null,
+          currentPeriodEnd: "2026-10-01T00:00:00.000Z",
+          cancelAtPeriodEnd: true,
+        },
+      });
+
+      await withTestServer(withAuth(), async (base) => {
+        const response = await fetch(base + "/api/billing/cancel", {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+
+        const body = (await response.json()) as { note: string };
+        expect(body.note).toContain("close of the current billing period");
+      });
+    });
+  });
+
+  describe("POST /api/billing/webhook", () => {
+    it("answers 503 rather than skipping verification when no webhook secret is set", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        const response = await fetch(base + "/api/billing/webhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "checkout.session.completed" }),
+        });
+        expect(response.status).toBe(503);
+      });
+    });
+
+    it("rejects an unsigned event with 400 and applies nothing", async () => {
+      vi.mocked(readStripeConfig).mockReturnValue({ secretKey: "sk_test", webhookSecret: "whsec_test" });
+
+      await withTestServer(withAuth(), async (base) => {
+        const response = await fetch(base + "/api/billing/webhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "stripe-signature": "t=1,v1=deadbeef" },
+          body: JSON.stringify({ type: "checkout.session.completed", data: { object: {} } }),
+        });
+        expect(response.status).toBe(400);
+      });
+    });
+  });
+
+  describe("GET /api/admin/billing", () => {
+    it("returns 403 for an authenticated non-admin", async () => {
+      await withTestServer(withAuth({ checkIsAdmin: async () => false }), async (base) => {
+        const response = await fetch(base + "/api/admin/billing", {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      });
+    });
+
+    it("returns the real billing payload for an admin", async () => {
+      vi.mocked(getAdminBilling).mockResolvedValue({
+        candidates: [],
+        currencyTotals: [{ currency: "INR", monthlyRecurringRevenueMinor: 249900, payingCandidates: 1 }],
+        planCounts: [{ planCode: "pro", planDisplayName: "Pro", subscribers: 1 }],
+        prices: [],
+        configuredLimitValues: 0,
+        totalLimitValues: 27,
+        truncated: false,
+      });
+
+      await withTestServer(withAuth({ checkIsAdmin: async () => true }), async (base) => {
+        const response = await fetch(base + "/api/admin/billing", {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+
+        const body = (await response.json()) as { currencyTotals: unknown[]; totalLimitValues: number };
+        expect(body.currencyTotals).toHaveLength(1);
+        expect(body.totalLimitValues).toBe(27);
+      });
+    });
+  });
+});
+

@@ -1,8 +1,35 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/**
+ * The file an attempt is submitting, resolved by resumeForSubmission.ts before
+ * the adapter is dispatched.
+ *
+ * Passed in rather than re-derived by each adapter, because "which resume does
+ * this application send" is one decision with one answer: the candidate's
+ * optimization preference, the base-resume lookup and the tailored-document
+ * link all have to agree, and an adapter that re-queried for itself would be a
+ * second, driftable copy of that decision — the same reasoning registry.ts uses
+ * for resolving adapters by source rather than letting gate logic guess.
+ */
+export interface SubmissionResume {
+  documentId: string;
+  storagePath: string;
+  originalFilename: string;
+  mimeType: string;
+  /**
+   * True when this file was generated for this application rather than
+   * uploaded by the candidate. Carried so an adapter (and the evidence it
+   * writes) can say honestly which of the two it sent.
+   */
+  tailored: boolean;
+  optimizationLevel: "off" | "honest" | "aggressive";
+}
+
 export interface ApplicationSubmissionContext {
   applicationAttemptId: string;
   applicationPlanId: string;
+  /** Absent only for callers that invoke an adapter directly in a test. */
+  resume?: SubmissionResume;
 }
 
 export interface ApplicationSubmissionResult {

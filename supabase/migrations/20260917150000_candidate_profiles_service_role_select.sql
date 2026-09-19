@@ -1,0 +1,20 @@
+-- service_role read access to candidate_profiles.
+--
+-- WHY. 20260812231617 created this table with "grant select, insert" to
+-- authenticated and deliberately nothing to service_role, which was correct
+-- while the table held only id and created_at. But server/admin/overview.ts
+-- counts it through the service-role client:
+--
+--   client.from("candidate_profiles").select("id", { count: "exact", head: true })
+--
+-- service_role bypasses RLS but NOT table privileges, so that query fails
+-- with "permission denied for table candidate_profiles" and getAdminOverview
+-- throws — meaning GET /api/admin/overview returns 500 and the Admin
+-- console's totalCandidates stat has been broken since R8.1. Confirmed
+-- against the live local stack before writing this migration, not inferred
+-- from reading the two files.
+--
+-- SELECT only. The server-side reads are counts; nothing server-side writes
+-- this table (its one writer is the browser, via lib/profile.ts). UPDATE
+-- stays where Mini-Phase 1 put it — column-scoped to authenticated.
+grant select on public.candidate_profiles to service_role;

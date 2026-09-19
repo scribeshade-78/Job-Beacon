@@ -189,7 +189,13 @@ describe("listOpportunities — query shape", () => {
     await listOpportunities(client);
 
     expect(recorded.orders[0]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
-    expect(recorded.orders[1]).toEqual(["last_seen_at", { ascending: false }]);
+    // Task I moved the ordering into shared/opportunityQuery.ts, which declares
+    // nullsFirst on EVERY clause rather than only on the one whose column is
+    // nullable. The tiebreak therefore now states nullsFirst: false explicitly
+    // where it previously inherited Postgres's default — which differs between
+    // ASC and DESC, and relying on it is how a descending sort silently puts
+    // nulls first. The assertion stays exact; only the expected shape changed.
+    expect(recorded.orders[1]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
   });
 
   it("requests the default page when no options are given", async () => {
@@ -485,3 +491,51 @@ describe("listOpportunities — failures", () => {
     expect(result.kind).toBe("error");
   });
 });
+
+describe("Task I — the locally refreshed priority order is confined to best match", () => {
+  /**
+   * The bug this pins: listOpportunities re-sorted every page by the
+   * urgency-refreshed priority score. That is correct for best match and wrong
+   * for every other sort — SQL selected the page in the requested order and the
+   * local re-sort then scrambled it, while the panel still labelled it sorted.
+   *
+   * A non-priority sort is therefore asserted by giving the client rows whose
+   * SQL order is the REVERSE of their priority order, and requiring that order
+   * to survive.
+   */
+  const priorityDescending = [
+    viewRow({ id: "row-high-priority", priority_score: 90 }),
+    viewRow({ id: "row-low-priority", priority_score: 10 }),
+  ];
+  const priorityAscending = [priorityDescending[1], priorityDescending[0]];
+
+  function idsOf(result: Awaited<ReturnType<typeof listOpportunities>>): string[] {
+    return (result as { opportunities: Array<{ id: string }> }).opportunities.map((entry) => entry.id);
+  }
+
+  it("preserves SQL's order for the newest sort", async () => {
+    const { client } = makeClient({ data: priorityAscending });
+
+    expect(idsOf(await listOpportunities(client, { sort: "newest" }))).toEqual([
+      "row-low-priority",
+      "row-high-priority",
+    ]);
+  });
+
+  it("preserves SQL's order for the highest salary sort", async () => {
+    const { client } = makeClient({ data: priorityAscending });
+
+    expect(idsOf(await listOpportunities(client, { sort: "highest_salary" }))).toEqual([
+      "row-low-priority",
+      "row-high-priority",
+    ]);
+  });
+
+  // The best-match re-sort itself is NOT re-asserted here. Rows without a fit
+  // analysis carry no refreshed score, so two such rows tie and the local sort
+  // is a no-op that would make a test pass for the wrong reason; the existing
+  // page-local ordering tests, which build real scored rows via scoredRow(),
+  // already cover it. What this block pins is the new boundary: the re-sort must
+  // not touch the other sorts.
+});
+

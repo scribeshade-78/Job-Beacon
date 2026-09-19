@@ -378,6 +378,49 @@ function parseAmountToken(token: string): number | null {
  * @param country - ISO country code from target config, or null. Jooble's
  *   payload has no country field to fall back on.
  */
+/**
+ * Work-arrangement classification (Mini-Phase 3).
+ *
+ * Jooble's payload carries NO remote/hybrid flag — the documented fields are
+ * id, link, type, title, salary, source, company, snippet, updated and
+ * location, and `type` is an employment type (Full-time/Temporary), not a
+ * work arrangement. The only signal available is the freeform `location`
+ * string, so this is deliberately conservative by explicit product decision:
+ * a location that mentions "remote" becomes 'remote', and EVERYTHING ELSE
+ * stays null rather than being inferred.
+ *
+ * What is deliberately NOT done, with the evidence for each:
+ *
+ *  - `snippet` is never parsed. Jooble returns a ~200-character excerpt
+ *    truncated with "..." at BOTH ends. In the live corpus of 64 Jooble
+ *    vacancies, 16 rows whose location is a plain place name nonetheless
+ *    mention "remote" somewhere in that excerpt (location "North Dakota" +
+ *    "Lead AiML Engineer: Remote Key Responsibilities"; location "Illinois" +
+ *    "Lead Data Engineer position Remote"), so the excerpt contradicts the
+ *    location field about as often as it agrees with it — and a truncated
+ *    excerpt can never prove ABSENCE of the word either.
+ *
+ *  - 'hybrid' is never produced. Exactly one snippet in the corpus says
+ *    "Hybrid"; no location value does.
+ *
+ *  - 'on_site' is never produced. It could only be inferred from "the
+ *    location is a city", which is an inference rather than a fact, and it
+ *    would feed practicalEligibility.ts a claim Jooble never made — that
+ *    check short-circuits to "fully eligible, no location blocker" the
+ *    moment remote_type is 'remote', so a wrong positive is not cosmetic.
+ *
+ * Net effect: this adapter only ever moves the column null -> 'remote'.
+ */
+const JOOBLE_REMOTE_LOCATION_PATTERN = /remote/i;
+
+export function parseJoobleRemoteType(location: unknown): "remote" | null {
+  if (typeof location !== "string") {
+    return null;
+  }
+
+  return JOOBLE_REMOTE_LOCATION_PATTERN.test(location) ? "remote" : null;
+}
+
 export function normalizeJoobleJob(job: JoobleJob, country: string | null): DiscoveredVacancy | null {
   const id = job.id;
   const link = typeof job.link === "string" ? job.link.trim() : "";
@@ -404,10 +447,10 @@ export function normalizeJoobleJob(job: JoobleJob, country: string | null): Disc
     // decomposed into region/city without guessing.
     region: null,
     city: null,
-    // Jooble's documented fields include no remote/hybrid indicator. `type` is
-    // an employment type (Full-time/Part-time), not a work arrangement, so it
-    // is not mapped here.
-    remoteType: null,
+    // Derived from `location` only — see parseJoobleRemoteType for what is
+    // deliberately not parsed and why. null when the location says nothing
+    // about a work arrangement, which is the majority case.
+    remoteType: parseJoobleRemoteType(job.location),
     currency: salary.currency,
     salaryMin: salary.min,
     salaryMax: salary.max,

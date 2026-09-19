@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { LogOut } from "lucide-react";
+import { Link } from "wouter";
+import { ArrowLeft, LogOut } from "lucide-react";
 import { APP_NAME } from "../../../shared/app";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
@@ -264,12 +265,37 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
 
   return (
     <div className="min-h-screen bg-ios-bg">
+      {/* This page renders bare — App.tsx mounts /employer outside AppShell,
+          so unlike every other candidate screen there is no sidebar and
+          therefore no navigation at all. Without this link the only ways out
+          were the browser's back button or logging out, which is a dead end
+          for a route the sidebar links to unconditionally (R5.4a: it can't
+          be gated on already being a verified employer, so any candidate can
+          land here by mistake). A real Link to "/" rather than
+          history.back() — back() is undefined behaviour when this is the
+          first entry in the history stack, e.g. a bookmarked or pasted URL. */}
       <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-ios-separator bg-ios-card/80 px-6 backdrop-blur-md">
-        <span className="text-base font-semibold text-black">{APP_NAME} — Employer</span>
+        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+          <Link
+            href="/"
+            aria-label="Back to Dashboard"
+            className="flex shrink-0 items-center gap-1.5 rounded-control px-2.5 py-1.5 text-sm font-medium text-ios-blue hover:bg-ios-blue/10"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+            {/* Below sm the full label would crowd out the page title, so it
+                shortens rather than disappearing — an icon-only control here
+                would be the same discoverability problem this fixes. */}
+            <span className="hidden sm:inline">Back to Dashboard</span>
+            <span className="sm:hidden">Back</span>
+          </Link>
+          <span className="truncate text-base font-semibold text-black">
+            <span className="hidden sm:inline">{APP_NAME} — </span>Employer
+          </span>
+        </div>
         <button
           type="button"
           onClick={onLogout}
-          className="flex items-center gap-2 rounded-control px-3 py-1.5 text-sm font-medium text-black hover:bg-ios-bg"
+          className="flex shrink-0 items-center gap-2 rounded-control px-3 py-1.5 text-sm font-medium text-black hover:bg-ios-bg"
         >
           <LogOut className="h-4 w-4" aria-hidden="true" />
           Log out

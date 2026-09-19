@@ -101,7 +101,7 @@ function SignedInRoutes({
           <TargetRolesPage candidateId={candidateId} ready={ready} />
         </Route>
         <Route path="/opportunities">
-          <OpportunitiesPage />
+          <OpportunitiesPage candidateId={candidateId} />
         </Route>
         <Route path="/applications">
           <ApplicationsPage ready={ready} />

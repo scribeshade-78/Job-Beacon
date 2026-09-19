@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(11);
+select plan(14);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- application_plans grants/RLS this fixture also touches are covered in
@@ -125,6 +125,59 @@ select throws_ok(
   '42501',
   null,
   'anon cannot SELECT application_attempts — no privilege granted'
+);
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- Task V: the candidate review workflow.
+--
+-- The approval endpoints are server-side because there is no safe way to let a
+-- browser do this: the ownership check, the "a resume must exist first" check
+-- and the status transition all have to happen together, and a client that
+-- could write status directly would bypass every one of them. These three
+-- assertions are what makes that a property of the database rather than a
+-- property of the API's good manners.
+-- ---------------------------------------------------------------------------
+
+insert into application_attempts (id, application_plan_id, status)
+values ('aaaa1111-7002-1111-1111-111111111111', 'ffffffff-7002-1111-1111-111111111111', 'pending_review');
+
+-- 12. Candidate A cannot approve their own held attempt by writing the status
+-- directly — there is no UPDATE privilege, so the review gate cannot be
+-- self-served through PostgREST.
+set local role authenticated;
+set local request.jwt.claim.sub = '11111111-7002-1111-1111-111111111111';
+select throws_ok(
+  $$update application_attempts set status = 'pending'
+      where id = 'aaaa1111-7002-1111-1111-111111111111'$$,
+  '42501',
+  null,
+  'Candidate A cannot approve their own pending_review attempt by writing status directly'
+);
+reset role;
+
+-- 13. Candidate B cannot even see Candidate A's held attempt, so the review
+-- workflow has nothing to act on across candidates even before the API's own
+-- ownership comparison runs.
+set local role authenticated;
+set local request.jwt.claim.sub = '22222222-7002-1111-1111-111111111111';
+select is_empty(
+  $$select id from application_attempts where id = 'aaaa1111-7002-1111-1111-111111111111'$$,
+  'Candidate B cannot see Candidate A''s pending_review attempt'
+);
+reset role;
+
+-- 14. service_role can release it — the transition both approval endpoints
+-- perform, and the only role that can.
+set local role service_role;
+update application_attempts
+  set status = 'pending', review_approved_at = now()
+  where id = 'aaaa1111-7002-1111-1111-111111111111' and status = 'pending_review';
+select results_eq(
+  $$select status, review_approved_at is not null from application_attempts
+      where id = 'aaaa1111-7002-1111-1111-111111111111'::uuid$$,
+  $$values ('pending'::text, true)$$,
+  'service_role can release a held attempt to pending, stamping review_approved_at'
 );
 reset role;
 

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { AtsSubmissionError } from "./adapters/errors.js";
 import { createActionRequiredEvent } from "./actionRequired.js";
 import {
   ActionRequiredSubmissionError,
@@ -65,9 +66,17 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
       payload: result.payload,
     });
 
+    // succeeded_at is written HERE, on the transition, and nowhere else. It is
+    // the timestamp the anti-ghosting detector measures from, and it exists
+    // because updated_at cannot serve: that column means "last modified" and
+    // moves for unrelated writes (generating a cover letter touches the row).
+    // A seven-day clock keyed on a column that other code rewrites would reset
+    // silently and the application would never be flagged.
+    const succeededAt = new Date().toISOString();
+
     await client
       .from("application_attempts")
-      .update({ status: "succeeded", updated_at: new Date().toISOString() })
+      .update({ status: "succeeded", succeeded_at: succeededAt, updated_at: succeededAt })
       .eq("id", attempt.id);
 
     return { processed: true, applicationAttemptId: attempt.id, outcome: "succeeded" };
@@ -111,13 +120,35 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
 
     const message = error instanceof Error ? error.message : String(error);
 
+    // Task H3, PRD §16.2 "handles validation/rate limits". A classified ATS
+    // failure carries whether retrying could possibly help; anything else is an
+    // unclassified error and is treated as retryable, which is the pre-H3
+    // behaviour and the safe default.
+    const atsError = error instanceof AtsSubmissionError ? error : null;
+    const retryable = atsError ? atsError.retryable : true;
+
     await client.from("application_evidence").insert({
       application_attempt_id: attempt.id,
       evidence_type: "submission_error",
-      payload: { message },
+      payload: {
+        message,
+        ...(atsError
+          ? {
+              reasonCode: atsError.reasonCode,
+              httpStatus: atsError.status,
+              retryable: atsError.retryable,
+              retryAfterSeconds: atsError.retryAfterSeconds,
+            }
+          : {}),
+      },
     });
 
-    const exhausted = attempt.attempts >= attempt.max_attempts;
+    // A validation rejection is terminal on the FIRST attempt, not after
+    // max_attempts. The employer's form refused what we sent and will refuse it
+    // again; retrying four times by exponential backoff burns that employer's
+    // API budget and delays telling the candidate their application needs
+    // attention. This is the "validation" half of §16.2.
+    const exhausted = attempt.attempts >= attempt.max_attempts || !retryable;
 
     if (exhausted) {
       // Dead-letter: claim_application_attempt's WHERE clause never
@@ -133,7 +164,13 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
       // doesn't check leased_until for 'pending' rows) — staying
       // 'leased' with a future leased_until is what actually delays the
       // retry. Same backoff formula as runOneIngestionJob.
-      const backoffMinutes = Math.min(2 ** attempt.attempts, 60);
+      // The provider's Retry-After wins when it is longer than our own backoff —
+      // it is the party that knows when it will accept requests again. Ignoring
+      // it would mean hammering a rate-limited endpoint on a schedule we chose
+      // rather than the one we were asked to keep.
+      const exponentialMinutes = Math.min(2 ** attempt.attempts, 60);
+      const providerMinutes = atsError?.retryAfterSeconds != null ? atsError.retryAfterSeconds / 60 : 0;
+      const backoffMinutes = Math.max(exponentialMinutes, providerMinutes);
       await client
         .from("application_attempts")
         .update({

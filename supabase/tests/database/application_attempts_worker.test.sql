@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(17);
+select plan(23);
 
 -- Fixture setup (as postgres, bypasses RLS — not under test; the
 -- application_plans/application_attempts grants/RLS this fixture also
@@ -211,6 +211,77 @@ select throws_ok(
   '23514',
   null,
   'application_attempts.status still rejects an arbitrary invalid value'
+);
+
+-- ---------------------------------------------------------------------------
+-- Task U: the review gate.
+--
+-- The gate is enforced by the leasing query being an ALLOWLIST over 'pending'
+-- — a 'pending_review' row matches no clause of it. That is a property of the
+-- SQL text, and reading the SQL is not evidence; these assertions run it.
+-- ---------------------------------------------------------------------------
+
+-- Every leftover attempt from the tests above is forced terminal first, so the
+-- claims below can only ever see this block's own fixture rows. Without this,
+-- "the held attempt was not claimed" would pass whenever the function happened
+-- to claim some other row instead.
+update application_attempts set status = 'succeeded'
+  where status in ('pending', 'pending_review', 'leased');
+
+-- 18. the CHECK constraint accepts the new status
+select lives_ok(
+  $$insert into application_attempts (id, application_plan_id, status)
+      values ('aaaaaaaa-8000-2222-2222-222222222222', 'ffffffff-9000-1111-1111-111111111111', 'pending_review')$$,
+  'application_attempts.status accepts ''pending_review'''
+);
+
+-- Candidate A is authorized throughout, so the sweep cannot be what spares
+-- this row — the leasing query alone has to refuse it.
+--
+-- 19. the held attempt is not claimed
+select is_empty(
+  $$select id from claim_application_attempt()$$,
+  'A pending_review attempt is never claimed, even though it is the only non-terminal attempt'
+);
+
+-- 20. and it was not quietly leased or partly advanced on the way past
+select results_eq(
+  $$select status, attempts, leased_until from application_attempts
+      where id = 'aaaaaaaa-8000-2222-2222-222222222222'::uuid$$,
+  $$values ('pending_review'::text, 0, null::timestamptz)$$,
+  'The held attempt is left completely untouched by a claim: still pending_review, attempts still 0, never leased'
+);
+
+-- 21. approving it — the transition POST /api/worker/approve-attempt performs —
+-- is what makes it claimable. Nothing else changed.
+update application_attempts
+  set status = 'pending', review_approved_at = now()
+  where id = 'aaaaaaaa-8000-2222-2222-222222222222' and status = 'pending_review';
+
+select results_eq(
+  $$select id, status, attempts from claim_application_attempt()$$,
+  $$values ('aaaaaaaa-8000-2222-2222-222222222222'::uuid, 'leased'::text, 1)$$,
+  'Once approved, the same attempt is claimed normally and leased'
+);
+
+-- 22. review_approved_at was never set on a path that did not approve anything
+-- (the row inserted for candidate C below is never approved).
+-- Candidate C is 'stopped' (fixture above), so this row is also the sweep test.
+insert into application_attempts (id, application_plan_id, status)
+values ('bbbbbbbb-8000-2222-2222-222222222222', 'ffffffff-9002-1111-1111-111111111111', 'pending_review');
+
+select is_empty(
+  $$select id from claim_application_attempt() where id = 'bbbbbbbb-8000-2222-2222-222222222222'::uuid$$,
+  'An attempt held for review on a stopped candidate is still never claimed'
+);
+
+-- 23. the sweep cancels it, so the review queue does not keep offering work
+-- that can no longer happen.
+select results_eq(
+  $$select status, review_approved_at from application_attempts
+      where id = 'bbbbbbbb-8000-2222-2222-222222222222'::uuid$$,
+  $$values ('cancelled'::text, null::timestamptz)$$,
+  'A held attempt for a stopped candidate is cancelled by the sweep, with review_approved_at still null'
 );
 
 reset role;

@@ -1,0 +1,7 @@
+{
+  "providerMessageId": "mock-employer-rejection-001",
+  "from": "Local Fixture Employer Recruiting <jobs@mock-employer.test>",
+  "subject": "Your application for Data Engineer (Reference: local-fixture-1)",
+  "date": "2026-09-18T09:15:00.000Z",
+  "body": "Dear candidate,\n\nThank you for applying for the Data Engineer role at Local Fixture Employer\n(reference local-fixture-1).\n\nAfter careful consideration, we have decided not to progress your application\nto the next stage on this occasion. The team was impressed by your background,\nand we would encourage you to apply again for future openings.\n\nWe wish you the very best in your search.\n\nKind regards,\nLocal Fixture Employer Talent Team"
+}

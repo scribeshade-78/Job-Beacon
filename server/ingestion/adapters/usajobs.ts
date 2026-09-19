@@ -44,6 +44,40 @@ interface UsajobsMatchedObjectDescriptor {
   PositionLocationDisplay?: string;
   PublicationStartDate?: string;
   PositionRemuneration?: UsajobsPositionRemuneration[];
+  /**
+   * The nested "User Area" carries the fields the search response does not
+   * surface at the top level. Only RemoteIndicator is consumed here; the rest
+   * (MajorDuties, KeyRequirements, Education, ...) is preserved verbatim in
+   * vacancy_versions.raw_payload and is what the JD extractor reads.
+   */
+  UserArea?: {
+    Details?: {
+      RemoteIndicator?: boolean;
+    };
+  };
+}
+
+/**
+ * Work-arrangement classification (Mini-Phase 3).
+ *
+ * USAJOBS DOES expose a real, standardised boolean for this —
+ * UserArea.Details.RemoteIndicator. Verified against all 25 stored live
+ * payloads (every one currently false), which also retires one caveat in this
+ * file's header: the field mapping was written from secondary sources, but
+ * this specific field is now confirmed against real API responses.
+ *
+ * Only the POSITIVE is trusted. A government dataset commonly leaves a
+ * boolean false as "unspecified" rather than as an explicit denial, so
+ * mapping false -> 'on_site' would assert a work arrangement the posting
+ * never claimed. Absence and false are therefore both null, and this adapter
+ * only ever produces 'remote' or null — never 'hybrid' or 'on_site'.
+ *
+ * The direction matters: practicalEligibility.ts short-circuits to "score
+ * 100, no hard blockers" when remote_type is 'remote', so a false positive
+ * here silently removes a candidate's location blocker.
+ */
+export function parseUsajobsRemoteType(remoteIndicator: unknown): "remote" | null {
+  return remoteIndicator === true ? "remote" : null;
 }
 
 interface UsajobsSearchResponse {
@@ -104,7 +138,9 @@ export async function discoverUsajobs(
       // Same freeform-string ambiguity as Greenhouse/Lever — not
       // decomposed into region/city without guessing.
       city: null,
-      remoteType: null,
+      // Only RemoteIndicator === true maps; false and absent both stay null —
+      // see parseUsajobsRemoteType.
+      remoteType: parseUsajobsRemoteType(item.UserArea?.Details?.RemoteIndicator),
       currency: min !== null || max !== null ? "USD" : null,
       salaryMin: min,
       salaryMax: max,

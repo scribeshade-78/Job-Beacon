@@ -22,6 +22,81 @@ interface PlanRow {
   } | null;
 }
 
+export interface ClassifiedMessageEntities {
+  extracted_company: string | null;
+  extracted_role: string | null;
+  extracted_job_id: string | null;
+}
+
+export type SingleMessageLinkOutcome =
+  | { kind: "auto"; attemptId: string; confidence: number; reasons: string[]; linked: boolean }
+  | { kind: "review"; candidates: unknown[] }
+  | { kind: "ambiguous"; candidates: unknown[] }
+  | { kind: "none" };
+
+/**
+ * Scores one classified message against one candidate's applications and, on a
+ * confident match, writes the link.
+ *
+ * Extracted so the batch below and server/integrations/emailParser.ts share ONE
+ * implementation of "what a link is". The write is three fields on the message
+ * (application_attempt_id plus the application_match evidence) and it is the
+ * only mutation either path performs — there is no attempt or plan status to
+ * update, because the candidate-visible stage is derived from this link. See
+ * emailParser.ts for why that matters.
+ *
+ * The update is guarded with .is("application_attempt_id", null) so a
+ * concurrent or repeated pass cannot overwrite an existing link with a
+ * different one.
+ */
+export async function matchOneClassifiedMessage(
+  client: SupabaseClient,
+  message: { id: string; sender: string | null },
+  classification: ClassifiedMessageEntities,
+  apps: CandidateApplication[],
+): Promise<SingleMessageLinkOutcome> {
+  const input: MatchInput = {
+    sender: message.sender,
+    company: classification.extracted_company,
+    role: classification.extracted_role,
+    jobId: classification.extracted_job_id,
+  };
+
+  const match = scoreApplicationMatch(input, apps);
+
+  if (match.kind !== "auto") {
+    return match;
+  }
+
+  const { data: updated, error } = await client
+    .from("messages")
+    .update({
+      application_attempt_id: match.attemptId,
+      application_match: {
+        confidence: match.confidence,
+        reasons: match.reasons,
+        matched_at: new Date().toISOString(),
+      },
+    })
+    .eq("id", message.id)
+    .is("application_attempt_id", null)
+    .select("id");
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    kind: "auto",
+    attemptId: match.attemptId,
+    confidence: match.confidence,
+    reasons: match.reasons,
+    // A zero-row update means something linked it first; the link is real
+    // either way, so this reports whether THIS call was the one that wrote it.
+    linked: (updated ?? []).length > 0,
+  };
+}
+
 export interface RunApplicationMatchBatchResult {
   scanned: number;
   linked: number;
@@ -38,7 +113,7 @@ export interface RunApplicationMatchBatchResult {
  * scorer would make identical scores and force a permanent "ambiguous"
  * verdict, so they collapse to the newest attempt here.
  */
-async function loadCandidateApplications(
+export async function loadCandidateApplications(
   client: SupabaseClient,
   candidateId: string,
 ): Promise<CandidateApplication[]> {
@@ -133,34 +208,15 @@ export async function runApplicationMatchBatch(
         appCache.set(candidateId, apps);
       }
 
-      const input: MatchInput = {
-        sender: row.sender,
-        company: classification.extracted_company,
-        role: classification.extracted_role,
-        jobId: classification.extracted_job_id,
-      };
-      const match = scoreApplicationMatch(input, apps);
+      const match = await matchOneClassifiedMessage(
+        client,
+        { id: row.id, sender: row.sender },
+        classification,
+        apps,
+      );
 
       if (match.kind === "auto") {
-        const { error: updateError } = await client
-          .from("messages")
-          .update({
-            application_attempt_id: match.attemptId,
-            application_match: {
-              confidence: match.confidence,
-              reasons: match.reasons,
-              matched_at: new Date().toISOString(),
-            },
-          })
-          .eq("id", row.id)
-          .is("application_attempt_id", null);
-
-        if (updateError) {
-          result.errors += 1;
-          console.error("[mailbox:match] failed to write link", { messageId: row.id, error: updateError.message });
-        } else {
-          result.linked += 1;
-        }
+        result.linked += 1;
       } else if (match.kind === "review") {
         result.review += 1;
         console.warn("[mailbox:match] review", { messageId: row.id, candidates: match.candidates });

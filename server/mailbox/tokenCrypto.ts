@@ -18,21 +18,47 @@ const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
-export function readMailboxEncryptionKey(env: Record<string, string | undefined> = process.env): Buffer {
-  const raw = env.MAILBOX_TOKEN_ENCRYPTION_KEY;
+/**
+ * Reads a base64 AES-256-GCM key from a named environment variable.
+ *
+ * Extracted at Task H3, when employer ATS credentials became a second thing
+ * needing envelope encryption under its own key. The validation is identical and
+ * duplicating it would have meant two places for "must be exactly 32 bytes" to
+ * be got right — and a weaker check in one of them would silently accept a
+ * short key.
+ */
+export function readEncryptionKey(
+  envVarName: string,
+  env: Record<string, string | undefined> = process.env,
+): Buffer {
+  const raw = env[envVarName];
 
   if (!raw) {
-    throw new Error("Missing MAILBOX_TOKEN_ENCRYPTION_KEY — required to encrypt/decrypt mailbox OAuth tokens.");
+    throw new Error("Missing " + envVarName + " — required to encrypt/decrypt stored secrets.");
   }
 
   const key = Buffer.from(raw, "base64");
 
   if (key.length !== 32) {
-    throw new Error("MAILBOX_TOKEN_ENCRYPTION_KEY must decode (base64) to exactly 32 bytes for AES-256-GCM.");
+    throw new Error(envVarName + " must decode (base64) to exactly 32 bytes for AES-256-GCM.");
   }
 
   return key;
 }
+
+export function readMailboxEncryptionKey(env: Record<string, string | undefined> = process.env): Buffer {
+  return readEncryptionKey("MAILBOX_TOKEN_ENCRYPTION_KEY", env);
+}
+
+/**
+ * Generic aliases. The two primitives below were named for their first caller,
+ * not their only one: they are plain AES-256-GCM over (key, bytes) and know
+ * nothing about mailboxes. Task H3's employer ATS credentials use them under a
+ * different key, and calling encryptMailboxSecret from ATS code would have read
+ * as though the two secrets shared a trust domain when they deliberately do not.
+ */
+export const encryptSecret = encryptMailboxSecret;
+export const decryptSecret = decryptMailboxSecret;
 
 /** iv || authTag || ciphertext, base64-encoded — a single opaque string fits mailbox_connections.secret_manager_key's existing `text` column with no schema change. */
 export function encryptMailboxSecret(key: Buffer, plaintext: string): string {

@@ -86,11 +86,16 @@ describe("listResumes", () => {
       ],
       error: null,
     });
-    const select = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
     const from = vi.fn(() => ({ select }));
     const client = { from } as unknown as Parameters<typeof listResumes>[0];
 
     const result = await listResumes(client);
+
+    // Tailored resumes are kind='tailored' and must never reach this list —
+    // they are generated per application and the candidate never chose them.
+    expect(eq).toHaveBeenCalledWith("kind", "uploaded");
 
     expect(result).toEqual({
       kind: "success",
@@ -109,7 +114,8 @@ describe("listResumes", () => {
 
   it("returns a generic error when the query rejects", async () => {
     const order = vi.fn().mockRejectedValue(new Error("connection refused at 10.0.0.5"));
-    const select = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
     const from = vi.fn(() => ({ select }));
     const client = { from } as unknown as Parameters<typeof listResumes>[0];
 

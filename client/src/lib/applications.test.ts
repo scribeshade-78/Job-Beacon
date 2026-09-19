@@ -1,5 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { listApplications } from "./applications";
+import {
+  APPLICATION_ATTEMPT_STATUSES,
+  ATTEMPT_STATUS_LABELS,
+  listApplications,
+} from "./applications";
+
+describe("ATTEMPT_STATUS_LABELS", () => {
+  it("labels every status, so no lifecycle state renders as a raw database token", () => {
+    // The panel falls back to the raw status, which is tolerable for a missing
+    // label only if someone notices. This is what makes adding a status without
+    // a label fail here instead of in front of a candidate.
+    for (const status of APPLICATION_ATTEMPT_STATUSES) {
+      expect(ATTEMPT_STATUS_LABELS[status]).toBeTruthy();
+    }
+
+    expect(Object.keys(ATTEMPT_STATUS_LABELS).sort()).toEqual([...APPLICATION_ATTEMPT_STATUSES].sort());
+  });
+
+  it("gives the review hold a label that says what the candidate is expected to do", () => {
+    expect(ATTEMPT_STATUS_LABELS.pending_review).toBe("Awaiting your review");
+  });
+
+  it("distinguishes a status from the one next to it rather than repeating a word", () => {
+    // 'pending' and 'pending_review' differ only by whether the candidate has
+    // to act, which is exactly the distinction the labels must carry.
+    expect(ATTEMPT_STATUS_LABELS.pending).not.toBe(ATTEMPT_STATUS_LABELS.pending_review);
+  });
+});
 
 describe("listApplications", () => {
   it("maps plan rows, joined vacancy, and nested attempts on success", async () => {
@@ -42,6 +69,11 @@ describe("listApplications", () => {
           vacancyUrl: "https://example.com/jobs/1",
           eligible: true,
           createdAt: "2026-08-18T00:00:00Z",
+          // No messages embedded on this row, so no response stages — and,
+          // importantly, NOT 'rejection': the attempt is 'failed', which means
+          // the submission worker could not send it, not that the employer
+          // turned the candidate down.
+          responseCategories: [],
           attempts: [
             {
               id: "attempt-1",
@@ -57,6 +89,103 @@ describe("listApplications", () => {
       ],
     });
     expect(from).toHaveBeenCalledWith("application_plans");
+  });
+
+  it("requests the three-level embed down to response classifications", async () => {
+    const order = vi.fn().mockResolvedValue({ data: [], error: null });
+    // Declared with its parameter so calls[0][0] is typed as the column string.
+    const select = vi.fn((_columns: string) => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    await listApplications(client);
+
+    const columns = select.mock.calls[0][0];
+    expect(columns).toContain("application_attempts");
+    expect(columns).toContain("messages");
+    expect(columns).toContain("response_classifications");
+  });
+
+  it("derives response categories from the classifications reachable through its attempts", async () => {
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "plan-4",
+          vacancy_id: "vac-4",
+          gate_results: { eligible: true },
+          created_at: "2026-08-18T00:00:00Z",
+          vacancies: { raw_title: "Data Engineer", authoritative_url: "https://example.com/jobs/4" },
+          application_attempts: [
+            {
+              id: "attempt-4",
+              status: "succeeded",
+              attempts: 1,
+              max_attempts: 5,
+              last_error: null,
+              created_at: "2026-08-18T00:01:00Z",
+              updated_at: "2026-08-18T00:05:00Z",
+              messages: [
+                { response_classifications: [{ category: "interview" }] },
+                { response_classifications: [{ category: "interview" }] },
+                { response_classifications: [] },
+                { response_classifications: null },
+              ],
+            },
+          ],
+        },
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    const result = await listApplications(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      // Deduplicated across messages, and null/empty embeds contribute nothing.
+      expect(result.applications[0].responseCategories).toEqual(["interview"]);
+    }
+  });
+
+  it("drops a response category this bundle does not recognise", async () => {
+    // response_classifications.category has no CHECK constraint, so a newer
+    // taxonomy can write a value this build has no stage chip for.
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "plan-5",
+          vacancy_id: "vac-5",
+          gate_results: { eligible: true },
+          created_at: "2026-08-18T00:00:00Z",
+          vacancies: null,
+          application_attempts: [
+            {
+              id: "attempt-5",
+              status: "succeeded",
+              attempts: 1,
+              max_attempts: 5,
+              last_error: null,
+              created_at: "2026-08-18T00:01:00Z",
+              updated_at: "2026-08-18T00:05:00Z",
+              messages: [{ response_classifications: [{ category: "coding_challenge" }, { category: "offer" }] }],
+            },
+          ],
+        },
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    const result = await listApplications(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.applications[0].responseCategories).toEqual(["offer"]);
+    }
   });
 
   it("returns an ineligible plan with no attempts as an empty attempts array", async () => {

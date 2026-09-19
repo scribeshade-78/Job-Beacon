@@ -161,8 +161,23 @@ select lives_ok(
 );
 reset role;
 
--- 17. Deleting the candidate_profiles row cascades to delete their selected roles
+-- 17. Deleting the candidate_profiles row cascades to delete their selected roles.
+--
+-- The enqueue mesh's row trigger on candidate_selected_roles is switched off
+-- for this one statement (and back on straight after). It re-enqueues fit jobs
+-- for the candidate across every VERIFIED vacancy in the database, and the
+-- candidate_profiles row it would enqueue them for is the one this statement
+-- deletes — so on a database that actually has VERIFIED vacancies, which this
+-- one now does, the cascade raises fit_analysis_jobs_candidate_id_fkey. The
+-- trigger has nothing to do with the cascade under test, and ON DELETE CASCADE
+-- is an FK action rather than a user trigger, so the cascade still runs and a
+-- cascade regression still fails here. Both statements are inside this file's
+-- transaction and roll back with it.
+alter table public.candidate_selected_roles
+  disable trigger fit_enqueue_on_selected_roles_trigger;
 delete from candidate_profiles where id = '22222222-9001-1111-1111-111111111111';
+alter table public.candidate_selected_roles
+  enable trigger fit_enqueue_on_selected_roles_trigger;
 select is_empty(
   $$select id from candidate_selected_roles where candidate_id = '22222222-9001-1111-1111-111111111111'$$,
   'Deleting the candidate_profiles row cascades to delete their selected roles'

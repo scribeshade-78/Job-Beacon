@@ -1,0 +1,15 @@
+From: "Talent Team" <talent@mock-employer.test>
+Subject: Interview invitation - Data Analyst (Reference: local-fixture-2)
+Date: 2026-09-18T11:30:00.000Z
+Message-ID: <mock-employer-interview-002@mock-employer.test>
+
+Hi,
+
+Thanks for your application for the Data Analyst position at Local Fixture
+Employer, reference local-fixture-2.
+
+We would like to invite you to a 45 minute video interview. Please let us know
+your availability before 2026-09-25 so we can get it booked in.
+
+Best,
+Local Fixture Employer Talent Team

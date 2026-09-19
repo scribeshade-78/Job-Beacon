@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import { sanitizeUntrustedContent, wrapUntrustedContent } from "../security/sanitize.js";
 
 /**
  * Response Intelligence Phase 2.1 — Technical Fit analysis (Opportunity
@@ -159,13 +160,26 @@ export function isValidRawFitAnalysis(value: unknown): value is RawFitAnalysis {
   return true;
 }
 
+/**
+ * Task H4, RI PRD §10.3: "JD ... text are data, never trusted instructions".
+ *
+ * A job description is scraped from a third-party board, which makes it the most
+ * attacker-controllable text this product feeds a model — a posting is free to
+ * contain anything, and it is read by a call that decides whether the candidate
+ * applies. The JD is therefore sanitized and wrapped exactly as the email body is.
+ *
+ * The role title is left alone: it comes from the vacancy record rather than from
+ * the posting body, and it is a single line the model reads as a heading.
+ */
 function renderInput(input: FitAnalysisInput): string {
+  const jd = sanitizeUntrustedContent(input.jdText, { html: true }).text;
+
   return [
     `ROLE: ${input.roleTitle}`,
     "",
     "JOB DESCRIPTION:",
     input.sectionHeadings.length > 0 ? `(sections: ${input.sectionHeadings.join(" | ")})` : "",
-    input.jdText,
+    wrapUntrustedContent("JOB DESCRIPTION", jd),
     "",
     "CANDIDATE CONFIRMED FACTS:",
     input.factLines.length > 0 ? input.factLines.map((l) => `- ${l}`).join("\n") : "(none confirmed)",

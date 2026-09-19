@@ -1,0 +1,74 @@
+# Task J — production topology.
+#
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# NO DATABASE CONTAINER, DELIBERATELY. Supabase is managed, so Postgres, Auth,
+# Storage and the REST layer all live outside this host. The only local
+# dependency the app has is the network route to SUPABASE_URL, which is why this
+# file is one service and not three.
+#
+# TLS IS NOT TERMINATED HERE EITHER. The port is published to the host's
+# loopback so a reverse proxy running ON THE HOST (Traefik, per the deployment
+# notes) can reach it while the container itself stays off the public internet.
+# If the proxy is instead a container on this same compose network, drop the
+# ports block entirely and let it address this service by name.
+#
+# This is distinct from ./docker-compose.yml, which is the DEVELOPMENT compose:
+# it mounts the source tree and runs "npm run dev". Using that one in production
+# would serve an unbuilt tree with a dev server.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jobbeacon:latest
+    container_name: jobbeacon-app
+
+    # unless-stopped, not always: a container an operator stopped on purpose
+    # should stay stopped across a host reboot.
+    restart: unless-stopped
+
+    # The real environment. .env.production is NOT in the repository and is not
+    # shipped by deploy.sh — it is placed on the host by hand, because it holds
+    # SUPABASE_SERVICE_ROLE_KEY and every other credential the app uses. The
+    # .dockerignore excludes .env files so they can never be baked into an image
+    # layer even by an accidental "COPY . .".
+    env_file:
+      - .env.production
+
+    environment:
+      # Repeated from the image on purpose so the reason is visible where the
+      # deployment is configured, not only buried in the Dockerfile: the server
+      # defaults HOST to 127.0.0.1, which would leave every published port dead.
+      HOST: "0.0.0.0"
+      PORT: "5000"
+      NODE_ENV: "production"
+
+    ports:
+      - "127.0.0.1:5000:5000"
+
+    # Inherits HEALTHCHECK from the image (GET /api/health), so "docker ps"
+    # reports health rather than only whether the process is alive.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5000/api/health').then(function(r){process.exit(r.ok?0:1)}).catch(function(){process.exit(1)})"
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+    # Bounded logs. The default json-file driver has no size limit, so a
+    # crash-looping container can fill the VPS disk — and a full disk takes the
+    # database connection pool and everything else down with it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    security_opt:
+      - no-new-privileges:true

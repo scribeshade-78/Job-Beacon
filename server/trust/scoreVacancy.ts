@@ -5,9 +5,9 @@ import { evaluatePositiveReasonCodes, type PositiveReasonCodeSignals } from "./p
 import { computeTrustScore, type TrustScoreSignals } from "./trustScore.js";
 import { enqueueFitJobsForVacancy } from "../opportunities/enqueue.js";
 
-const TRUST_SCORE_POLICY_VERSION = "r3-trust-score-v1";
+const TRUST_SCORE_POLICY_VERSION = "r3-trust-score-v2";
 
-type NonBlockedStatus = "VERIFIED" | "UNDER_REVIEW" | "FLAGGED";
+type NonBlockedStatus = "VERIFIED" | "VERIFIED_INCOMPLETE" | "UNDER_REVIEW" | "FLAGGED";
 
 export type ScoreVacancyOutcome =
   | { status: "BLOCKED"; reasonCodes: string[] }
@@ -15,16 +15,56 @@ export type ScoreVacancyOutcome =
 
 /**
  * Score buckets agreed for R3.4: 80+ VERIFIED, 50-79 UNDER_REVIEW, below 50
- * FLAGGED. VERIFIED_INCOMPLETE (a valid PRD §12.1 status the DB schema
- * already allows) is deliberately never produced here — deferred to R5,
- * which is when full registry data makes "legitimate but some non-critical
- * fields missing" distinguishable from "can't verify at all". Same for
- * EXPIRED_REMOVED and ACTION_REQUIRED — not this function's concern.
+ * FLAGGED. This is the pure score-to-label mapping and has no knowledge of
+ * sources; see resolveStatus for the one adjustment applied on top of it.
+ *
+ * EXPIRED_REMOVED and ACTION_REQUIRED are still never produced here — they
+ * describe states this function has no signal for.
  */
 function statusForScore(score: number): NonBlockedStatus {
   if (score >= 80) return "VERIFIED";
   if (score >= 50) return "UNDER_REVIEW";
   return "FLAGGED";
+}
+
+/**
+ * Turns the score's bucket into the status actually recorded, honouring a
+ * source's declaration that its imports are legitimately incomplete.
+ *
+ * WHAT VERIFIED_INCOMPLETE MEANS, in this schema's own vocabulary (PRD §12.1):
+ * "legitimate but some non-critical fields missing" — as distinct from
+ * UNDER_REVIEW's "we could not establish that this employer is who the listing
+ * says". Before this, the status could never be produced by scoring at all; its
+ * own comment had recorded that as deferred to R5, and intake worked around it
+ * by writing vacancies.trust_status itself, which left it disagreeing with
+ * vacancy_trust_scores.status for every row it touched.
+ *
+ * THE RULE IS DELIBERATELY NARROW. It only relabels an UNDER_REVIEW score:
+ *
+ *   * VERIFIED is never downgraded — a source's declaration cannot take away a
+ *     status the vacancy's own score earned.
+ *   * FLAGGED is never upgraded — that bucket means the score itself found
+ *     something wrong, and no source-level declaration should be able to turn a
+ *     flagged listing into an eligible one. This is the line that matters: the
+ *     flag suppresses an "unproven" label, never a negative finding.
+ *
+ * Both outcomes are then written ONCE, to both tables, by the existing code
+ * below — so there is nothing left to diverge.
+ *
+ * Exported so the rule can be pinned directly. Every branch below is reachable
+ * except FLAGGED: with the signals currently wired, no vacancy that clears the
+ * hard blocks scores below 53 (measured — the scam/content, moderator-history
+ * and cross-source dimensions are all still unwired, per TrustScoreSignals).
+ * The FLAGGED guard is therefore correct but not yet exercised by any real
+ * input, which is exactly why it needs a test that does not depend on finding
+ * one.
+ */
+export function resolveStatus(scored: NonBlockedStatus, partialVerificationAllowed: boolean): NonBlockedStatus {
+  if (partialVerificationAllowed && scored === "UNDER_REVIEW") {
+    return "VERIFIED_INCOMPLETE";
+  }
+
+  return scored;
 }
 
 interface VacancyRow {
@@ -96,7 +136,7 @@ export async function scoreVacancy(
 
   const { data: policy, error: policyError } = await client
     .from("source_policies")
-    .select("discovery_allowed, kill_switch")
+    .select("discovery_allowed, kill_switch, employer_identity_authoritative, partial_verification_allowed")
     .eq("source_code", row.source_code)
     .single();
 
@@ -106,6 +146,17 @@ export async function scoreVacancy(
 
   const sourceDiscoveryAllowed = (policy as { discovery_allowed: boolean }).discovery_allowed;
   const sourceKillSwitch = (policy as { kill_switch: boolean }).kill_switch;
+  // Read defensively: the column is NOT NULL with a false default, but this
+  // code runs against databases that may predate
+  // 20260917120000_source_authority_employer_identity.sql, and a missing
+  // signal must degrade to the old (0) behaviour rather than throw mid-score.
+  const sourceAuthoritativeForEmployer =
+    (policy as { employer_identity_authoritative?: boolean }).employer_identity_authoritative === true;
+  // Read defensively for the same reason: the column is NOT NULL with a false
+  // default, but this code also runs against databases that predate
+  // 20260917220000, and an absent flag must mean "no adjustment", not a throw.
+  const partialVerificationAllowed =
+    (policy as { partial_verification_allowed?: boolean }).partial_verification_allowed === true;
 
   const hardBlockSignals: HardBlockSignals = {
     authoritativeUrl: row.authoritative_url,
@@ -127,6 +178,7 @@ export async function scoreVacancy(
     authoritativeUrl: row.authoritative_url,
     companyDomain,
     companyCareerDomain,
+    sourceAuthoritativeForEmployer,
     sourceDiscoveryAllowed,
     sourceKillSwitch,
     vacancyStatus: row.status,
@@ -136,7 +188,7 @@ export async function scoreVacancy(
   };
 
   const { total } = computeTrustScore(trustScoreSignals);
-  const bucket = statusForScore(total);
+  const bucket = resolveStatus(statusForScore(total), partialVerificationAllowed);
 
   const positiveReasonCodeSignals: PositiveReasonCodeSignals = {
     authoritativeUrl: row.authoritative_url,

@@ -12,6 +12,10 @@ import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 const MAILBOX_PROVIDER_LABELS: Record<MailboxConnection["provider"], string> = {
   gmail: "Gmail",
   outlook: "Outlook",
+  // Never presented as a mailbox. It is where locally-supplied email payloads
+  // are recorded when testing the response loop, and a candidate reading
+  // "Gmail" next to it would reasonably think their inbox was connected.
+  local_payload: "Local payload import (development, not a mailbox)",
 };
 
 async function getAccessToken(): Promise<string | null> {

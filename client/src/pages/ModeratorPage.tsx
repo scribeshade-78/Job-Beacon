@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ShieldAlert, LogOut } from "lucide-react";
+import { Link } from "wouter";
+import { ShieldAlert, ArrowLeft, LogOut } from "lucide-react";
 import { APP_NAME } from "../../../shared/app";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
@@ -16,6 +17,7 @@ import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { EmployerClaimsQueuePanel } from "../panels/EmployerClaimsQueuePanel";
 import { CompanyFactCorrectionsQueuePanel } from "../panels/CompanyFactCorrectionsQueuePanel";
 import { AppealsQueuePanel } from "../panels/AppealsQueuePanel";
+import { safeVacancyHref } from "../panels/shared";
 
 interface ModeratorPageProps {
   onLogout: () => void;
@@ -60,6 +62,46 @@ function formatElapsed(createdAt: string): string {
 async function getAccessToken(): Promise<string | null> {
   const { data } = await getSupabaseBrowserClient().auth.getSession();
   return data.session?.access_token ?? null;
+}
+
+/**
+ * This page renders bare — App.tsx mounts /moderator outside AppShell, so
+ * there is no sidebar and therefore no navigation at all. The back link is a
+ * real Link to "/" rather than history.back(), which is undefined behaviour
+ * when this page is the first entry in the history stack (a bookmarked or
+ * pasted URL) — exactly the "navigated here by mistake" case.
+ *
+ * Extracted rather than inlined because the denied state below needs it too:
+ * a non-moderator who reaches this route is the single most likely person to
+ * be stuck here, so the way out cannot live only in the permitted branch.
+ */
+function ModeratorHeader({ onLogout }: { onLogout: () => void }) {
+  return (
+    <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-ios-separator bg-ios-card/80 px-6 backdrop-blur-md">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+        <Link
+          href="/"
+          aria-label="Back to Dashboard"
+          className="flex shrink-0 items-center gap-1.5 rounded-control px-2.5 py-1.5 text-sm font-medium text-ios-blue hover:bg-ios-blue/10"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          <span className="hidden sm:inline">Back to Dashboard</span>
+          <span className="sm:hidden">Back</span>
+        </Link>
+        <span className="truncate text-base font-semibold text-black">
+          <span className="hidden sm:inline">{APP_NAME} — </span>Moderator Console
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onLogout}
+        className="flex shrink-0 items-center gap-2 rounded-control px-3 py-1.5 text-sm font-medium text-black hover:bg-ios-bg"
+      >
+        <LogOut className="h-4 w-4" aria-hidden="true" />
+        Log out
+      </button>
+    </header>
+  );
 }
 
 type ModeratorTab = "vacancies" | "employerClaims" | "factCorrections" | "appeals";
@@ -142,29 +184,22 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
 
   if (forbidden) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-ios-bg p-6">
-        <EmptyState
-          icon={ShieldAlert}
-          title="Access denied"
-          description="You don't have moderator access to this console."
-        />
+      <div className="min-h-screen bg-ios-bg">
+        <ModeratorHeader onLogout={onLogout} />
+        <div className="flex items-center justify-center p-6">
+          <EmptyState
+            icon={ShieldAlert}
+            title="Access denied"
+            description="You don't have moderator access to this console."
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="min-h-screen bg-ios-bg">
-      <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-ios-separator bg-ios-card/80 px-6 backdrop-blur-md">
-        <span className="text-base font-semibold text-black">{APP_NAME} — Moderator Console</span>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="flex items-center gap-2 rounded-control px-3 py-1.5 text-sm font-medium text-black hover:bg-ios-bg"
-        >
-          <LogOut className="h-4 w-4" aria-hidden="true" />
-          Log out
-        </button>
-      </header>
+      <ModeratorHeader onLogout={onLogout} />
 
       <div className="mx-auto flex max-w-[1200px] gap-2 px-6 pt-6">
         <Button variant={tab === "vacancies" ? "primary" : "secondary"} size="sm" onClick={() => setTab("vacancies")}>
@@ -255,7 +290,7 @@ export function ModeratorPage({ onLogout }: ModeratorPageProps) {
               <div className="space-y-4">
                 <div>
                   <a
-                    href={selectedCase.vacancyUrl}
+                    href={safeVacancyHref(selectedCase.vacancyUrl)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[15px] font-medium text-ios-blue hover:underline"

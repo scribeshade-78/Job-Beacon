@@ -75,7 +75,16 @@ export const VACANCY_TRUST_ELIGIBLE_STATUSES = new Set(["VERIFIED", "VERIFIED_IN
  * plan") arises both when deciding whether *planning* should proceed
  * here, and whether *creating a new attempt* should proceed there.
  */
-export const ACTIVE_ATTEMPT_STATUSES = new Set(["pending", "leased", "succeeded", "action_required"]);
+export const ACTIVE_ATTEMPT_STATUSES = new Set([
+  "pending",
+  // Task U: a held attempt is live work. Leaving it out would let
+  // planApplication create a second, immediately-claimable attempt beside one
+  // sitting in the review queue — routing around the gate it just applied.
+  "pending_review",
+  "leased",
+  "succeeded",
+  "action_required",
+]);
 
 export async function evaluateEligibilityGates(
   client: SupabaseClient,
@@ -245,7 +254,19 @@ const RATE_LIMIT_WINDOW_HOURS = 24;
  * including 'failed' — still represents a real attempt that was made,
  * which is what a rate/abuse control is meant to bound.
  */
-const ATTEMPT_STATUSES_COUNTED_TOWARD_RATE_LIMIT = ["pending", "leased", "succeeded", "failed", "action_required"];
+const ATTEMPT_STATUSES_COUNTED_TOWARD_RATE_LIMIT = [
+  "pending",
+  // Task U: a held attempt is an application the candidate has queued and
+  // intends to send, so it counts against the daily cap exactly like a
+  // claimable one. Excluding it would make the review queue a way to hold
+  // unlimited applications in flight, which is the opposite of what a velocity
+  // control is for.
+  "pending_review",
+  "leased",
+  "succeeded",
+  "failed",
+  "action_required",
+];
 
 /**
  * MP-RC1 (PRD §16.1 Gate 7, §31): a genuinely independent numeric velocity

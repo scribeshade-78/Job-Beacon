@@ -52,7 +52,13 @@ function makeQueryBuilder(result: TableResult) {
 }
 
 const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
-  vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
+  // Task H3 registered real submission adapters for greenhouse AND lever, so
+  // this default can no longer be lever: several tests below depend on the
+  // default vacancy having NO application adapter, which is what makes
+  // application_support fail for it. usajobs is a real configured source that
+  // deliberately has no automated application channel, so it keeps those tests
+  // meaning exactly what they meant.
+  vacancies: { data: { source_code: "usajobs", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
   source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
   automation_authorizations: { data: { status: "authorized" }, error: null },
   candidate_exclusions: { data: [], error: null },
@@ -92,22 +98,25 @@ describe("evaluateEligibilityGates", () => {
     expect(result.gates.application_support).toEqual({
       status: "fail",
       reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
-      detail: { sourceCode: "greenhouse" },
+      detail: { sourceCode: "usajobs" },
     });
     expect(result.gates.rate_and_abuse_controls).toEqual({ status: "pass", detail: { count: 0, limit: 25 } });
   });
 
   describe("permanent hard-block gates", () => {
-    it("application_support fails, regardless of every other gate's outcome, because no adapter is registered for any source yet", async () => {
+    // "for any source yet" stopped being true at Task H3, which registered real
+    // adapters for greenhouse and lever. It still holds for this vacancy's
+    // source, which is the point of the test.
+    it("application_support fails, regardless of every other gate's outcome, when no adapter is registered for the vacancy's source", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
+        vacancies: { data: { source_code: "usajobs", trust_status: "BLOCKED", raw_title: "Backend Engineer" }, error: null },
         source_policies: { data: { discovery_allowed: false, automated_application_allowed: false }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.application_support).toEqual({
         status: "fail",
         reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
-        detail: { sourceCode: "greenhouse" },
+        detail: { sourceCode: "usajobs" },
       });
     });
   });
@@ -204,7 +213,19 @@ describe("evaluateEligibilityGates", () => {
       const rateLimitBuilder = findRateLimitAttemptsBuilder(client);
       expect(rateLimitBuilder).toBeDefined();
       const statusFilterCall = rateLimitBuilder!.in.mock.calls.find((call) => call[0] === "status");
-      expect(statusFilterCall?.[1]).toEqual(["pending", "leased", "succeeded", "failed", "action_required"]);
+      // pending_review is included (Task U): a held attempt is an application
+      // the candidate has queued and intends to send, so it counts against the
+      // daily cap. Leaving it out would make the review queue a way to keep
+      // unlimited applications in flight, which is the opposite of what a
+      // velocity control is for.
+      expect(statusFilterCall?.[1]).toEqual([
+        "pending",
+        "pending_review",
+        "leased",
+        "succeeded",
+        "failed",
+        "action_required",
+      ]);
       expect(statusFilterCall?.[1]).not.toContain("cancelled");
     });
 
@@ -254,12 +275,14 @@ describe("evaluateEligibilityGates", () => {
       expect(result.gates.application_support).toEqual({
         status: "fail",
         reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE",
-        detail: { sourceCode: "greenhouse" },
+        detail: { sourceCode: "usajobs" },
       });
     });
 
-    it.each(["lever", "adzuna", "usajobs", "some_future_source"])(
-      "fails the same way for every source_code today (%s) — no real adapter is registered for any of them",
+    // lever was removed from this list by Task H3: it now has a real adapter, so
+    // it is no longer an example of an unregistered source.
+    it.each(["adzuna", "usajobs", "remotive", "some_future_source"])(
+      "fails the same way for every source_code with no registered adapter (%s)",
       async (sourceCode) => {
         const client = makeClient({
           vacancies: { data: { source_code: sourceCode, trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
@@ -273,6 +296,24 @@ describe("evaluateEligibilityGates", () => {
       },
     );
 
+    it("passes for a greenhouse vacancy now that a real adapter is registered", async () => {
+      // This file's registry mock delegates to the real resolveApplicationAdapter
+      // by default, so this exercises the actual greenhouse adapter rather than
+      // an injected double. Note this gate passing does NOT make a greenhouse
+      // vacancy eligible: the source_policy gate independently requires
+      // automated_application_allowed, which no greenhouse row sets yet.
+      const client = makeClient({
+        vacancies: {
+          data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Backend Engineer" },
+          error: null,
+        },
+      });
+
+      const result = await evaluateEligibilityGates(client, baseInput);
+
+      expect(result.gates.application_support).toEqual({ status: "pass", detail: { adapter: "greenhouse" } });
+    });
+
     it("is independent of source_policies.automated_application_allowed", async () => {
       const client = makeClient({
         source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
@@ -284,7 +325,7 @@ describe("evaluateEligibilityGates", () => {
 
     it("passes when the resolved adapter's validateSupport reports itself supported (MP-A1)", async () => {
       const fakeSupportedAdapter: ApplicationAdapter = {
-        sourceCode: "greenhouse",
+        sourceCode: "lever",
         displayName: "Greenhouse (test double)",
         isAutomatedSubmissionSupported: true,
         validateSupport: () => ({ supported: true }),
@@ -295,12 +336,12 @@ describe("evaluateEligibilityGates", () => {
       const client = makeClient();
       const result = await evaluateEligibilityGates(client, baseInput);
 
-      expect(result.gates.application_support).toEqual({ status: "pass", detail: { adapter: "greenhouse" } });
+      expect(result.gates.application_support).toEqual({ status: "pass", detail: { adapter: "lever" } });
     });
 
     it("uses the adapter's own reasonCode when validateSupport reports unsupported with a specific one", async () => {
       const fakeAdapter: ApplicationAdapter = {
-        sourceCode: "greenhouse",
+        sourceCode: "lever",
         displayName: "Greenhouse (test double)",
         isAutomatedSubmissionSupported: false,
         validateSupport: () => ({ supported: false, reasonCode: "MISSING_EMPLOYER_CREDENTIALS" }),
@@ -308,20 +349,24 @@ describe("evaluateEligibilityGates", () => {
       };
       vi.mocked(resolveApplicationAdapter).mockReturnValueOnce(fakeAdapter);
 
-      const client = makeClient();
+      // The vacancy's own source is stated rather than taken from the default
+      // fixture, so this test keeps describing the adapter it injects.
+      const client = makeClient({
+        vacancies: { data: { source_code: "lever", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
+      });
       const result = await evaluateEligibilityGates(client, baseInput);
 
       expect(result.gates.application_support).toEqual({
         status: "fail",
         reasonCode: "MISSING_EMPLOYER_CREDENTIALS",
-        detail: { sourceCode: "greenhouse" },
+        detail: { sourceCode: "lever" },
       });
     });
 
     it("passes candidateId and the vacancy fields through to validateSupport", async () => {
       const validateSupport = vi.fn().mockReturnValue({ supported: true });
       const fakeAdapter: ApplicationAdapter = {
-        sourceCode: "greenhouse",
+        sourceCode: "lever",
         displayName: "Greenhouse (test double)",
         isAutomatedSubmissionSupported: true,
         validateSupport,
@@ -329,11 +374,13 @@ describe("evaluateEligibilityGates", () => {
       };
       vi.mocked(resolveApplicationAdapter).mockReturnValueOnce(fakeAdapter);
 
-      const client = makeClient();
+      const client = makeClient({
+        vacancies: { data: { source_code: "lever", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
+      });
       await evaluateEligibilityGates(client, baseInput);
 
       expect(validateSupport).toHaveBeenCalledWith({
-        vacancy: { sourceCode: "greenhouse", trustStatus: "VERIFIED", rawTitle: "Backend Engineer" },
+        vacancy: { sourceCode: "lever", trustStatus: "VERIFIED", rawTitle: "Backend Engineer" },
         candidateId: "candidate-1",
       });
     });
@@ -342,7 +389,7 @@ describe("evaluateEligibilityGates", () => {
   describe("vacancy_trust", () => {
     it("passes for VERIFIED", async () => {
       const client = makeClient({
-        vacancies: { data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
+        vacancies: { data: { source_code: "lever", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
       expect(result.gates.vacancy_trust).toEqual({ status: "pass" });
@@ -351,7 +398,7 @@ describe("evaluateEligibilityGates", () => {
     it("passes for VERIFIED_INCOMPLETE", async () => {
       const client = makeClient({
         vacancies: {
-          data: { source_code: "greenhouse", trust_status: "VERIFIED_INCOMPLETE", raw_title: "Backend Engineer" },
+          data: { source_code: "lever", trust_status: "VERIFIED_INCOMPLETE", raw_title: "Backend Engineer" },
           error: null,
         },
       });
@@ -364,7 +411,7 @@ describe("evaluateEligibilityGates", () => {
       async (trustStatus) => {
         const client = makeClient({
           vacancies: {
-            data: { source_code: "greenhouse", trust_status: trustStatus, raw_title: "Backend Engineer" },
+            data: { source_code: "lever", trust_status: trustStatus, raw_title: "Backend Engineer" },
             error: null,
           },
         });
@@ -498,7 +545,7 @@ describe("evaluateEligibilityGates", () => {
     it("passes when a selected role is a substring of the vacancy's raw_title", async () => {
       const client = makeClient({
         vacancies: {
-          data: { source_code: "greenhouse", trust_status: "VERIFIED", raw_title: "Senior Backend Engineer II" },
+          data: { source_code: "lever", trust_status: "VERIFIED", raw_title: "Senior Backend Engineer II" },
           error: null,
         },
         candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },

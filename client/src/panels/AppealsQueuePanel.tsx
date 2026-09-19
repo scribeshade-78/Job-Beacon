@@ -6,6 +6,7 @@ import { EmptyState } from "../components/ui/empty-state";
 import { getAppealsQueue, type AppealQueueEntry } from "../lib/employerAppeals";
 import { submitModerationDecision, MODERATION_DECISIONS, type ModerationDecisionValue } from "../lib/moderation";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { safeVacancyHref } from "./shared";
 
 const DECISION_LABEL: Record<ModerationDecisionValue, string> = {
   cleared: "Overturn (clear)",
@@ -158,7 +159,7 @@ export function AppealsQueuePanel() {
             <div className="space-y-4">
               <div>
                 <a
-                  href={selectedAppeal.vacancyUrl}
+                  href={safeVacancyHref(selectedAppeal.vacancyUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[15px] font-medium text-ios-blue hover:underline"

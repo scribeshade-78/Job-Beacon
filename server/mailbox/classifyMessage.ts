@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import { sanitizeUntrustedContent, wrapUntrustedContent } from "../security/sanitize.js";
 
 /**
  * Response Intelligence Phase 1 — message classification + entity
@@ -159,12 +160,37 @@ export function isValidRawMessageClassification(value: unknown): value is RawMes
   return true;
 }
 
+/**
+ * Task H4, RI PRD §10.3: "Email ... text are data, never trusted instructions to
+ * the AI agent."
+ *
+ * The body is sanitized and wrapped BEFORE it reaches the model. Two distinct
+ * things happen here and both are load-bearing:
+ *
+ *   1. sanitizeUntrustedContent removes script and style blocks, inline event
+ *      handlers, tracking pixels and active embeds. An HTML-only recruiting email
+ *      would otherwise arrive with its markup intact.
+ *   2. wrapUntrustedContent prepends the systemic prefix and delimits the block,
+ *      so the model is told what the content IS rather than being asked to obey
+ *      an order about it.
+ *
+ * Sender and subject are left as-is: they are single header lines that the model
+ * reads as metadata, and rewriting them would change what the classifier is
+ * classifying. The body is where instructions can actually hide.
+ */
 function renderMessage(input: MessageClassificationInput): string {
+  const body =
+    input.bodyText === null
+      ? null
+      : sanitizeUntrustedContent(input.bodyText, { html: false }).text;
+
   return [
     `From: ${input.sender ?? "(unknown)"}`,
     `Subject: ${input.subject ?? "(none)"}`,
     "",
-    input.bodyText ?? "(body unavailable — classify from sender and subject only)",
+    body === null || body === ""
+      ? "(body unavailable — classify from sender and subject only)"
+      : wrapUntrustedContent("EMAIL BODY", body),
   ].join("\n");
 }
 

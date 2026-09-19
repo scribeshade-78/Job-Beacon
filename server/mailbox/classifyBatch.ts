@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
+import { detectPromptInjection } from "../security/sanitize.js";
+import { recordSecurityEvent } from "../security/events.js";
 import {
   classifyMessageContent,
   DEFAULT_CLASSIFICATION_MODEL,
@@ -39,6 +41,40 @@ export async function classifyAndStoreMessage(
   model?: string,
 ): Promise<ClassifyMessageResult> {
   const resolvedModel = resolveModel(model);
+
+  // Task H4, RI PRD §10.3. Detection runs HERE, at the boundary that has a
+  // database client, while the sanitization that protects the prompt happens in
+  // classifyMessage.ts's renderMessage. Both read the same text; splitting them
+  // this way keeps the prompt builder pure and testable while still making a
+  // detection a queryable security event rather than a log line.
+  //
+  // Recorded before classification, not after: an injection attempt is worth
+  // knowing about even when the model call that follows fails, and a detection
+  // that only survived a successful classification would be the least likely to
+  // be recorded exactly when something is going wrong.
+  if (message.bodyText) {
+    const findings = detectPromptInjection(message.bodyText);
+    if (findings.length > 0) {
+      await recordSecurityEvent(serviceClient, {
+        eventType: findings[0]!.type,
+        // A request to disclose a secret or to act is treated as HIGH; the rest
+        // are MEDIUM. Nothing here is LOW, because every pattern this list
+        // matches is a shape with no ordinary reason to appear in recruiting
+        // mail — if that stops being true, the pattern is wrong, not the level.
+        severity:
+          findings.some(
+            (finding) =>
+              finding.type === "secret_disclosure_request" ||
+              finding.type === "unauthorised_action_request",
+          )
+            ? "high"
+            : "medium",
+        source: "email_body",
+        subjectId: message.messageId,
+        detail: { findings },
+      });
+    }
+  }
 
   let classification;
 

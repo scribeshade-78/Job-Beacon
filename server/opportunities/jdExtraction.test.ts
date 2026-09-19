@@ -130,3 +130,58 @@ describe("extractJd", () => {
     expect(result.sections).toEqual([]);
   });
 });
+
+describe("extractJd — remotive", () => {
+  /**
+   * The shape that matters. Task A2's on-demand scoring was dead-lettering
+   * every Remotive vacancy with UnknownJdSourceError, so the source could be
+   * ingested and displayed but never ranked.
+   */
+  const remotiveRaw = {
+    id: 2091129,
+    url: "https://remotive.com/remote-jobs/data/senior-data-scientist-2091129",
+    title: "Senior Data Scientist",
+    company_name: "Lemon.io",
+    description:
+      "<p>Join our data team.</p><h3>Responsibilities</h3><ul><li>Build models</li><li>Own reporting</li></ul><h3>Requirements</h3><p>5 years with Python &amp; SQL.</p>",
+  };
+
+  it("extracts section boundaries from the HTML description", () => {
+    const result = extractJd("remotive", remotiveRaw);
+
+    expect(result.sections).toEqual([
+      { heading: null, body: "Join our data team." },
+      { heading: "Responsibilities", body: "• Build models\n• Own reporting" },
+      { heading: "Requirements", body: "5 years with Python & SQL." },
+    ]);
+  });
+
+  it("decodes entities rather than storing them raw", () => {
+    expect(extractJd("remotive", remotiveRaw).cleanText).toContain("Python & SQL");
+    expect(extractJd("remotive", remotiveRaw).cleanText).not.toContain("&amp;");
+  });
+
+  it("uses Remotive's own URL as the canonical URL", () => {
+    expect(extractJd("remotive", remotiveRaw).canonicalUrl).toBe(
+      "https://remotive.com/remote-jobs/data/senior-data-scientist-2091129",
+    );
+  });
+
+  it("keeps the raw HTML as the snapshot", () => {
+    expect(extractJd("remotive", remotiveRaw).htmlSnapshot).toContain("<h3>Responsibilities</h3>");
+  });
+
+  it("yields empty text rather than throwing when a posting has no description", () => {
+    // A missing field is "no JD text available", which the worker handles by
+    // not persisting a snapshot — it is not an extraction failure.
+    const result = extractJd("remotive", { url: "https://remotive.com/x", title: "x" });
+
+    expect(result.cleanText).toBe("");
+    expect(result.sections).toEqual([]);
+    expect(result.canonicalUrl).toBe("https://remotive.com/x");
+  });
+
+  it("still refuses a genuinely unregistered source", () => {
+    expect(() => extractJd("monster", remotiveRaw)).toThrow(UnknownJdSourceError);
+  });
+});

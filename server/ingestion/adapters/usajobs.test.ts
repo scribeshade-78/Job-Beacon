@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { discoverUsajobs, usajobsAdapter } from "./usajobs.js";
+import { discoverUsajobs, parseUsajobsRemoteType, usajobsAdapter } from "./usajobs.js";
 
 // Fixture shaped from the corroborated (not primary-source-verified, see
 // the adapter's verification note) SearchResult.SearchResultItems[].
@@ -84,6 +84,33 @@ describe("discoverUsajobs", () => {
     });
   });
 
+  it("maps RemoteIndicator true to 'remote' and leaves false/absent null", async () => {
+    const withIndicator = (remoteIndicator: boolean | undefined) => ({
+      SearchResult: {
+        SearchResultItems: [
+          {
+            MatchedObjectDescriptor: {
+              PositionID: "ABC-2026-0002",
+              PositionTitle: "IT SPECIALIST",
+              PositionURI: "https://www.usajobs.gov/job/123456701",
+              UserArea: { Details: remoteIndicator === undefined ? {} : { RemoteIndicator: remoteIndicator } },
+            },
+          },
+        ],
+      },
+    });
+
+    const remote = await discoverUsajobs({}, credentials, fixtureFetch(200, withIndicator(true)));
+    const notRemote = await discoverUsajobs({}, credentials, fixtureFetch(200, withIndicator(false)));
+    const unspecified = await discoverUsajobs({}, credentials, fixtureFetch(200, withIndicator(undefined)));
+
+    expect(remote[0].remoteType).toBe("remote");
+    // false is "unspecified", not an explicit denial — mapping it to 'on_site'
+    // would assert a work arrangement the posting never claimed.
+    expect(notRemote[0].remoteType).toBeNull();
+    expect(unspecified[0].remoteType).toBeNull();
+  });
+
   it("defaults companyName when OrganizationName is absent", async () => {
     const result = await discoverUsajobs(
       {},
@@ -106,6 +133,29 @@ describe("discoverUsajobs", () => {
     await expect(
       discoverUsajobs({}, credentials, fixtureFetch(500, {})),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe("parseUsajobsRemoteType (Mini-Phase 3)", () => {
+  it("maps only a literal true to 'remote'", () => {
+    expect(parseUsajobsRemoteType(true)).toBe("remote");
+  });
+
+  it("treats false as unspecified rather than as an explicit on_site", () => {
+    // All 25 live USAJOBS payloads currently carry false; a government
+    // dataset normally leaves a boolean unchecked rather than denying it.
+    expect(parseUsajobsRemoteType(false)).toBeNull();
+  });
+
+  it("treats absent or non-boolean values as null", () => {
+    expect(parseUsajobsRemoteType(undefined)).toBeNull();
+    expect(parseUsajobsRemoteType(null)).toBeNull();
+    expect(parseUsajobsRemoteType("true")).toBeNull();
+  });
+
+  it("never produces 'hybrid' or 'on_site'", () => {
+    expect(parseUsajobsRemoteType(false)).not.toBe("on_site");
+    expect(parseUsajobsRemoteType(true)).not.toBe("hybrid");
   });
 });
 

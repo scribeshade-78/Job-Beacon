@@ -104,6 +104,11 @@ export async function listResumes(
     const { data, error } = await client
       .from("resume_documents")
       .select("id, storage_path, original_filename, mime_type, byte_size, created_at")
+      // Only the candidate's own files. Tailored resumes are generated per
+      // application and are kind='tailored' (20260917180000); listing them here
+      // would put a file the candidate never chose next to their real uploads,
+      // with Extract-facts and Delete affordances that make no sense for it.
+      .eq("kind", "uploaded")
       .order("created_at", { ascending: false });
 
     if (error || !data) {

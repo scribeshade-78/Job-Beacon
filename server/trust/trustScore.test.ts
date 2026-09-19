@@ -76,6 +76,55 @@ describe("computeTrustScore", () => {
       };
       expect(fractionFor(computeTrustScore(signals), "employerIdentity")).toBe(1);
     });
+
+    it("scores full credit when the source is itself authoritative for employer identity", () => {
+      const signals: TrustScoreSignals = {
+        ...goodSignals,
+        authoritativeUrl: "https://www.usajobs.gov:443/job/759326100",
+        companyDomain: null,
+        companyCareerDomain: null,
+        sourceAuthoritativeForEmployer: true,
+      };
+      expect(fractionFor(computeTrustScore(signals), "employerIdentity")).toBe(1);
+    });
+
+    it("still scores zero for an aggregator that is not authoritative for employer identity", () => {
+      // The regression guard for the flag's whole point: Jooble-shaped
+      // signals (aggregator-owned URL, no company domain, flag false) must
+      // keep the old zero rather than being swept up by the new signal.
+      const signals: TrustScoreSignals = {
+        ...goodSignals,
+        authoritativeUrl: "https://jooble.org/jdp/3063543289853449376",
+        companyDomain: null,
+        companyCareerDomain: null,
+        sourceAuthoritativeForEmployer: false,
+      };
+      expect(fractionFor(computeTrustScore(signals), "employerIdentity")).toBe(0);
+    });
+
+    it("lifts an aggregator-shaped vacancy over the VERIFIED threshold only when the flag is set", () => {
+      const base: TrustScoreSignals = {
+        authoritativeUrl: "https://www.usajobs.gov:443/job/759326100",
+        companyDomain: null,
+        companyCareerDomain: null,
+        sourceDiscoveryAllowed: true,
+        sourceKillSwitch: false,
+        vacancyStatus: "active",
+        lastSeenAt: "2026-08-17T00:00:00Z",
+        now: "2026-08-17T01:00:00Z",
+        salaryMin: null,
+        salaryMax: null,
+      };
+
+      // 63 without the flag — exactly the measured real-world value, and
+      // below the 80 the candidate Opportunities view requires.
+      expect(computeTrustScore(base).total).toBe(63);
+
+      // 83 with it — over the threshold, which is the entire fix.
+      const authoritative = computeTrustScore({ ...base, sourceAuthoritativeForEmployer: true });
+      expect(authoritative.total).toBe(83);
+      expect(authoritative.total).toBeGreaterThanOrEqual(80);
+    });
   });
 
   describe("authoritativeSource (weight 20)", () => {

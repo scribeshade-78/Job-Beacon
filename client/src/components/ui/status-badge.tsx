@@ -55,7 +55,9 @@ export type StatusBadgeStatus =
   | "moderation_flagged"
   | "moderation_blocked"
   | "moderation_request_info"
-  | "moderation_escalated";
+  | "moderation_escalated"
+  | "unverified_source"
+  | "partially_verified";
 
 interface StatusConfig {
   label: string;
@@ -105,6 +107,36 @@ function PauseIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/**
+ * A circle with its lower half filled. Distinct at a glance from the check
+ * (fully verified), the clock (under review) and the triangle (unverified
+ * source) even in a monochrome screenshot, which is the PRD §18.4 requirement
+ * this whole file exists to satisfy.
+ */
+function HalfFilledCircleIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" {...props}>
+      <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.75" />
+      <path d="M8 2.75a5.25 5.25 0 0 0 0 10.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function WarningIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" {...props}>
+      <path
+        d="M8 2.25l5.6 9.75H2.4L8 2.25z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M8 6.5v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="11.25" r="0.75" fill="currentColor" />
+    </svg>
+  );
+}
+
 const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
   verified: {
     label: "Verified",
@@ -121,6 +153,36 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     bg: "bg-status-under-review/8",
     fg: "text-status-under-review-fg",
     Icon: ClockIcon,
+  },
+  // Candidate-safety label for an opportunity whose source could not be
+  // verified (trust_status UNDER_REVIEW). Shares the under-review amber
+  // palette — "not yet established", never red, which would read as
+  // "confirmed bad" — but deliberately uses a DIFFERENT icon shape
+  // (triangle/exclamation vs clock) and its own wording, so the warning
+  // survives both a monochrome screenshot and the "Under review" badge that
+  // still appears on the same card for the trust dimension (PRD §18.4).
+  unverified_source: {
+    label: "Unverified source",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: WarningIcon,
+  },
+  // Task Y: trust_status VERIFIED_INCOMPLETE used to render as the same green
+  // "Verified" badge as a fully VERIFIED vacancy, which told a candidate we had
+  // checked an employer we had not. It means "the listing is legitimate but
+  // some non-critical details are unconfirmed" — so it shares the amber family
+  // ("not fully established", never red, which would read as "confirmed bad")
+  // and is distinguished by its own label and its own half-filled icon shape.
+  //
+  // Three distinct amber states now exist on this card — Under review (clock),
+  // Unverified source (triangle) and Partly verified (half circle) — which is
+  // deliberate rather than redundant: they are three different reasons for
+  // withholding full trust, and the copy under each card says which one applies.
+  partially_verified: {
+    label: "Partly verified",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: HalfFilledCircleIcon,
   },
   blocked: {
     label: "Blocked",

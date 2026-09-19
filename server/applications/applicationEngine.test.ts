@@ -15,12 +15,26 @@ function chain(result: TableResult) {
     select: vi.fn(() => builder),
     eq: vi.fn(() => builder),
     insert: vi.fn(() => builder),
+    update: vi.fn(() => builder),
     maybeSingle: vi.fn(async () => result),
     single: vi.fn(async () => result),
     then: (onFulfilled: (value: TableResult) => unknown, onRejected?: (reason: unknown) => unknown) =>
       Promise.resolve(result).then(onFulfilled, onRejected),
   } as Record<string, unknown> & PromiseLike<TableResult>;
   return builder;
+}
+
+/**
+ * Shapes for reaching into the from() mock's returned builders, so a test can
+ * assert on a write payload without an inline type three braces deep.
+ */
+interface MockBuilderLike {
+  update?: { mock: { calls: unknown[][] } };
+  insert?: { mock: { calls: unknown[][] } };
+}
+
+interface MockFromLike {
+  mock: { results: Array<{ value: MockBuilderLike }> };
 }
 
 /** Each table's array of results is consumed one per `.from(table)` call, in order. */
@@ -120,20 +134,186 @@ describe("planApplication", () => {
     });
   });
 
-  it("reuses an existing plan's frozen gate_results without re-evaluating the gates", async () => {
+  it("RE-EVALUATES an ineligible plan and enqueues an attempt once the gates pass", async () => {
+    // The frozen-plan trap this patch exists to close. Previously a plan
+    // marked ineligible — e.g. when no submission adapter was registered —
+    // kept that verdict forever, so the pair could never be queued even after
+    // an adapter shipped. The gates now run again, the plan transitions, and
+    // the pending attempt is created on the same call.
+    vi.mocked(evaluateEligibilityGates).mockResolvedValueOnce(eligibleOutcome);
     const client = makeClient({
-      application_plans: [{ data: { id: "plan-3", gate_results: ineligibleOutcome }, error: null }],
+      application_plans: [
+        // Stored verdict: blocked by the missing adapter.
+        { data: { id: "plan-frozen", gate_results: ineligibleOutcome }, error: null },
+        // Fresh verdict, written back over it.
+        { data: { id: "plan-frozen", gate_results: eligibleOutcome }, error: null },
+      ],
+      application_attempts: [
+        { data: [], error: null },
+        { data: { id: "attempt-1" }, error: null },
+      ],
     });
 
     const result = await planApplication(client, input);
 
+    expect(evaluateEligibilityGates).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      applicationPlanId: "plan-frozen",
+      eligible: true,
+      gateResults: eligibleOutcome,
+      applicationAttemptId: "attempt-1",
+      attemptCreated: true,
+    });
+  });
+
+  it("writes the fresh verdict back over the frozen gate_results", async () => {
+    vi.mocked(evaluateEligibilityGates).mockResolvedValueOnce(eligibleOutcome);
+    const client = makeClient({
+      application_plans: [
+        { data: { id: "plan-frozen", gate_results: ineligibleOutcome }, error: null },
+        { data: { id: "plan-frozen", gate_results: eligibleOutcome }, error: null },
+      ],
+      application_attempts: [
+        { data: [], error: null },
+        { data: { id: "attempt-1" }, error: null },
+      ],
+    });
+
+    await planApplication(client, input);
+
+    const fromMock = client.from as unknown as MockFromLike;
+    const updateCall = fromMock.mock.results
+      .map((entry) => entry.value.update)
+      .find((update) => (update?.mock.calls.length ?? 0) > 0);
+
+    expect(updateCall?.mock.calls[0][0]).toEqual({ gate_results: eligibleOutcome });
+  });
+
+  it("still reuses an ELIGIBLE plan untouched, without re-running the gates", async () => {
+    // The asymmetry is deliberate: an eligible verdict has already been acted
+    // on (an attempt may exist), so re-deriving it would spend queries to
+    // re-decide something this function has no business changing.
+    const client = makeClient({
+      application_plans: [{ data: { id: "plan-3", gate_results: eligibleOutcome }, error: null }],
+      application_attempts: [{ data: [{ id: "attempt-existing", status: "pending" }], error: null }],
+    });
+
+    const result = await planApplication(client, input);
+
+    expect(evaluateEligibilityGates).not.toHaveBeenCalled();
     expect(result).toEqual({
       applicationPlanId: "plan-3",
-      eligible: false,
-      gateResults: ineligibleOutcome,
+      eligible: true,
+      gateResults: eligibleOutcome,
+      applicationAttemptId: "attempt-existing",
       attemptCreated: false,
     });
-    expect(evaluateEligibilityGates).not.toHaveBeenCalled();
+  });
+
+  describe("Task U: the review-before-submit gate decides the attempt's initial status", () => {
+    /** The payload of the application_attempts insert, or undefined if none happened. */
+    function attemptInsertPayload(client: unknown): unknown {
+      // Matched on the TABLE, not just "the first insert that happened":
+      // planApplication also inserts an application_plans row, and picking that
+      // one up would assert against the wrong payload.
+      const fromMock = (client as { from: unknown }).from as {
+        mock: {
+          calls: unknown[][];
+          results: Array<{ value: MockBuilderLike }>;
+        };
+      };
+
+      const index = fromMock.mock.calls.findIndex(
+        (call, position) =>
+          call[0] === "application_attempts" &&
+          (fromMock.mock.results[position]?.value.insert?.mock.calls.length ?? 0) > 0,
+      );
+
+      return index === -1 ? undefined : fromMock.mock.results[index].value.insert?.mock.calls[0][0];
+    }
+
+    it("holds the attempt as pending_review when the candidate requires review", async () => {
+      vi.mocked(evaluateEligibilityGates).mockResolvedValueOnce(eligibleOutcome);
+      const client = makeClient({
+        candidate_profiles: [{ data: { review_before_submit: true }, error: null }],
+        application_plans: [
+          { data: null, error: null },
+          { data: { id: "plan-review", gate_results: eligibleOutcome }, error: null },
+        ],
+        application_attempts: [
+          { data: [], error: null },
+          { data: { id: "attempt-1" }, error: null },
+        ],
+      });
+
+      await planApplication(client, input);
+
+      expect(attemptInsertPayload(client)).toEqual({
+        application_plan_id: "plan-review",
+        status: "pending_review",
+      });
+    });
+
+    it("creates a claimable attempt when the candidate has turned review off", async () => {
+      vi.mocked(evaluateEligibilityGates).mockResolvedValueOnce(eligibleOutcome);
+      const client = makeClient({
+        candidate_profiles: [{ data: { review_before_submit: false }, error: null }],
+        application_plans: [
+          { data: null, error: null },
+          { data: { id: "plan-auto", gate_results: eligibleOutcome }, error: null },
+        ],
+        application_attempts: [
+          { data: [], error: null },
+          { data: { id: "attempt-1" }, error: null },
+        ],
+      });
+
+      await planApplication(client, input);
+
+      expect(attemptInsertPayload(client)).toEqual({
+        application_plan_id: "plan-auto",
+        status: "pending",
+      });
+    });
+
+    it("fails safe to holding when the preference cannot be read", async () => {
+      // An unreadable preference must never be the reason an application is
+      // dispatched without the candidate having seen it — the column default is
+      // true, and so is the fallback for a missing row.
+      vi.mocked(evaluateEligibilityGates).mockResolvedValueOnce(eligibleOutcome);
+      const client = makeClient({
+        candidate_profiles: [{ data: null, error: null }],
+        application_plans: [
+          { data: null, error: null },
+          { data: { id: "plan-missing", gate_results: eligibleOutcome }, error: null },
+        ],
+        application_attempts: [
+          { data: [], error: null },
+          { data: { id: "attempt-1" }, error: null },
+        ],
+      });
+
+      await planApplication(client, input);
+
+      expect(attemptInsertPayload(client)).toMatchObject({ status: "pending_review" });
+    });
+
+    it("does not create a second attempt beside one already sitting in the review queue", async () => {
+      // The gate would be pointless if planning could route around it by
+      // opening a claimable attempt next to the held one.
+      const client = makeClient({
+        application_plans: [{ data: { id: "plan-held", gate_results: eligibleOutcome }, error: null }],
+        application_attempts: [{ data: [{ id: "attempt-held", status: "pending_review" }], error: null }],
+      });
+
+      const result = await planApplication(client, input);
+
+      expect(result).toMatchObject({
+        applicationAttemptId: "attempt-held",
+        attemptCreated: false,
+      });
+      expect(attemptInsertPayload(client)).toBeUndefined();
+    });
   });
 
   it("idempotency: does not create a second attempt when an active attempt already exists on an eligible plan", async () => {

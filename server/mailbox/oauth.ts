@@ -33,11 +33,25 @@ const USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
 /**
- * Requested now even though the R6.2 message-polling worker that actually
- * reads mail doesn't exist yet, so a candidate never has to re-consent
- * later — mailbox_connections.granted_scopes exists exactly for this.
+ * Requested up front so a candidate never has to re-consent later —
+ * mailbox_connections.granted_scopes exists exactly for this.
+ *
+ * The original R6.1 reasoning was that R6.2's mail worker did not exist yet. The
+ * same reasoning applies now to Task H2's calendar sync (RI PRD FR-012): asking
+ * for calendar access at the same moment as mail means one consent screen rather
+ * than two, and a candidate who connected before this scope was added is handled
+ * at sync time — syncOneCalendarConnection reports "calendar scope not granted"
+ * and skips, rather than failing or silently doing nothing.
+ *
+ * Both scopes are READ-ONLY. RI PRD §18's "Least privilege" control asks for
+ * "no send/delete permissions in v1", and neither of these grants any.
  */
-export const GOOGLE_MAILBOX_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/gmail.readonly"] as const;
+export const GOOGLE_MAILBOX_SCOPES = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/calendar.readonly",
+] as const;
 
 export function buildGoogleAuthorizeUrl(config: GoogleOAuthConfig, state: string): string {
   const url = new URL(AUTHORIZE_URL);

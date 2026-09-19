@@ -18,7 +18,10 @@ function makeQueryBuilder(result: TableResult) {
 const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   application_plans: { data: { vacancy_id: "vacancy-1", candidate_id: "candidate-1" }, error: null },
   automation_authorizations: { data: { status: "authorized" }, error: null },
-  vacancies: { data: { source_code: "greenhouse" }, error: null },
+  // Task H3 registered real submission adapters for greenhouse and lever, so the
+  // default vacancy now names a source that genuinely has no adapter — the
+  // "unregistered source" case this file is about.
+  vacancies: { data: { source_code: "usajobs" }, error: null },
 };
 
 function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
@@ -63,11 +66,13 @@ describe("submitApplicationAttempt", () => {
     await expect(submitApplicationAttempt(client, baseContext)).rejects.toBeTruthy();
   });
 
-  it("resolves the same way regardless of source_code — every source is unsupported today", async () => {
-    const client = makeClient({ vacancies: { data: { source_code: "lever" }, error: null } });
-    await expect(submitApplicationAttempt(client, baseContext)).rejects.toThrow(
-      /No application adapter is registered/,
-    );
+  it("resolves the same way for every source_code that has no registered adapter", async () => {
+    for (const sourceCode of ["usajobs", "adzuna", "jooble", "remotive"]) {
+      const client = makeClient({ vacancies: { data: { source_code: sourceCode }, error: null } });
+      await expect(submitApplicationAttempt(client, baseContext)).rejects.toThrow(
+        /No application adapter is registered/,
+      );
+    }
   });
 
   describe("R7-M4: automation authorization recheck", () => {

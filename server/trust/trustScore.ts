@@ -45,6 +45,25 @@ export interface TrustScoreSignals {
    * signal actually available today is the domain match below.
    */
   registryVerified?: boolean;
+  /**
+   * source_policies.employer_identity_authoritative — true when the source
+   * is itself the authoritative system of record for who the employer is
+   * (e.g. a government hiring portal that publishes agency vacancies
+   * directly), so no domain match or legal-entity lookup is needed to
+   * establish identity.
+   *
+   * Exists because the domain match below is structurally unreachable for
+   * every aggregator source: Jooble/USAJOBS/Adzuna adapters set
+   * companyDomain to null, and the URL they store belongs to the aggregator
+   * (jooble.org/jdp/...), so employerIdentity could never score above 0 and
+   * the tier's total was capped at 65 against a VERIFIED threshold of 80 —
+   * every aggregator vacancy stayed invisible to candidates forever. See
+   * 20260917120000_source_authority_employer_identity.sql.
+   *
+   * Must NOT be set for an aggregator that merely mirrors third-party
+   * postings — that would defeat the dimension rather than satisfy it.
+   */
+  sourceAuthoritativeForEmployer?: boolean;
 
   // --- Authoritative source (weight 20) ---
   /** source_policies.discovery_allowed for this vacancy's source */
@@ -120,7 +139,12 @@ function knownDomainsOf(signals: TrustScoreSignals): string[] {
 
 /** Minimal identity-resolution signal agreed for R3: domain match only — no legal-entity/registry system exists yet (R5). */
 function scoreEmployerIdentity(signals: TrustScoreSignals): number {
+  // Both of these establish identity without a domain match, so they are
+  // checked before it. sourceAuthoritativeForEmployer is the per-source
+  // property (see its own doc comment); registryVerified is the
+  // legal-entity lookup path R5 was to provide and still does not.
   if (signals.registryVerified) return 1;
+  if (signals.sourceAuthoritativeForEmployer) return 1;
 
   const hostname = extractHostname(signals.authoritativeUrl);
   const knownDomains = knownDomainsOf(signals);

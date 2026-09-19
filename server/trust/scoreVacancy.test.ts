@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { scoreVacancy } from "./scoreVacancy.js";
+import { resolveStatus, scoreVacancy } from "./scoreVacancy.js";
 
 /**
  * Mirrors the chainable query-builder double already used in
@@ -111,7 +111,10 @@ describe("scoreVacancy", () => {
 
     expect(trustScoreBuilder.calls[0]).toEqual({
       method: "insert",
-      args: [{ vacancy_id: "vacancy-1", status: "VERIFIED", score: 85, policy_version: "r3-trust-score-v1" }],
+      // v2 (Task Y): a source can now declare partial verification, which
+      // relabels an UNDER_REVIEW score as VERIFIED_INCOMPLETE. Scores produced
+      // under v1 are not comparable, which is what this tag is for.
+      args: [{ vacancy_id: "vacancy-1", status: "VERIFIED", score: 85, policy_version: "r3-trust-score-v2" }],
     });
 
     const insertedFlags = flagsBuilder.calls[0].args[0] as Array<{ vacancy_trust_score_id: string; reason_code: string }>;
@@ -123,6 +126,39 @@ describe("scoreVacancy", () => {
 
     // Phase 2.1: entering VERIFIED enqueues fit analysis.
     expect(deps.enqueueFitJobs).toHaveBeenCalledWith(client, "vacancy-1");
+  });
+
+  // 20260917120000: an aggregator-shaped vacancy (aggregator-owned URL, no
+  // company domain) could never clear the 80-point VERIFIED threshold — its
+  // real measured ceiling was 65 — so every Jooble/USAJOBS result stayed
+  // invisible to candidates no matter how many times it was re-scored.
+  // source_policies.employer_identity_authoritative is what makes that
+  // ceiling reachable, and deliberately only for a source that is itself the
+  // employer's system of record.
+  it("scores an aggregator-shaped vacancy VERIFIED only when the source is authoritative for employer identity", async () => {
+    const aggregatorVacancy = {
+      ...defaultVacancyRow,
+      authoritative_url: "https://www.usajobs.gov:443/job/759326100",
+      company_id: null,
+      source_code: "usajobs",
+    };
+
+    const withoutFlag = makeClient({ vacancy: { data: aggregatorVacancy, error: null } });
+    const resultWithout = await scoreVacancy(withoutFlag.client, "vacancy-1", withoutFlag.deps);
+    expect(resultWithout.status).toBe("UNDER_REVIEW");
+    if (resultWithout.status !== "BLOCKED") {
+      expect(resultWithout.score).toBe(65);
+    }
+
+    const withFlag = makeClient({
+      vacancy: { data: aggregatorVacancy, error: null },
+      policy: { data: { ...defaultPolicy, employer_identity_authoritative: true }, error: null },
+    });
+    const resultWith = await scoreVacancy(withFlag.client, "vacancy-1", withFlag.deps);
+    expect(resultWith.status).toBe("VERIFIED");
+    if (resultWith.status !== "BLOCKED") {
+      expect(resultWith.score).toBe(85);
+    }
   });
 
   it("does NOT re-enqueue fit analysis when the vacancy is already VERIFIED", async () => {
@@ -284,5 +320,119 @@ describe("scoreVacancy", () => {
     if (result.status !== "BLOCKED") {
       expect(result.score).toBe(63);
     }
+  });
+});
+
+describe("resolveStatus — the partial-verification rule", () => {
+  it("relabels an UNDER_REVIEW score as VERIFIED_INCOMPLETE when the source declares partial verification", () => {
+    expect(resolveStatus("UNDER_REVIEW", true)).toBe("VERIFIED_INCOMPLETE");
+  });
+
+  it("leaves UNDER_REVIEW alone when the source has not declared it", () => {
+    expect(resolveStatus("UNDER_REVIEW", false)).toBe("UNDER_REVIEW");
+  });
+
+  it("NEVER upgrades a FLAGGED score, whatever the source declares", () => {
+    // The line that matters. FLAGGED means the score itself found something
+    // wrong; a source-level declaration suppresses an "unproven" label, it does
+    // not turn a negative finding into an eligible listing.
+    expect(resolveStatus("FLAGGED", true)).toBe("FLAGGED");
+    expect(resolveStatus("FLAGGED", false)).toBe("FLAGGED");
+  });
+
+  it("NEVER downgrades a VERIFIED score", () => {
+    // A source's own modesty cannot take away a status the vacancy's score
+    // earned.
+    expect(resolveStatus("VERIFIED", true)).toBe("VERIFIED");
+    expect(resolveStatus("VERIFIED", false)).toBe("VERIFIED");
+  });
+
+  it("is a no-op for every status when the flag is off, so no existing source changes behaviour", () => {
+    for (const status of ["VERIFIED", "VERIFIED_INCOMPLETE", "UNDER_REVIEW", "FLAGGED"] as const) {
+      expect(resolveStatus(status, false)).toBe(status);
+    }
+  });
+});
+
+describe("scoreVacancy — partial verification sources", () => {
+  // The aggregator shape: aggregator-owned URL, no company domain, so
+  // employerIdentity scores 0 and 65 is the ceiling against a VERIFIED
+  // threshold of 80. This is Remotive's shape.
+  const aggregatorVacancy = {
+    ...defaultVacancyRow,
+    authoritative_url: "https://www.usajobs.gov:443/job/759326100",
+    company_id: null,
+    source_code: "remotive",
+  };
+
+  it("records VERIFIED_INCOMPLETE when the source allows it", async () => {
+    const { client, deps } = makeClient({
+      vacancy: { data: aggregatorVacancy, error: null },
+      policy: { data: { ...defaultPolicy, partial_verification_allowed: true }, error: null },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("VERIFIED_INCOMPLETE");
+    if (result.status !== "BLOCKED") {
+      expect(result.score).toBe(65);
+    }
+  });
+
+  it("writes that one status to BOTH tables, which is the whole point", async () => {
+    // Before Task Y, intake recorded UNDER_REVIEW in vacancy_trust_scores and
+    // then overwrote vacancies.trust_status with VERIFIED_INCOMPLETE, leaving
+    // two tables disagreeing about one fact.
+    const { client, deps, trustScoreBuilder, vacancyUpdateBuilder } = makeClient({
+      vacancy: { data: aggregatorVacancy, error: null },
+      policy: { data: { ...defaultPolicy, partial_verification_allowed: true }, error: null },
+    });
+
+    await scoreVacancy(client, "vacancy-1", deps);
+
+    const scoreInsert = trustScoreBuilder.calls.find((call) => call.method === "insert");
+    expect(scoreInsert?.args[0]).toMatchObject({ vacancy_id: "vacancy-1", status: "VERIFIED_INCOMPLETE", score: 65 });
+
+    const statusUpdate = vacancyUpdateBuilder.calls.find(
+      (call) => call.method === "update" && typeof call.args[0] === "object" && call.args[0] !== null,
+    );
+    expect(statusUpdate?.args[0]).toEqual({ trust_status: "VERIFIED_INCOMPLETE" });
+  });
+
+  it("does not relabel a vacancy that earned VERIFIED", async () => {
+    const { client, deps } = makeClient({
+      policy: { data: { ...defaultPolicy, partial_verification_allowed: true }, error: null },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("VERIFIED");
+  });
+
+  it("leaves sources without the declaration on UNDER_REVIEW, unchanged", async () => {
+    // Jooble's 125 rows depend on this: they are genuinely unverifiable
+    // scraped listings, not merely incomplete ones.
+    const { client, deps, vacancyUpdateBuilder } = makeClient({
+      vacancy: { data: { ...aggregatorVacancy, source_code: "jooble" }, error: null },
+    });
+
+    const result = await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(result.status).toBe("UNDER_REVIEW");
+    const statusUpdate = vacancyUpdateBuilder.calls.find(
+      (call) => call.method === "update" && typeof call.args[0] === "object" && call.args[0] !== null,
+    );
+    expect(statusUpdate?.args[0]).toEqual({ trust_status: "UNDER_REVIEW" });
+  });
+
+  it("enqueues fit analysis on the transition into VERIFIED_INCOMPLETE", async () => {
+    const { client, deps } = makeClient({
+      vacancy: { data: aggregatorVacancy, error: null },
+      policy: { data: { ...defaultPolicy, partial_verification_allowed: true }, error: null },
+    });
+
+    await scoreVacancy(client, "vacancy-1", deps);
+
+    expect(deps.enqueueFitJobs).toHaveBeenCalledWith(client, "vacancy-1");
   });
 });

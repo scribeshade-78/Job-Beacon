@@ -1,6 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export const MAILBOX_PROVIDERS = ["gmail", "outlook"] as const;
+/**
+ * Kept in sync manually with mailbox_connections_provider_check, the same
+ * precedent as APPLICATION_ATTEMPT_STATUSES. local_payload is a message
+ * connection that was never a mailbox: it carries email payloads supplied
+ * directly for testing the response loop (server/integrations/emailParser.ts).
+ * It is deliberately a distinct provider so the poller, which claims only
+ * provider = 'gmail', never tries to poll it.
+ */
+export const MAILBOX_PROVIDERS = ["gmail", "outlook", "local_payload"] as const;
 
 export type MailboxProvider = (typeof MAILBOX_PROVIDERS)[number];
 
