@@ -67,8 +67,15 @@ ENV NODE_ENV=production \
 # renderer at it, and the launch args cover Docker's 64 MB /dev/shm, which
 # Chromium crashes rendering into.
 #
-# Verified: jlandure/alpine-chrome's Dockerfile installs chromium-swiftshader
-# and sets CHROME_BIN=/usr/bin/chromium-browser.
+# VERIFIED BY RUNNING IT, NOT BY READING A REFERENCE. The first version of this
+# file installed only "chromium-swiftshader", following jlandure/alpine-chrome's
+# Dockerfile. That package contains the ANGLE/SwiftShader libraries
+# (/usr/lib/chromium/libEGL.so and friends) and NO BROWSER BINARY at all, so
+# Playwright failed with "executable doesn't exist at
+# /usr/bin/chromium-browser". The "chromium" package is what provides
+# /usr/bin/chromium-browser (a symlink to chromium-launcher.sh). Installing both
+# was confirmed inside the running container to launch a browser and render a
+# real PDF.
 ENV PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium-browser \
     PLAYWRIGHT_LAUNCH_ARGS="--disable-dev-shm-usage --disable-software-rasterizer"
 
@@ -76,6 +83,7 @@ ENV PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium-browser \
 # being swallowed by the shell-less exec. The server already stops on SIGTERM;
 # without this it never receives it and every deploy waits out the kill timeout.
 RUN apk add --no-cache \
+      chromium \
       chromium-swiftshader \
       ttf-freefont \
       font-noto-emoji \
@@ -85,10 +93,14 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY package.json ./
 
-# Non-root. The image writes nothing to disk at runtime — resumes and every
-# other artefact live in Supabase Storage — so the app user needs no ownership
-# of anything beyond the files just copied.
-RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app
+# Non-root, and NO RECURSIVE chown. The app only ever READS these files — it
+# writes nothing to disk at runtime, because resumes and every other artefact
+# live in Supabase Storage — and the files COPY produces are world-readable, so
+# the user needs no ownership of them. An earlier version of this file ran
+# "chown -R app:app /app", which walks every one of the tens of thousands of
+# files in node_modules: it added minutes to the build and stalled it outright on
+# a Windows host, for a permission change nothing reads.
+RUN addgroup -S app && adduser -S app -G app
 USER app
 
 EXPOSE 5000
