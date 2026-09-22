@@ -27,8 +27,35 @@ COPY server ./server
 COPY shared ./shared
 COPY scripts ./scripts
 
+# VITE_* VARIABLES ARE BUILD-TIME, NOT RUNTIME, AND THAT DISTINCTION IS THE
+# WHOLE POINT OF THESE TWO LINES. Vite replaces import.meta.env.VITE_FOO with
+# the literal value while bundling, so a variable supplied only by compose's
+# `env_file` at container start arrives far too late — the bundle is already
+# compiled and the reference is already gone. Without these ARGs the built
+# client throws "Missing Supabase browser configuration" during its first
+# render, React never commits, and the site serves a blank white page.
+#
+# ONLY PUBLIC VALUES BELONG HERE. VITE_SUPABASE_PUBLISHABLE_KEY ships to every
+# browser by design, so baking it into a layer exposes nothing new. The
+# service-role key must never be named VITE_* and must never be passed as a
+# build arg — see docs/JOOBLE_INTEGRATION.md §3.4. There is deliberately no
+# `ARG SUPABASE_SERVICE_ROLE_KEY`; the runtime-only secrets arrive via
+# docker-compose.prod.yml's env_file, after this stage is finished.
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_PUBLISHABLE_KEY
+ENV VITE_SUPABASE_URL=${VITE_SUPABASE_URL} \
+    VITE_SUPABASE_PUBLISHABLE_KEY=${VITE_SUPABASE_PUBLISHABLE_KEY}
+
 # Fails the image build if the TypeScript does not compile, which is the same
-# fail-fast gate deploy.sh runs locally before shipping anything.
+# fail-fast gate deploy.sh runs locally before shipping anything. It also now
+# fails if the two build args above are missing: main.tsx reaches
+# readSupabaseBrowserConfig() during the first render, so a bundle built
+# without them is a blank page rather than a build error — this assertion is
+# what turns that silent runtime failure into a loud build failure.
+RUN test -n "${VITE_SUPABASE_URL}" \
+ && test -n "${VITE_SUPABASE_PUBLISHABLE_KEY}" \
+ || (echo "ERROR: VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY are required build args. Without them the client bundle renders a blank page. Pass them with: docker compose --env-file .env.build -f docker-compose.prod.yml build" >&2; exit 1)
+
 RUN npm run build
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,10 @@
 # Task J — production topology.
 #
-#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose --env-file .env.build -f docker-compose.prod.yml up -d --build
+#
+# THE --env-file IS NOT OPTIONAL. build.args are resolved from it (see the args
+# block below), and without it the Vite bundle is built with no Supabase
+# configuration and serves a blank white page. deploy.sh always passes it.
 #
 # NO DATABASE CONTAINER, DELIBERATELY. Supabase is managed, so Postgres, Auth,
 # Storage and the REST layer all live outside this host. The only local
@@ -22,6 +26,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # BUILD-TIME ONLY, AND env_file BELOW DOES NOT FEED THESE. Compose
+      # resolves build.args from the shell environment / the --env-file it was
+      # invoked with — NOT from a service's env_file: — so a plain
+      # "up -d --build" leaves these empty and reproduces the blank white page.
+      # deploy.sh therefore always passes --env-file .env.build (see below).
+      #
+      # These are the only two variables the Vite bundle needs. Both are public
+      # by design — the publishable key ships to every browser — which is
+      # exactly why a dedicated build file may hold them while the real secrets
+      # stay in .env.production and never enter a build arg or an image layer.
+      #
+      # The :? form fails the build with this message rather than silently
+      # producing a bundle that throws during its first render.
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:?missing — put it in .env.build; Vite inlines it at build time and the client renders a blank page without it}
+        VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY:?missing — put it in .env.build; Vite inlines it at build time and the client renders a blank page without it}
     image: jobbeacon:latest
     container_name: jobbeacon-app
 
@@ -34,6 +54,12 @@ services:
     # SUPABASE_SERVICE_ROLE_KEY and every other credential the app uses. The
     # .dockerignore excludes .env files so they can never be baked into an image
     # layer even by an accidental "COPY . .".
+    #
+    # THIS IS RUNTIME ONLY. It reaches the container's process environment, so
+    # the Express server reads it — but it CANNOT configure the already-compiled
+    # Vite bundle. Client-visible values must be build args instead, which is
+    # why .env.build exists separately and holds only the two public VITE_*
+    # variables.
     env_file:
       - .env.production
 

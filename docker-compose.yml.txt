@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  jobbeacon-app:
+    image: node:20-alpine
+    container_name: jobbeacon-dev
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"   # Backend port (if any)
+      - "5173:5173"   # Frontend Vite port
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+    command: sh -c "npm install && npm run dev"

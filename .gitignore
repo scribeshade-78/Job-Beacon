@@ -3,6 +3,7 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.build.example
 *.log
 .DS_Store
 Thumbs.db

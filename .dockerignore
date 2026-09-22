@@ -21,3 +21,10 @@ coverage
 .idea
 supabase/.temp
 supabase/.branches
+
+# .kilo/worktrees/* are linked git worktrees — full second copies of this
+# repository (package.json, server/, client/ and all). Nothing in the image
+# needs them (the Dockerfile COPYs named directories, not the whole context),
+# but leaving them in makes every build upload several MB of duplicate source.
+.kilo
+
