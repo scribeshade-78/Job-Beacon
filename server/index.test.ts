@@ -1,5 +1,8 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME } from "../shared/app.js";
 import type { CreateAppOptions } from "./index.js";
@@ -177,8 +180,14 @@ describe("GET /api/health", () => {
 });
 
 describe("unknown routes", () => {
-  it("returns 404", async () => {
-    const response = await fetch(`${baseUrl}/does-not-exist`);
+  // This previously asserted that /does-not-exist returned 404. That is no
+  // longer the contract: the SPA fallback answers unmatched non-/api GETs with
+  // the app shell. It is asserted on /api instead, because this global app's
+  // behaviour for other paths depends on whether a client build is present
+  // (the fallback is only registered when the directory exists), which would
+  // make the assertion pass locally and fail on a clean checkout.
+  it("returns 404 for an unknown /api route, never the app shell", async () => {
+    const response = await fetch(`${baseUrl}/api/does-not-exist`);
 
     expect(response.status).toBe(404);
   });
@@ -2504,6 +2513,71 @@ describe("Task H1 billing routes", () => {
         expect(body.totalLimitValues).toBe(27);
       });
     });
+  });
+});
+
+// SPA fallback. Uses an injected clientBuildPath pointing at a temp fixture
+// rather than dist/client, so these assertions hold on a fresh clone where no
+// build has been run (dist/ is gitignored and absent in CI).
+describe("SPA fallback for the built client", () => {
+  const SHELL = "<!doctype html><title>JobBeacon shell</title>";
+
+  async function withClientBuild(run: (clientBuildPath: string) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(path.join(tmpdir(), "jobbeacon-client-"));
+    mkdirSync(path.join(dir, "assets"));
+    writeFileSync(path.join(dir, "index.html"), SHELL);
+    writeFileSync(path.join(dir, "assets", "app.js"), "console.log('real asset');");
+
+    try {
+      await run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("serves the app shell for a deep link instead of Express's Cannot GET page", async () => {
+    await withClientBuild((clientBuildPath) =>
+      withTestServer({ clientBuildPath }, async (base) => {
+        const response = await fetch(`${base}/resumes`);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(SHELL);
+      }),
+    );
+  });
+
+  it("still serves a real static asset rather than the shell", async () => {
+    await withClientBuild((clientBuildPath) =>
+      withTestServer({ clientBuildPath }, async (base) => {
+        const response = await fetch(`${base}/assets/app.js`);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("console.log('real asset');");
+      }),
+    );
+  });
+
+  it("does not answer an unknown /api path with the shell", async () => {
+    await withClientBuild((clientBuildPath) =>
+      withTestServer({ clientBuildPath }, async (base) => {
+        const response = await fetch(`${base}/api/definitely-not-a-route`);
+
+        // The negative lookahead keeps a JSON client from receiving HTML.
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain("JobBeacon shell");
+      }),
+    );
+  });
+
+  it("registers no fallback when the client build is absent", async () => {
+    await withTestServer(
+      { clientBuildPath: path.join(tmpdir(), "jobbeacon-client-does-not-exist") },
+      async (base) => {
+        const response = await fetch(`${base}/resumes`);
+
+        expect(response.status).toBe(404);
+      },
+    );
   });
 });
 

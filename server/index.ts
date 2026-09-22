@@ -182,6 +182,8 @@ export interface CreateAppOptions {
   checkIsVerifiedEmployer?: EmployerChecker;
   /** Injectable for tests (R8.1) — same "UX signal only" role checkIsModerator carries for /api/me; requireAdmin below is the real authorization boundary. */
   checkIsAdmin?: AdminChecker;
+  /** Injectable for tests; defaults to <cwd>/dist/client. The built client served statically, and the directory the SPA fallback resolves index.html from. */
+  clientBuildPath?: string;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1928,10 +1930,27 @@ export function createApp(options: CreateAppOptions = {}) {
     mountMockEmployer(app);
   }
 
-  const clientBuildPath = path.resolve(process.cwd(), "dist/client");
+  const clientBuildPath = options.clientBuildPath ?? path.resolve(process.cwd(), "dist/client");
 
   if (existsSync(clientBuildPath)) {
     app.use(express.static(clientBuildPath));
+
+    // SPA fallback: any unmatched GET that is not under /api serves the app
+    // shell, so a deep link like /resumes renders the client instead of
+    // Express's "Cannot GET /resumes" error page.
+    //
+    // A RegExp, NOT app.get("*"). Express 5 (path-to-regexp v8) removed the
+    // bare "*" path and throws "Missing parameter name at index 1: *" while the
+    // route is being registered — that is at startup, so it would crash the
+    // server on boot rather than 404 one page.
+    //
+    // The negative lookahead is deliberate: an unknown /api/* path must still
+    // answer 404, not index.html. Handing HTML to a JSON client turns a clean
+    // not-found into an unparseable response body. Registered after every API
+    // route, so it can only ever see paths nothing else claimed.
+    app.get(/^(?!\/api\/).*/, (_request, response) => {
+      response.sendFile(path.join(clientBuildPath, "index.html"));
+    });
   }
 
   return app;
