@@ -2581,3 +2581,161 @@ describe("SPA fallback for the built client", () => {
   });
 });
 
+// Interview Preparation Phase 1. The application logic is covered exhaustively
+// in server/interview/interviewPrep.test.ts against a fake client; these assert
+// the route wiring only — auth, id validation, and the status-code mapping.
+describe("POST /api/vacancies/:vacancyId/interview-prep", () => {
+  const VACANCY_ID = "11111111-1111-1111-1111-111111111111";
+
+  const PREP = {
+    technical_questions: [{ question: "How do you tune Postgres?", topic: "Postgres", why: "The JD requires it." }],
+    behavioral_questions: [{ question: "Describe a conflict.", competency: "conflict resolution", why: "Cross-team." }],
+    star_talking_points: [],
+    gaps: [],
+  };
+
+  /**
+   * Chainable and awaitable, like the real builder: the module awaits `.eq()`
+   * for the list queries and calls `.maybeSingle()` for the single-row ones.
+   */
+  function makeInterviewServiceClient(over: Record<string, { data: unknown; error?: unknown }> = {}) {
+    const tables: Record<string, { data: unknown; error?: unknown }> = {
+      vacancies: { data: { raw_title: "Senior Platform Engineer" } },
+      vacancy_jd_snapshots: { data: { clean_text: "We need a platform engineer with Postgres and Go." } },
+      extracted_facts: { data: [{ id: "f1", fact_type: "skill", fact_value: "Postgres" }] },
+      fact_confirmations: { data: [{ extracted_fact_id: "f1", corrected_value: null }] },
+      ...over,
+    };
+
+    function builderFor(table: string) {
+      const result = tables[table] ?? { data: [], error: null };
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+
+      for (const method of ["select", "eq", "in", "order", "limit"]) {
+        builder[method] = chain;
+      }
+
+      builder.maybeSingle = () => Promise.resolve(result);
+      builder.then = (resolve: (value: unknown) => unknown) => resolve(result);
+
+      return builder;
+    }
+
+    return { from: (table: string) => builderFor(table) } as never;
+  }
+
+  function makeInterviewOpenAIClient(content: string = JSON.stringify(PREP)) {
+    return {
+      chat: { completions: { create: vi.fn().mockResolvedValue({ choices: [{ message: { content } }] }) } },
+    } as never;
+  }
+
+  function post(base: string, vacancyId: string, options: { auth?: boolean } = {}) {
+    return fetch(`${base}/api/vacancies/${vacancyId}/interview-prep`, {
+      method: "POST",
+      headers: options.auth === false ? {} : { Authorization: "Bearer valid-test-token" },
+    });
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier, serviceClient: makeInterviewServiceClient() }, async (base) => {
+      const response = await post(base, VACANCY_ID, { auth: false });
+
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 400 for a vacancy id that is not a uuid", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient(),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, "not-a-uuid");
+
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 404 when the vacancy does not exist", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient({ vacancies: { data: null } }),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it("returns 422 when the vacancy has no JD text", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient({ vacancy_jd_snapshots: { data: null } }),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.status).toBe(422);
+        expect(await response.json()).toHaveProperty("error");
+      },
+    );
+  });
+
+  it("returns 200 with the generated prep", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient(),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(PREP);
+      },
+    );
+  });
+
+  it("returns 422 for malformed AI output rather than 200 with a partial body", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient(),
+        openaiClient: makeInterviewOpenAIClient("not json"),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.status).toBe(422);
+      },
+    );
+  });
+
+  it("marks the response no-store — prep is per-candidate and not cached", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient(),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.headers.get("cache-control")).toBe("no-store");
+      },
+    );
+  });
+});
+

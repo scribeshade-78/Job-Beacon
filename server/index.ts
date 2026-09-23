@@ -57,6 +57,7 @@ import { DIMENSION_WEIGHTS } from "./trust/trustScore.js";
 import { createSupabaseServiceRoleClient } from "./supabaseServiceRole.js";
 import { createOpenAIClient } from "./resumes/openaiClient.js";
 import { extractResumeFacts } from "./resumes/extractFacts.js";
+import { prepareInterviewPrep } from "./interview/interviewPrep.js";
 import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
@@ -433,6 +434,20 @@ export function createApp(options: CreateAppOptions = {}) {
     message: { error: "Too many extraction requests. Please try again later." },
   });
 
+  // Interview Preparation Phase 1. Candidate-triggered and cost-bearing (one
+  // OpenRouter call each), so it is bounded per candidate rather than left open
+  // to a signed-in user holding the button down. Deliberately looser than the
+  // extraction limit above: a candidate reasonably regenerates prep for several
+  // different vacancies in one sitting, whereas a resume is extracted once.
+  const interviewPrepRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many interview preparation requests. Please try again later." },
+  });
+
   // Candidate-facing "Fetch latest jobs" trigger for the Opportunities page.
   // Unlike the /api/worker/* routes below (external-scheduler driven, worker
   // secret), this one is deliberately reachable by any signed-in candidate —
@@ -702,6 +717,75 @@ export function createApp(options: CreateAppOptions = {}) {
             return;
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Interview Preparation Phase 1.
+  //
+  // POST /api/vacancies/:vacancyId/interview-prep
+  //
+  // Takes only a vacancy id — the JD comes from the vacancy's own snapshot and
+  // the candidate context comes from the caller's CONFIRMED facts, resolved
+  // server-side from the verified token's user id. Nothing about the candidate's
+  // qualifications is accepted from the request body, so a client cannot feed
+  // the model fabricated experience.
+  //
+  // 422 (not 404) when the vacancy exists but has no JD snapshot: the vacancy is
+  // real and the candidate may legitimately be looking at it, so the honest
+  // answer is "there is nothing to generate from", not "not found". This mirrors
+  // analyzeFit, which skips the AI call entirely when jd_text_available is false.
+  //
+  // No persistence: the generated prep is returned and forgotten. Nothing is
+  // written, so there is no new table, RLS policy, or stored copy of the
+  // candidate's interview answers.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/vacancies/:vacancyId/interview-prep",
+    requireAuth,
+    interviewPrepRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const vacancyId = request.params.vacancyId as string;
+
+      if (!UUID_PATTERN.test(vacancyId)) {
+        response.status(400).json({ error: "vacancyId must be a valid vacancy id." });
+        return;
+      }
+
+      try {
+        const result = await prepareInterviewPrep(resolveServiceClient(), resolveOpenAIClient(), {
+          vacancyId,
+          candidateId: request.user!.id,
+        });
+
+        switch (result.kind) {
+          case "success":
+            // Generated per request and not cached; no-store keeps a shared
+            // proxy from holding one candidate's prep.
+            response.set("Cache-Control", "no-store");
+            response.status(200).json(result.prep);
+            return;
+          case "vacancy_not_found":
+            response.status(404).json({ error: "Vacancy not found." });
+            return;
+          case "no_jd_text":
+            response.status(422).json({
+              error: "This vacancy has no job description text, so interview questions cannot be generated from it.",
+            });
+            return;
+          case "malformed_prep":
+            response.status(422).json({ error: result.message });
+            return;
+          case "error":
+            response.status(500).json({ error: result.message });
+            return;
+        }
+      } catch (error) {
+        // resolveServiceClient / resolveOpenAIClient throw when their env is
+        // unset — a 500 with the real reason beats a silent misconfiguration.
         const message = error instanceof Error ? error.message : String(error);
         response.status(500).json({ error: message });
       }
