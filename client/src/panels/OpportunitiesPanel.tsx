@@ -23,6 +23,7 @@ import {
 } from "../lib/opportunityQuery";
 import { loadCandidatePreferences, type CandidatePreferences } from "../lib/candidatePreferences";
 import { OpportunityFilterBar } from "./OpportunityFilterBar";
+import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { safeVacancyHref } from "./shared";
@@ -279,6 +280,12 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
   const [querying, setQuerying] = useState(false);
+  /**
+   * The vacancy whose interview prep is open, or null when the dialog is
+   * closed. Holding the whole summary rather than just an id lets the dialog
+   * title name the role without a second lookup.
+   */
+  const [prepVacancy, setPrepVacancy] = useState<OpportunitySummary | null>(null);
   const [bulkApplying, setBulkApplying] = useState(false);
 
   useEffect(() => {
@@ -759,6 +766,24 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
 
                     <FitSection fit={opp.fitAnalysis} />
                   </div>
+
+                  {/* Offered only where the server will accept it. `unverified`
+                      is isUnverifiedSource(opp.trustStatus) — the exact inverse
+                      of the endpoint's VACANCY_TRUST_ELIGIBLE_STATUSES gate, so
+                      the two cannot drift apart. An UNDER_REVIEW row stays
+                      visible here (the view surfaces it deliberately) but gets
+                      no generate action, rather than a button whose only
+                      outcome is a refusal. */}
+                  {!unverified && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => setPrepVacancy(opp)}
+                    >
+                      Prepare for interview
+                    </Button>
+                  )}
                 </div>
               </li>
             );
@@ -775,6 +800,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           </button>
         )}
       </CardContent>
+
+      {/* Rendered inside the Card, but Radix portals the content to body, so it
+          is not affected by the card's layout or overflow. */}
+      <InterviewPrepDialog
+        vacancyId={prepVacancy?.id ?? null}
+        vacancyTitle={prepVacancy?.title ?? ""}
+        onClose={() => setPrepVacancy(null)}
+      />
     </Card>
   );
 }
