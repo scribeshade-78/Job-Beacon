@@ -106,7 +106,8 @@ import {
   listPendingFollowUps,
   sendFollowUpDraft,
 } from "./mailbox/followUpReview.js";
-import { IntakePolicyError, runIntake } from "./intake/intake.js";
+import { IntakePolicyError, runIntake, runIntakeAcrossSources } from "./intake/intake.js";
+import { loadIntakeQueryContext } from "./intake/queryContext.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -507,12 +508,15 @@ export function createApp(options: CreateAppOptions = {}) {
       return;
     }
 
-    // Defaulted only when unambiguous — same refusal to guess as
-    // resolveCandidateId and the MCP tool.
-    const sourceCode =
-      requestedSource || (registered.length === 1 ? registered[0]!.sourceCode : "");
-
-    if (!sourceCode || !registered.some((adapter) => adapter.sourceCode === sourceCode)) {
+    // NO DEFAULTING, NO SINGLE-SOURCE ASSUMPTION. This route previously
+    // defaulted to the one registered adapter and 400'd ("Unknown intake
+    // source") the moment a second was registered, because the client sends no
+    // body to name one — so the button worked only for as long as exactly one
+    // source existed. An explicit sourceCode is still honoured, and a typo in it
+    // is still a 400 (silently fanning out over everything would answer a
+    // different question than the one asked), but omitting it now means "every
+    // registered source", which is what the button actually wants.
+    if (requestedSource && !registered.some((adapter) => adapter.sourceCode === requestedSource)) {
       response.status(400).json({
         error: `Unknown intake source. Registered: ${registered.map((a) => a.sourceCode).join(", ")}.`,
       });
@@ -521,10 +525,32 @@ export function createApp(options: CreateAppOptions = {}) {
 
     try {
       const client = resolveServiceClient();
-      const result = await runIntake(client, { sourceCode, search, limit });
-      const created = result.outcomes.filter((outcome) => outcome.outcome === "created");
-      const updated = result.outcomes.filter((outcome) => outcome.outcome === "updated");
-      const newVacancyIds = created.map((outcome) => outcome.vacancyId);
+
+      // The candidate's own search context, read with the service-role client
+      // and scoped to the verified token's user id. It is what lets the
+      // credentialed aggregators be asked anything at all: Jooble needs
+      // keywords and a location, Adzuna needs an ISO country. Remotive ignores
+      // all three, so a candidate with an empty profile still gets results from
+      // it — and the sources that cannot run are reported as skips with reasons
+      // rather than silently contributing nothing.
+      const queryContext = await loadIntakeQueryContext(client, request.user!.id);
+
+      // Fan-out. Each source is isolated inside runIntakeAcrossSources, so one
+      // missing a source_policies row or being down cannot cost the candidate
+      // the sources that work.
+      const result = await runIntakeAcrossSources(
+        client,
+        {
+          sourceCodes: requestedSource ? [requestedSource] : undefined,
+          search,
+          limit,
+          keywords: queryContext.keywords,
+          location: queryContext.location,
+          country: queryContext.country,
+        },
+        {},
+      );
+      const newVacancyIds = result.newVacancyIds;
 
       // Task A2: score the new vacancies NOW, targeted at their own ids.
       //
@@ -572,22 +598,30 @@ export function createApp(options: CreateAppOptions = {}) {
       // vacancies left no trace at all, so "the intake ran and found nothing
       // new" and "the request never arrived" looked identical in the logs.
       console.log(
-        `[intake:discover] source=${result.sourceCode} candidate=${request.user!.id} ` +
-          `received=${result.received} ingested=${result.ingested} created=${created.length} ` +
-          `updated=${updated.length} fitAnalyzed=${fit?.analyzed ?? 0} fitFailed=${fit?.failed ?? 0} ` +
-          `durationMs=${result.durationMs}`,
+        `[intake:discover] candidate=${request.user!.id} sources=${result.sources.length} ` +
+          `failed=${result.failedSources} received=${result.received} ingested=${result.ingested} ` +
+          `created=${result.created} updated=${result.updated} ` +
+          `fitAnalyzed=${fit?.analyzed ?? 0} fitFailed=${fit?.failed ?? 0} durationMs=${result.durationMs} ` +
+          `perSource=${result.sources
+            .map((source) =>
+              source.status === "failed" ? `${source.sourceCode}:failed(${source.error})` : `${source.sourceCode}:+${source.created}`,
+            )
+            .join(",")}`,
       );
 
       response.set("Cache-Control", "no-store");
       response.status(200).json({
-        sourceCode: result.sourceCode,
-        displayName: result.displayName,
-        attribution: result.attribution,
-        search: result.search,
+        // AGGREGATE TOTALS AT THE TOP LEVEL, per-source detail in `sources`.
+        // The per-source entries are not optional decoration: `attribution` is a
+        // per-source legal obligation (Remotive's terms require their name to
+        // travel with their data), so collapsing several sources into one scalar
+        // attribution would silently drop it. A failed source keeps its entry too
+        // — otherwise "3 sources, 2 misconfigured" is indistinguishable from
+        // "1 source, working fine".
         received: result.received,
         ingested: result.ingested,
-        created: created.length,
-        updated: updated.length,
+        created: result.created,
+        updated: result.updated,
         // The client marks these rows as new; without the ids it can only say
         // "something changed" while the list looks identical.
         newVacancyIds,
@@ -604,12 +638,15 @@ export function createApp(options: CreateAppOptions = {}) {
         skippedByAdapter: result.skippedByAdapter,
         trustStatusCounts: result.trustStatusCounts,
         durationMs: result.durationMs,
+        failedSources: result.failedSources,
+        sources: result.sources,
       });
     } catch (error) {
+      // Defensive: runIntakeAcrossSources converts a per-source failure into a
+      // `status: "failed"` entry rather than throwing, so this now only catches
+      // something that went wrong outside any single source.
       if (error instanceof IntakePolicyError) {
         // 409, not 500: the request is fine, the source is switched off.
-        // Logged rather than returned silently: a switched-off source is a
-        // candidate-visible failure, and it was previously invisible in logs.
         console.warn(`[intake:discover] refused by source policy: ${error.message}`);
         response.status(409).json({ error: error.message });
         return;

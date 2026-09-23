@@ -30,6 +30,29 @@ export interface IntakeQuery {
    * which is what an unfiltered browse is.
    */
   search?: string;
+  /**
+   * Role keywords, already joined into ONE comma-separated string by the caller.
+   *
+   * Pre-joined rather than a list, and that is a quota decision rather than a
+   * typing preference: Jooble's free plan is a lifetime total of 500 requests
+   * per key, so a candidate with five selected roles must cost one request, not
+   * five. An adapter that received an array would be free to loop over it, and
+   * the cheapest way to make that impossible is to never hand it the array.
+   */
+  keywords?: string;
+  /**
+   * Freeform place name to search around (Jooble's `location`). Jooble
+   * documents keywords and location as BOTH required, so an adapter for it must
+   * treat a missing one as "cannot run" rather than falling back to a guess.
+   */
+  location?: string;
+  /**
+   * ISO-3166 alpha-2 country code, already lower-cased by the caller. Adzuna
+   * takes it as a URL path segment. Only ever set when the candidate's stated
+   * preference was genuinely a two-letter code — see intake/queryContext.ts for
+   * why a country NAME is never converted into one.
+   */
+  country?: string;
   /** Upper bound on postings returned, applied after the adapter's own filtering. */
   limit: number;
 }

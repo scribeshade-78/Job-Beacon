@@ -14,20 +14,36 @@ import { getSupabaseBrowserClient } from "./supabaseClient";
  * it just is not something a candidate's button can usefully do.
  * ------------------------------------------------------------------------- */
 
-export interface LiveDiscoveryResult {
+/**
+ * One source's contribution to a fan-out run. Mirrors the server's
+ * IntakeSourceSummary, including entries for sources that FAILED — the UI needs
+ * to name what was unavailable, not merely count what worked.
+ */
+export interface DiscoverySourceSummary {
   sourceCode: string;
   displayName: string;
-  /** The attribution the source's terms require to travel with its data. */
+  /** The source's own attribution, which its terms require to travel with its data. */
   attribution: string;
+  status: "ok" | "failed";
+  error?: string;
   search: string | null;
-  /** Listings the source returned, before filtering. */
   received: number;
-  /** Listings written through the ingestion path. */
   ingested: number;
-  /** Of those, how many did not exist before — the only number that means "new". */
   created: number;
   updated: number;
-  /** Vacancy ids created by this call, so the list can mark them. */
+  skippedByAdapter: number;
+  newVacancyIds: string[];
+  trustStatusCounts: Record<string, number>;
+  durationMs: number;
+}
+
+export interface LiveDiscoveryResult {
+  /** Aggregate across every source that ran. */
+  received: number;
+  ingested: number;
+  created: number;
+  updated: number;
+  /** Union of every source's new ids, so the list can mark all of them. */
   newVacancyIds: string[];
   /** How many of the new vacancies were scored with a priority before this response. */
   fitAnalyzed: number;
@@ -39,6 +55,9 @@ export interface LiveDiscoveryResult {
   skippedByAdapter: number;
   trustStatusCounts: Record<string, number>;
   durationMs: number;
+  /** Sources that were skipped, so partial success is visible rather than silent. */
+  failedSources: number;
+  sources: DiscoverySourceSummary[];
 }
 
 export type DiscoverLiveJobsOutcome =
@@ -124,35 +143,50 @@ async function readServerError(response: Response): Promise<string | null> {
  * was still broken.
  */
 export function describeDiscoveryResult(result: LiveDiscoveryResult): string {
+  const total = result.sources.length;
+  const plural = total === 1 ? "source" : "sources";
+  const unavailable =
+    result.failedSources > 0 ? ` ${result.failedSources} of ${total} ${plural} couldn't be reached.` : "";
+
+  // Every source failing is NOT "no new jobs": nothing was fetched at all, and
+  // reporting it as a quiet zero would hide a total outage behind a calm
+  // sentence. Checked first, for that reason.
+  if (total > 0 && result.failedSources === total) {
+    const names = result.sources.map((source) => source.displayName).join(", ");
+    return `Couldn't reach ${names}. Nothing was fetched — please try again later.`;
+  }
+
   if (result.created > 0) {
     const noun = result.created === 1 ? "job" : "jobs";
     const added = `${result.created} new ${noun} added`;
 
     if (result.fitAnalyzed === result.created) {
-      return `${added} and scored.`;
+      return `${added} and scored.${unavailable}`;
     }
 
     if (result.fitAnalyzed > 0) {
       // Says exactly how many are ranked and how many are not. "5 scored"
       // alone would leave a candidate wondering why 11 of their 16 new jobs
       // are missing from the top of the list.
-      return `${added}. ${result.fitAnalyzed} scored; ${result.fitPending} still queued for scoring.`;
+      return `${added}. ${result.fitAnalyzed} scored; ${result.fitPending} still queued for scoring.${unavailable}`;
     }
 
     // Nothing scored: the jobs are real but unranked, so they sort last and the
     // UI is still hoisting them. Saying "scored" here would be false.
-    return `${added}. They aren't scored yet, so they're shown at the top until their fit analysis runs.`;
+    return `${added}. They aren't scored yet, so they're shown at the top until their fit analysis runs.${unavailable}`;
   }
 
   if (result.updated > 0) {
-    return `No new jobs — ${result.updated} existing listing${result.updated === 1 ? "" : "s"} refreshed.`;
+    return `No new jobs — ${result.updated} existing listing${result.updated === 1 ? "" : "s"} refreshed.${unavailable}`;
   }
 
   if (result.received === 0) {
-    return "No jobs came back from the source this time. Try again later.";
+    return `No jobs came back from the ${plural} this time. Try again later.${unavailable}`;
   }
 
-  return "No new jobs right now. This source republishes the same listings until it has new ones.";
+  return total === 1
+    ? `No new jobs right now. This source republishes the same listings until it has new ones.${unavailable}`
+    : `No new jobs right now. These sources republish the same listings until they have new ones.${unavailable}`;
 }
 
 /**

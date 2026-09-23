@@ -4,6 +4,7 @@ import {
   describeRefreshResult,
   discoverLiveJobs,
   refreshOpportunities,
+  type DiscoverySourceSummary,
   type IngestionRefreshResult,
   type LiveDiscoveryResult,
 } from "./ingestion";
@@ -14,24 +15,64 @@ import {
  * "Fetch latest jobs" button now calls, because nothing in this repository ever
  * fills that queue.
  */
-const DISCOVERY_RESULT: LiveDiscoveryResult = {
+const REMOTIVE_SOURCE: DiscoverySourceSummary = {
   sourceCode: "remotive",
   displayName: "Remotive (public remote-job API)",
   attribution: "Job data from Remotive (https://remotive.com), delayed by 24 hours.",
+  status: "ok",
   search: null,
   received: 16,
   ingested: 6,
   created: 2,
   updated: 4,
-  newVacancyIds: ["vac-1", "vac-2"],
-  fitAnalyzed: 2,
-  fitPending: 0,
-  fitStoppedOnDeadline: false,
-  fitError: null,
   skippedByAdapter: 0,
+  newVacancyIds: ["vac-1", "vac-2"],
   trustStatusCounts: { VERIFIED_INCOMPLETE: 6 },
   durationMs: 2500,
 };
+
+/** A source the fan-out skipped — no source_policies row, kill switch, or down. */
+function failedSource(sourceCode: string, displayName: string, error = "HTTP 503"): DiscoverySourceSummary {
+  return {
+    sourceCode,
+    displayName,
+    attribution: "",
+    status: "failed",
+    error,
+    search: null,
+    received: 0,
+    ingested: 0,
+    created: 0,
+    updated: 0,
+    skippedByAdapter: 0,
+    newVacancyIds: [],
+    trustStatusCounts: {},
+    durationMs: 12,
+  };
+}
+
+/** The aggregate the server returns for a fan-out run. */
+function discoveryResult(over: Partial<LiveDiscoveryResult> = {}): LiveDiscoveryResult {
+  return {
+    received: 16,
+    ingested: 6,
+    created: 2,
+    updated: 4,
+    newVacancyIds: ["vac-1", "vac-2"],
+    fitAnalyzed: 2,
+    fitPending: 0,
+    fitStoppedOnDeadline: false,
+    fitError: null,
+    skippedByAdapter: 0,
+    trustStatusCounts: { VERIFIED_INCOMPLETE: 6 },
+    durationMs: 2500,
+    failedSources: 0,
+    sources: [REMOTIVE_SOURCE],
+    ...over,
+  };
+}
+
+const DISCOVERY_RESULT: LiveDiscoveryResult = discoveryResult();
 
 function result(overrides: Partial<IngestionRefreshResult> = {}): IngestionRefreshResult {
   return {

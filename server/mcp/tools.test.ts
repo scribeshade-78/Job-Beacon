@@ -383,7 +383,7 @@ describe("discoverLiveJobs", () => {
   });
 
   it("passes the search and limit through to intake", async () => {
-    await discoverLiveJobs({} as SupabaseClient, { search: "data engineer", limit: 10 });
+    await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive", search: "data engineer", limit: 10 });
 
     expect(mockedRunIntake).toHaveBeenCalledWith(
       expect.anything(),
@@ -392,18 +392,22 @@ describe("discoverLiveJobs", () => {
     );
   });
 
-  it("defaults to the only registered source rather than requiring one", async () => {
-    await discoverLiveJobs({} as SupabaseClient, {});
+  it("refuses to guess which source to query once several are registered", async () => {
+    // This previously asserted that a bare call defaulted to the single
+    // registered source. That default only ever existed because exactly one
+    // adapter was registered (Remotive); once Jooble and Adzuna were added the
+    // tool takes its documented multi-source branch instead, which is the
+    // behavior asserted here. Reporting one source's results as though they were
+    // the requested ones would be worse than an error naming the options.
+    await expect(discoverLiveJobs({} as SupabaseClient, {})).rejects.toThrow(/source_code is required/);
 
-    expect(mockedRunIntake).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ sourceCode: "remotive" }),
-      expect.anything(),
-    );
+    // The message lists the registered sources, so the caller can pick one.
+    await expect(discoverLiveJobs({} as SupabaseClient, {})).rejects.toThrow(/remotive/);
+    expect(mockedRunIntake).not.toHaveBeenCalled();
   });
 
   it("returns the ingested vacancies so an agent can act on them", async () => {
-    const result = await discoverLiveJobs({} as SupabaseClient, {});
+    const result = await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" });
 
     expect(result.vacancies).toEqual([
       {
@@ -420,7 +424,7 @@ describe("discoverLiveJobs", () => {
   });
 
   it("says up front that these vacancies cannot be queued, instead of letting the agent find out", async () => {
-    const result = await discoverLiveJobs({} as SupabaseClient, {});
+    const result = await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" });
 
     // Discovered from a source with no submission adapter: queue_applications
     // will reject every one of them with NO_ADAPTER_REGISTERED_FOR_SOURCE.
@@ -429,31 +433,31 @@ describe("discoverLiveJobs", () => {
   });
 
   it("carries the source's attribution, because the obligation travels with the data", async () => {
-    const result = await discoverLiveJobs({} as SupabaseClient, {});
+    const result = await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" });
 
     expect(result.attribution).toContain("Remotive");
   });
 
   it("reports the distribution of statuses the scorer decided", async () => {
-    const result = await discoverLiveJobs({} as SupabaseClient, {});
+    const result = await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" });
 
     expect(result.trustStatusCounts).toEqual({ VERIFIED_INCOMPLETE: 10 });
   });
 
   it("reports each vacancy's own status, so a FLAGGED listing is not hidden by an average", async () => {
-    const result = await discoverLiveJobs({} as SupabaseClient, {});
+    const result = await discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" });
 
     expect(result.vacancies[0].trustStatus).toBe("VERIFIED_INCOMPLETE");
   });
 
   it("rejects a non-positive limit", async () => {
-    await expect(discoverLiveJobs({} as SupabaseClient, { limit: 0 })).rejects.toBeInstanceOf(IntakeInputError);
+    await expect(discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive", limit: 0 })).rejects.toBeInstanceOf(IntakeInputError);
     expect(mockedRunIntake).not.toHaveBeenCalled();
   });
 
   it("propagates a policy refusal unchanged, so the agent sees why", async () => {
     mockedRunIntake.mockRejectedValueOnce(new Error('Intake is not permitted for source "remotive": its kill_switch is on'));
 
-    await expect(discoverLiveJobs({} as SupabaseClient, {})).rejects.toThrow(/kill_switch is on/);
+    await expect(discoverLiveJobs({} as SupabaseClient, { sourceCode: "remotive" })).rejects.toThrow(/kill_switch is on/);
   });
 });

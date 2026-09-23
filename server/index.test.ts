@@ -122,7 +122,7 @@ vi.mock("./applications/attemptReview.js", async () => {
 // here only auth-gating, source resolution and response wiring.
 vi.mock("./intake/intake.js", async () => {
   const actual = await vi.importActual<typeof import("./intake/intake.js")>("./intake/intake.js");
-  return { ...actual, runIntake: vi.fn() };
+  return { ...actual, runIntake: vi.fn(), runIntakeAcrossSources: vi.fn() };
 });
 
 // Task C2's follow-up routes — internals covered by
@@ -146,7 +146,7 @@ import {
   sendFollowUpDraft,
 } from "./mailbox/followUpReview.js";
 
-import { runIntake } from "./intake/intake.js";
+import { runIntake, runIntakeAcrossSources } from "./intake/intake.js";
 
 let baseUrl: string;
 let server: ReturnType<typeof app.listen>;
@@ -1466,55 +1466,105 @@ describe("POST /api/candidate/follow-ups/:id/dismiss", () => {
 });
 
 describe("POST /api/intake/discover", () => {
-  const mockIntake = vi.mocked(runIntake);
+  const mockFanOut = vi.mocked(runIntakeAcrossSources);
   const verifier = async (token: string) =>
     token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
 
-  const intakeResult = {
+  const okSource = {
     sourceCode: "remotive",
     displayName: "Remotive (public remote-job API)",
     attribution: "Job data from Remotive (https://remotive.com), delayed by 24 hours.",
+    status: "ok" as const,
     search: null,
     received: 16,
-    skippedByAdapter: 0,
     ingested: 3,
+    created: 2,
+    updated: 1,
+    skippedByAdapter: 0,
+    newVacancyIds: ["new-1", "new-2"],
     trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
-    outcomes: [
-      { vacancyId: "new-1", title: "Data Engineer", companyName: "Acme", outcome: "created", trustStatus: "VERIFIED_INCOMPLETE" },
-      { vacancyId: "new-2", title: "Data Analyst", companyName: "Acme", outcome: "created", trustStatus: "VERIFIED_INCOMPLETE" },
-      { vacancyId: "old-1", title: "Old Job", companyName: "Acme", outcome: "updated", trustStatus: "VERIFIED_INCOMPLETE" },
-    ],
     durationMs: 1234,
   };
 
+  const fanOutResult = {
+    sources: [okSource],
+    received: 16,
+    ingested: 3,
+    created: 2,
+    updated: 1,
+    skippedByAdapter: 0,
+    newVacancyIds: ["new-1", "new-2"],
+    trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
+    durationMs: 1234,
+    failedSources: 0,
+  };
+
   beforeEach(() => {
-    mockIntake.mockReset();
-    mockIntake.mockResolvedValue(intakeResult as never);
+    mockFanOut.mockReset();
+    mockFanOut.mockResolvedValue(fanOutResult as never);
   });
 
+  /**
+   * The route reads the candidate's intake context — selected roles, preferences
+   * and the confirmed location fact — BEFORE it fans out, so these cases need a
+   * client that can answer those reads even though they mock the fan-out itself.
+   *
+   * Empty answers are the correct default rather than a convenience: every field
+   * of that context is optional by design, and "the candidate has stated
+   * nothing" is a real state that must still fan out over the sources needing no
+   * context at all.
+   */
+  function makeIntakeContextClient(over: Record<string, { data: unknown }> = {}) {
+    const defaults: Record<string, { data: unknown }> = {
+      candidate_selected_roles: { data: [] },
+      extracted_facts: { data: [] },
+      fact_confirmations: { data: [] },
+      // No row is the normal state for a candidate who never opened the
+      // preferences form, and the loader reads this one with maybeSingle().
+      candidate_preferences: { data: null },
+    };
+
+    function builderFor(table: string) {
+      const result = over[table] ?? defaults[table] ?? { data: [] };
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+
+      for (const method of ["select", "eq", "in", "order", "limit"]) {
+        builder[method] = chain;
+      }
+
+      builder.maybeSingle = () => Promise.resolve(result);
+      builder.then = (resolve: (value: unknown) => unknown) => resolve(result);
+
+      return builder;
+    }
+
+    return { from: (table: string) => builderFor(table) } as never;
+  }
+
   it("returns 401 without a token, and fetches nothing", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, { method: "POST" });
 
       expect(response.status).toBe(401);
-      expect(mockIntake).not.toHaveBeenCalled();
+      expect(mockFanOut).not.toHaveBeenCalled();
     });
   });
 
   it("returns 401 for a token that does not verify", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer expired" },
       });
 
       expect(response.status).toBe(401);
-      expect(mockIntake).not.toHaveBeenCalled();
+      expect(mockFanOut).not.toHaveBeenCalled();
     });
   });
 
   it("returns 200 with the counts and the ids of what was created", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
@@ -1522,33 +1572,42 @@ describe("POST /api/intake/discover", () => {
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
-        sourceCode: "remotive",
         received: 16,
         ingested: 3,
         // 3 written, 2 of them new — the distinction the toast depends on.
         created: 2,
         updated: 1,
         newVacancyIds: ["new-1", "new-2"],
+        failedSources: 0,
+        // The per-source detail carries attribution, which is a per-source legal
+        // obligation and cannot be collapsed into a single top-level scalar.
+        sources: [
+          { sourceCode: "remotive", status: "ok", created: 2, updated: 1 },
+        ],
       });
     });
   });
 
-  it("defaults to the only registered source rather than requiring one", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+  it("fans out over every registered source when none is named", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      expect(mockIntake).toHaveBeenCalledWith(
+      // No sourceCodes means "all of them". The old route defaulted to the only
+      // registered adapter and 400'd as soon as a second existed, because the
+      // client sends no body — which is the fragility this removes.
+      expect(mockFanOut).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ sourceCode: "remotive" }),
+        expect.objectContaining({ sourceCodes: undefined }),
+        expect.anything(),
       );
     });
   });
 
   it("returns 400 for a source that is not registered, without calling intake", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token", "Content-Type": "application/json" },
@@ -1556,38 +1615,89 @@ describe("POST /api/intake/discover", () => {
       });
 
       expect(response.status).toBe(400);
-      expect(mockIntake).not.toHaveBeenCalled();
+      expect(mockFanOut).not.toHaveBeenCalled();
     });
   });
 
-  it("returns 409, not 500, when the source's policy refuses the fetch", async () => {
-    mockIntake.mockRejectedValueOnce(
-      new IntakePolicyError("remotive", "its kill_switch is on"),
-    );
+  const failedJooble = {
+    sourceCode: "jooble",
+    displayName: "Jooble",
+    attribution: "",
+    status: "failed" as const,
+    error: "Intake is not permitted for source \"jooble\": its kill_switch is on",
+    search: null,
+    received: 0,
+    ingested: 0,
+    created: 0,
+    updated: 0,
+    skippedByAdapter: 0,
+    newVacancyIds: [],
+    trustStatusCounts: {},
+    durationMs: 5,
+  };
 
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+  it("returns 200 and reports a skipped source instead of failing the whole request", async () => {
+    mockFanOut.mockResolvedValueOnce({
+      ...fanOutResult,
+      failedSources: 1,
+      sources: [okSource, failedJooble],
+    } as never);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      expect(response.status).toBe(409);
-      const body = (await response.json()) as { error: string };
-      expect(body.error).toContain("kill_switch is on");
+      // PARTIAL SUCCESS. A source refused by policy (kill_switch on, no
+      // source_policies row) or simply down must not cost the candidate the
+      // sources that work — the whole point of the fan-out.
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as {
+        failedSources: number;
+        created: number;
+        sources: Array<{ sourceCode: string; status: string; error?: string }>;
+      };
+      expect(body.failedSources).toBe(1);
+      expect(body.created).toBe(2);
+      expect(body.sources).toHaveLength(2);
+      expect(body.sources[1]).toMatchObject({ sourceCode: "jooble", status: "failed" });
+      // The reason travels, so the candidate is not told only that something
+      // silently did not happen.
+      expect(body.sources[1]!.error).toContain("kill_switch");
     });
   });
 
-  it("returns 500 with generic copy when the source itself fails", async () => {
-    mockIntake.mockRejectedValueOnce(new Error("HTTP 503 from remotive.com"));
+  it("still returns 200 when every source failed, so the UI can say so plainly", async () => {
+    mockFanOut.mockResolvedValueOnce({
+      sources: [failedJooble],
+      received: 0,
+      ingested: 0,
+      created: 0,
+      updated: 0,
+      skippedByAdapter: 0,
+      newVacancyIds: [],
+      trustStatusCounts: {},
+      durationMs: 5,
+      failedSources: 1,
+    } as never);
 
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      expect(response.status).toBe(500);
-      expect(await response.json()).toEqual({ error: "Could not fetch new jobs. Please try again." });
+      // A 200 with failedSources === sources.length is deliberate: the request
+      // itself succeeded and the per-source outcome is the data. The client
+      // turns this into "Couldn't reach Jooble. Nothing was fetched." rather
+      // than a calm "no new jobs", which would hide a total outage.
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as { failedSources: number; sources: unknown[]; created: number };
+      expect(body.failedSources).toBe(body.sources.length);
+      expect(body.created).toBe(0);
     });
   });
 });
