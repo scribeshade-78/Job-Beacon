@@ -564,6 +564,20 @@ export function createApp(options: CreateAppOptions = {}) {
         }
       }
 
+      // Structured, one line per discovery.
+      //
+      // This route previously logged NOTHING on success, which is exactly why
+      // "I clicked Fetch latest jobs and nothing happened" could not be
+      // diagnosed from the server side: a run that legitimately created zero
+      // vacancies left no trace at all, so "the intake ran and found nothing
+      // new" and "the request never arrived" looked identical in the logs.
+      console.log(
+        `[intake:discover] source=${result.sourceCode} candidate=${request.user!.id} ` +
+          `received=${result.received} ingested=${result.ingested} created=${created.length} ` +
+          `updated=${updated.length} fitAnalyzed=${fit?.analyzed ?? 0} fitFailed=${fit?.failed ?? 0} ` +
+          `durationMs=${result.durationMs}`,
+      );
+
       response.set("Cache-Control", "no-store");
       response.status(200).json({
         sourceCode: result.sourceCode,
@@ -594,6 +608,9 @@ export function createApp(options: CreateAppOptions = {}) {
     } catch (error) {
       if (error instanceof IntakePolicyError) {
         // 409, not 500: the request is fine, the source is switched off.
+        // Logged rather than returned silently: a switched-off source is a
+        // candidate-visible failure, and it was previously invisible in logs.
+        console.warn(`[intake:discover] refused by source policy: ${error.message}`);
         response.status(409).json({ error: error.message });
         return;
       }

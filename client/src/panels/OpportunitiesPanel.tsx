@@ -400,52 +400,70 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     setNewlyDiscovered([]);
     setNewVacancyIds([]);
 
-    const outcome = await discoverLiveJobs();
+    try {
+      const outcome = await discoverLiveJobs();
 
-    if (outcome.kind === "error") {
+      if (outcome.kind === "error") {
+        setRefreshNotice({ tone: "error", text: outcome.message });
+        showToast({ title: outcome.message, tone: "error" });
+        return;
+      }
+
+      const client = getSupabaseBrowserClient();
+
+      // Only the ones that came back WITHOUT a priority score need hoisting.
+      // A scored vacancy is already ranked where it belongs.
+      const unscoredIds = outcome.result.newVacancyIds.slice(
+        // The backend scores in order, so the first fitAnalyzed ids are the ones
+        // that have a score. Slicing rather than re-deriving from the rows keeps
+        // this correct even when a fit analysis ran but produced no priority.
+        Math.max(outcome.result.fitAnalyzed, 0),
+      );
+
+      const [reloaded, discovered] = await Promise.all([
+        // The SAME filters, exclusions and sort the list is currently showing.
+        // Re-reading page 1 unfiltered here would silently replace a filtered list
+        // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
+        listOpportunities(client, { filters: filters ?? EMPTY_FILTERS, preferences, sort }),
+        listOpportunitiesByIds(client, unscoredIds),
+      ]);
+
+      setNewVacancyIds(outcome.result.newVacancyIds);
+
+      if (discovered.kind === "success") {
+        setNewlyDiscovered(narrowToWorkMode(discovered.opportunities));
+      }
+
+      const text = describeDiscoveryResult(outcome.result);
+
+      // The notice is set on SUCCESS as well as on failure, and that is the
+      // fix for "the button does nothing". The toast was previously the entire
+      // success signal, and a toast is transient — while `created: 0` is the
+      // NORMAL outcome (one source returns the same listings until it publishes
+      // new ones), so on the common path the list came back byte-identical and
+      // a candidate who glanced away for the few seconds the toast lived saw no
+      // change at all. The notice persists until the next attempt starts.
+      setRefreshNotice({ tone: "info", text });
+      // "No new jobs" is a correct answer, not a failure, and the tone says so.
+      showToast({ title: text, tone: outcome.result.created > 0 ? "success" : "default" });
+
+      if (reloaded.kind === "success") {
+        setOpportunities(reloaded.opportunities);
+        setHasMore(reloaded.hasMore);
+        setError(null);
+      } else {
+        setError(reloaded.message);
+      }
+    } catch (error) {
+      // Nothing in this path is expected to throw, but `void handleRefresh()`
+      // would turn a throw into an unhandled rejection AND strand the button on
+      // "Fetching…" — disabled, with no way back except a reload. Surfaced
+      // rather than swallowed, for the same reason.
+      const message = error instanceof Error ? error.message : String(error);
+      setRefreshNotice({ tone: "error", text: `Could not fetch new jobs: ${message}` });
+      showToast({ title: "Could not fetch new jobs.", tone: "error" });
+    } finally {
       setRefreshing(false);
-      setRefreshNotice({ tone: "error", text: outcome.message });
-      showToast({ title: outcome.message, tone: "error" });
-      return;
-    }
-
-    const client = getSupabaseBrowserClient();
-
-    // Only the ones that came back WITHOUT a priority score need hoisting.
-    // A scored vacancy is already ranked where it belongs.
-    const unscoredIds = outcome.result.newVacancyIds.slice(
-      // The backend scores in order, so the first fitAnalyzed ids are the ones
-      // that have a score. Slicing rather than re-deriving from the rows keeps
-      // this correct even when a fit analysis ran but produced no priority.
-      Math.max(outcome.result.fitAnalyzed, 0),
-    );
-
-    const [reloaded, discovered] = await Promise.all([
-      // The SAME filters, exclusions and sort the list is currently showing.
-      // Re-reading page 1 unfiltered here would silently replace a filtered list
-      // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
-      listOpportunities(client, { filters: filters ?? EMPTY_FILTERS, preferences, sort }),
-      listOpportunitiesByIds(client, unscoredIds),
-    ]);
-
-    setRefreshing(false);
-
-    setNewVacancyIds(outcome.result.newVacancyIds);
-
-    if (discovered.kind === "success") {
-      setNewlyDiscovered(narrowToWorkMode(discovered.opportunities));
-    }
-
-    const text = describeDiscoveryResult(outcome.result);
-    // "No new jobs" is a correct answer, not a failure, and the tone says so.
-    showToast({ title: text, tone: outcome.result.created > 0 ? "success" : "default" });
-
-    if (reloaded.kind === "success") {
-      setOpportunities(reloaded.opportunities);
-      setHasMore(reloaded.hasMore);
-      setError(null);
-    } else {
-      setError(reloaded.message);
     }
   }
 
