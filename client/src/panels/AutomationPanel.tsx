@@ -119,19 +119,33 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
           <>
             <StatusBadge status={AUTOMATION_STATUS_BADGE[authorization.status]} />
             <div className="flex flex-wrap gap-2">
+              {/* Pause is offered only while it is actually running. The old
+                  condition (status === "paused") left it clickable on a STOPPED
+                  authorization, where pausing is meaningless — and worse, that
+                  click round-tripped the status to "paused" purely to make
+                  Resume available again. */}
               <Button
                 variant="secondary"
-                disabled={busy || authorization.status === "paused"}
+                disabled={busy || authorization.status !== "authorized"}
                 onClick={() => void run((client) => pause(client, candidateId))}
               >
                 Pause
               </Button>
+              {/* Enabled when paused OR stopped.
+                  THE BUG THIS FIXES: with `status !== "paused"`, a stopped
+                  authorization had Resume disabled and Stop disabled, so there
+                  was no way back at all — the dead state. Stop is the
+                  withdrawal path, not terminal: nothing in the schema or in
+                  setStatus prevents returning to authorized. The label follows
+                  the state so a stopped candidate is offered "Start" rather
+                  than "Resume", which would read as resuming something that was
+                  never paused. */}
               <Button
                 variant="secondary"
-                disabled={busy || authorization.status !== "paused"}
+                disabled={busy || (authorization.status !== "paused" && authorization.status !== "stopped")}
                 onClick={() => void run((client) => resumeAutomation(client, candidateId))}
               >
-                Resume
+                {authorization.status === "stopped" ? "Start" : "Resume"}
               </Button>
               <Button
                 variant="destructive"
