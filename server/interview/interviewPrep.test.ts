@@ -47,7 +47,7 @@ function mockOpenAI(content: string | null = JSON.stringify(VALID_PREP)) {
 
 function baseTables(over: Record<string, TableResult> = {}): Record<string, TableResult> {
   return {
-    vacancies: { data: { raw_title: "Senior Platform Engineer" } },
+    vacancies: { data: { raw_title: "Senior Platform Engineer", trust_status: "VERIFIED" } },
     vacancy_jd_snapshots: { data: { clean_text: "We need a platform engineer with Postgres and Go." } },
     extracted_facts: { data: [{ id: "f1", fact_type: "skill", fact_value: "Postgres" }] },
     fact_confirmations: { data: [{ extracted_fact_id: "f1", corrected_value: null }] },
@@ -88,6 +88,68 @@ describe("prepareInterviewPrep — guards", () => {
     expect(result).toEqual({ kind: "no_jd_text" });
     // The important half of this assertion: no model call was made at all.
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe("prepareInterviewPrep — trust gate", () => {
+  /** A vacancy row with the given trust_status, everything else valid. */
+  function withTrust(trustStatus: string | null) {
+    return makeClient(baseTables({ vacancies: { data: { raw_title: "Senior Platform Engineer", trust_status: trustStatus } } }));
+  }
+
+  it("allows VERIFIED", async () => {
+    const result = await prepareInterviewPrep(withTrust("VERIFIED"), mockOpenAI().client, PARAMS);
+
+    expect(result.kind).toBe("success");
+  });
+
+  it("allows VERIFIED_INCOMPLETE — it is in VACANCY_TRUST_ELIGIBLE_STATUSES", async () => {
+    const result = await prepareInterviewPrep(withTrust("VERIFIED_INCOMPLETE"), mockOpenAI().client, PARAMS);
+
+    expect(result.kind).toBe("success");
+  });
+
+  it("refuses UNDER_REVIEW and makes no model call", async () => {
+    const { client: ai, create } = mockOpenAI();
+
+    const result = await prepareInterviewPrep(withTrust("UNDER_REVIEW"), ai, PARAMS);
+
+    expect(result).toEqual({ kind: "vacancy_not_eligible" });
+    // The refusal must happen before spending money on a generation.
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses BLOCKED", async () => {
+    const result = await prepareInterviewPrep(withTrust("BLOCKED"), mockOpenAI().client, PARAMS);
+
+    expect(result).toEqual({ kind: "vacancy_not_eligible" });
+  });
+
+  it("refuses FLAGGED", async () => {
+    const result = await prepareInterviewPrep(withTrust("FLAGGED"), mockOpenAI().client, PARAMS);
+
+    expect(result).toEqual({ kind: "vacancy_not_eligible" });
+  });
+
+  it("refuses EXPIRED_REMOVED and ACTION_REQUIRED", async () => {
+    for (const status of ["EXPIRED_REMOVED", "ACTION_REQUIRED"]) {
+      const result = await prepareInterviewPrep(withTrust(status), mockOpenAI().client, PARAMS);
+      expect(result).toEqual({ kind: "vacancy_not_eligible" });
+    }
+  });
+
+  it("refuses a NULL status, which means 'not yet scored' rather than eligible", async () => {
+    // Nullable with no default by design: NULL is an unscored vacancy, and
+    // treating it as a pass would make every freshly ingested posting eligible.
+    const result = await prepareInterviewPrep(withTrust(null), mockOpenAI().client, PARAMS);
+
+    expect(result).toEqual({ kind: "vacancy_not_eligible" });
+  });
+
+  it("reports an ineligible vacancy as ineligible, not as missing", async () => {
+    const result = await prepareInterviewPrep(withTrust("UNDER_REVIEW"), mockOpenAI().client, PARAMS);
+
+    expect(result.kind).not.toBe("vacancy_not_found");
   });
 });
 

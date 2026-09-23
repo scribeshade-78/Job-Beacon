@@ -771,6 +771,17 @@ export function createApp(options: CreateAppOptions = {}) {
           case "vacancy_not_found":
             response.status(404).json({ error: "Vacancy not found." });
             return;
+          case "vacancy_not_eligible":
+            // 422 rather than 404: the candidate may well be looking at this
+            // row already (the Opportunities view surfaces UNDER_REVIEW jobs),
+            // so its existence is not a secret and a clear refusal beats a
+            // misleading "not found". The message deliberately does not name
+            // the internal trust status — that vocabulary is not the
+            // candidate's to interpret here.
+            response.status(422).json({
+              error: "Interview preparation is only available for verified vacancies.",
+            });
+            return;
           case "no_jd_text":
             response.status(422).json({
               error: "This vacancy has no job description text, so interview questions cannot be generated from it.",

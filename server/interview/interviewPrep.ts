@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
+import { VACANCY_TRUST_ELIGIBLE_STATUSES } from "../applications/eligibilityGate.js";
 import { MalformedInterviewPrepError, generateInterviewPrep, type RawInterviewPrep } from "./prepPrompt.js";
 
 /**
@@ -26,6 +27,7 @@ import { MalformedInterviewPrepError, generateInterviewPrep, type RawInterviewPr
 export type InterviewPrepResult =
   | { kind: "success"; prep: RawInterviewPrep }
   | { kind: "vacancy_not_found" }
+  | { kind: "vacancy_not_eligible" }
   | { kind: "no_jd_text" }
   | { kind: "malformed_prep"; message: string }
   | { kind: "error"; message: string };
@@ -33,14 +35,16 @@ export type InterviewPrepResult =
 type InterviewContext =
   | { kind: "ok"; roleTitle: string; jdText: string }
   | { kind: "vacancy_not_found" }
+  | { kind: "vacancy_not_eligible" }
   | { kind: "no_jd_text" };
 
 /**
- * Mirrors loadJobDescription's two queries (resumeGenerator.ts) but returns a
+ * Mirrors loadJobDescription's queries (resumeGenerator.ts) but returns a
  * discriminated result instead of `{ title, jdText }`, because that shape
- * cannot express the difference this feature needs: a vacancy that does not
- * exist at all (404) versus one that exists but has no JD snapshot (422).
- * `raw_title` is NOT NULL, so a missing row is what produces the absent case.
+ * cannot express the distinctions this feature needs: a vacancy that does not
+ * exist at all, one that exists but is not eligible, and one that is eligible
+ * but has no JD snapshot. `raw_title` is NOT NULL, so a missing row is what
+ * produces the absent case.
  */
 async function loadInterviewContext(
   client: Pick<SupabaseClient, "from">,
@@ -48,7 +52,7 @@ async function loadInterviewContext(
 ): Promise<InterviewContext> {
   const { data: vacancy, error: vacancyError } = await client
     .from("vacancies")
-    .select("raw_title")
+    .select("raw_title, trust_status")
     .eq("id", vacancyId)
     .maybeSingle();
 
@@ -60,7 +64,29 @@ async function loadInterviewContext(
     return { kind: "vacancy_not_found" };
   }
 
-  const roleTitle = (vacancy as { raw_title: string }).raw_title;
+  const row = vacancy as { raw_title: string; trust_status: string | null };
+
+  // Trust gate, checked BEFORE the JD query: an ineligible vacancy is refused
+  // whether or not it happens to have a description, and this skips a read on
+  // the path that is about to be rejected anyway.
+  //
+  // NULL IS NOT ELIGIBLE. trust_status is nullable with no default by design —
+  // NULL means "not yet scored" rather than an eighth status value
+  // (20260816150344_vacancies_add_trust_status.sql) — so an unscored vacancy is
+  // simply unverified. Treating NULL as a pass would make every freshly
+  // ingested posting eligible, which is the opposite of the intent. This is the
+  // same rule eligibilityGate.ts applies (it requires a non-null status).
+  //
+  // Note this is deliberately STRICTER than the candidate_opportunities view,
+  // which also surfaces UNDER_REVIEW rows with an unverified-source warning
+  // (20260917130000_candidate_opportunities_include_under_review.sql). A
+  // candidate can therefore see a vacancy that this endpoint will refuse; the
+  // client is expected not to offer the action on those rows.
+  if (row.trust_status === null || !VACANCY_TRUST_ELIGIBLE_STATUSES.has(row.trust_status)) {
+    return { kind: "vacancy_not_eligible" };
+  }
+
+  const roleTitle = row.raw_title;
 
   const { data: snapshot, error: snapshotError } = await client
     .from("vacancy_jd_snapshots")
@@ -152,6 +178,10 @@ export async function prepareInterviewPrep(
 
     if (context.kind === "vacancy_not_found") {
       return { kind: "vacancy_not_found" };
+    }
+
+    if (context.kind === "vacancy_not_eligible") {
+      return { kind: "vacancy_not_eligible" };
     }
 
     if (context.kind === "no_jd_text") {

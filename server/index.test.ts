@@ -2600,7 +2600,7 @@ describe("POST /api/vacancies/:vacancyId/interview-prep", () => {
    */
   function makeInterviewServiceClient(over: Record<string, { data: unknown; error?: unknown }> = {}) {
     const tables: Record<string, { data: unknown; error?: unknown }> = {
-      vacancies: { data: { raw_title: "Senior Platform Engineer" } },
+      vacancies: { data: { raw_title: "Senior Platform Engineer", trust_status: "VERIFIED" } },
       vacancy_jd_snapshots: { data: { clean_text: "We need a platform engineer with Postgres and Go." } },
       extracted_facts: { data: [{ id: "f1", fact_type: "skill", fact_value: "Postgres" }] },
       fact_confirmations: { data: [{ extracted_fact_id: "f1", corrected_value: null }] },
@@ -2688,6 +2688,26 @@ describe("POST /api/vacancies/:vacancyId/interview-prep", () => {
 
         expect(response.status).toBe(422);
         expect(await response.json()).toHaveProperty("error");
+      },
+    );
+  });
+
+  it("returns 422 when the vacancy is not trust-eligible", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: makeInterviewServiceClient({
+          vacancies: { data: { raw_title: "Senior Platform Engineer", trust_status: "UNDER_REVIEW" } },
+        }),
+        openaiClient: makeInterviewOpenAIClient(),
+      },
+      async (base) => {
+        const response = await post(base, VACANCY_ID);
+
+        expect(response.status).toBe(422);
+        // The refusal must be distinguishable from the missing-JD 422 by its
+        // message, since both share a status code.
+        expect((await response.json()).error).toMatch(/verified/i);
       },
     );
   });
