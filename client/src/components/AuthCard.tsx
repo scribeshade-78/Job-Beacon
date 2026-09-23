@@ -10,6 +10,7 @@ import { Spinner } from "./ui/spinner";
 export interface AuthCardProps {
   onSignUp: (email: string, password: string) => Promise<void>;
   onSignIn: (email: string, password: string) => Promise<void>;
+  onSignInWithGoogle: () => Promise<void>;
   error?: string | null;
 }
 
@@ -51,7 +52,29 @@ function EyeOffIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-export function AuthCard({ onSignUp, onSignIn, error }: AuthCardProps) {
+// Google's official four-colour "G" mark, inline rather than an icon-font or
+// CDN asset so the auth screen has no third-party request before sign-in.
+function GoogleIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
+      <path
+        fill="#4285F4"
+        d="M23.06 12.25c0-.79-.07-1.54-.2-2.27H12v4.3h6.19a5.3 5.3 0 01-2.3 3.48v2.9h3.72c2.18-2 3.45-4.96 3.45-8.41z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.11 0 5.72-1.03 7.62-2.79l-3.72-2.89c-1.03.69-2.35 1.1-3.9 1.1-3 0-5.54-2.02-6.45-4.75H1.7v2.99A12 12 0 0012 24z"
+      />
+      <path fill="#FBBC05" d="M5.55 14.67a7.2 7.2 0 010-4.6V7.08H1.7a12 12 0 000 10.58l3.85-2.99z" />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.69 0 3.21.58 4.4 1.72l3.3-3.3C17.71 1.24 15.1 0 12 0A12 12 0 001.7 7.08l3.85 2.99C6.46 7.32 9 4.75 12 4.75z"
+      />
+    </svg>
+  );
+}
+
+export function AuthCard({ onSignUp, onSignIn, onSignInWithGoogle, error }: AuthCardProps) {
   const [mode, setMode] = useState<Mode>("signIn");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -59,6 +82,7 @@ export function AuthCard({ onSignUp, onSignIn, error }: AuthCardProps) {
   const [submitting, setSubmitting] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
 
   const emailId = useId();
   const passwordId = useId();
@@ -90,6 +114,18 @@ export function AuthCard({ onSignUp, onSignIn, error }: AuthCardProps) {
       await (mode === "signIn" ? onSignIn : onSignUp)(email, password);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Separate from handleSubmit: there is no form to validate, and on success
+  // the browser navigates to Google, so this state is only ever reset when the
+  // call fails outright.
+  async function handleGoogle() {
+    setGoogleSubmitting(true);
+    try {
+      await onSignInWithGoogle();
+    } finally {
+      setGoogleSubmitting(false);
     }
   }
 
@@ -147,6 +183,36 @@ export function AuthCard({ onSignUp, onSignIn, error }: AuthCardProps) {
             {error}
           </p>
         )}
+
+        {/* Shown in both modes on purpose. Supabase's OAuth call creates the
+            account or signs into it — there is no separate "sign up with
+            Google" — so hiding it behind the Sign up tab would make the same
+            action appear and disappear for no reason the user can act on. */}
+        <Button
+          type="button"
+          variant="secondary"
+          className="w-full"
+          onClick={handleGoogle}
+          disabled={googleSubmitting}
+        >
+          {googleSubmitting ? (
+            <>
+              <Spinner className="h-4 w-4" />
+              <span>Redirecting…</span>
+            </>
+          ) : (
+            <>
+              <GoogleIcon className="h-5 w-5" />
+              <span>Continue with Google</span>
+            </>
+          )}
+        </Button>
+
+        <div className="my-4 flex items-center gap-3" aria-hidden="true">
+          <span className="h-px flex-1 bg-ios-separator" />
+          <span className="text-xs font-medium uppercase tracking-wide text-ios-text-secondary">or</span>
+          <span className="h-px flex-1 bg-ios-separator" />
+        </div>
 
         <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">

@@ -302,6 +302,14 @@ function buildFitAnalysis(row: OpportunityRow): OpportunityFitAnalysis | null {
 }
 
 /**
+ * The source_code of the seeded [MOCK] "local fixture" postings, created by the
+ * 20260917*_local_fixture_*.sql migrations. Debug scaffolding for the
+ * application engine — a fixture employer that submits nowhere — never a real
+ * listing a candidate should see.
+ */
+const FIXTURE_SOURCE_CODE = "local_fixture";
+
+/**
  * Phase 2.3c: reads the candidate_opportunities view, which has already
  * applied the verified + active filter, joined the company, plan and fit
  * columns, and (through security_invoker RLS) scoped the per-candidate ones
@@ -338,7 +346,15 @@ export async function listOpportunities(
       options.filters ?? EMPTY_FILTERS,
     );
 
-    const { query: excluded } = applyPreferenceExclusions(filtered, options.preferences ?? null);
+    const { query: excluded } = applyPreferenceExclusions(
+      // The [MOCK] local-fixture postings are real rows in this view, so they
+      // are excluded here rather than deleted — the application-engine fixtures
+      // depend on them, and removing production rows is a separate decision.
+      // Applied BEFORE paging on purpose: filtering after range() would make a
+      // page silently return fewer than OPPORTUNITIES_PAGE_SIZE rows.
+      filtered.not("source_code", "eq", FIXTURE_SOURCE_CODE) as FilterableQuery,
+      options.preferences ?? null,
+    );
 
     const { query: sorted, applied: appliedSort } = applyOpportunitySort(excluded, options.sort);
 

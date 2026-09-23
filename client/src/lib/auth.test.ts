@@ -8,6 +8,7 @@ function createMockClient(
   overrides: Partial<{
     signUp: ReturnType<typeof vi.fn>;
     signInWithPassword: ReturnType<typeof vi.fn>;
+    signInWithOAuth: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
   }> = {},
 ) {
@@ -22,6 +23,7 @@ function createMockClient(
       }),
       signUp: overrides.signUp ?? vi.fn(),
       signInWithPassword: overrides.signInWithPassword ?? vi.fn(),
+      signInWithOAuth: overrides.signInWithOAuth ?? vi.fn().mockResolvedValue({ error: null }),
       signOut: overrides.signOut ?? vi.fn().mockResolvedValue({ error: null }),
     },
   };
@@ -180,6 +182,49 @@ describe("createAuthStore", () => {
 
     expect(store.getState().status).toBe("error");
     expect(store.getState().error).toBe("Invalid login credentials");
+  });
+
+  it("calls signInWithOAuth for google with the configured redirect", async () => {
+    const signInWithOAuth = vi
+      .fn()
+      .mockResolvedValue({ data: { provider: "google", url: "https://accounts.google.com/o/oauth2" }, error: null });
+    const { client } = createMockClient({ signInWithOAuth });
+    const store = createAuthStore(client, testRedirect);
+
+    await store.signInWithGoogle();
+
+    expect(signInWithOAuth).toHaveBeenCalledWith({
+      provider: "google",
+      options: { redirectTo: testRedirect.emailRedirectTo },
+    });
+  });
+
+  it("leaves state untouched after a successful signInWithGoogle", async () => {
+    const signInWithOAuth = vi
+      .fn()
+      .mockResolvedValue({ data: { provider: "google", url: "https://accounts.google.com/o/oauth2" }, error: null });
+    const { client } = createMockClient({ signInWithOAuth });
+    const store = createAuthStore(client, testRedirect);
+
+    await store.signInWithGoogle();
+
+    // Success means the browser is leaving for Google, so there is no signed-in
+    // state to set. The session arrives via onAuthStateChange on the way back.
+    expect(store.getState().status).toBe("loading");
+  });
+
+  it("goes to error when the google provider is not enabled on the project", async () => {
+    const signInWithOAuth = vi.fn().mockResolvedValue({
+      data: { provider: "google", url: null },
+      error: { message: "Unsupported provider: provider is not enabled" },
+    });
+    const { client } = createMockClient({ signInWithOAuth });
+    const store = createAuthStore(client, testRedirect);
+
+    await store.signInWithGoogle();
+
+    expect(store.getState().status).toBe("error");
+    expect(store.getState().error).toBe("Unsupported provider: provider is not enabled");
   });
 
   it("calls client.auth.signOut() on signOut", async () => {

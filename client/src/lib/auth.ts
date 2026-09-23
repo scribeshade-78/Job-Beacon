@@ -23,6 +23,7 @@ export interface AuthStore {
   subscribe(listener: Listener): () => void;
   signUp(email: string, password: string): Promise<void>;
   signIn(email: string, password: string): Promise<void>;
+  signInWithGoogle(): Promise<void>;
   signOut(): Promise<void>;
   dispose(): void;
 }
@@ -120,6 +121,28 @@ export function createAuthStore(
     });
   }
 
+  /**
+   * Google OAuth. Deliberately does NOT set a signed-in state on success,
+   * unlike signUp/signIn: a successful call navigates the browser away to
+   * Google, so this page unloads before any state update here could matter.
+   * The session comes back on the return leg through onAuthStateChange, which
+   * is already handled above. Only a failure — provider not enabled on the
+   * Supabase project, popup blocked, network — has anything to report.
+   *
+   * Does not distinguish sign-up from log-in because Supabase does not either:
+   * one call creates the account or signs into it, whichever applies.
+   */
+  async function signInWithGoogle(): Promise<void> {
+    const { error } = await client.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: emailRedirectTo },
+    });
+
+    if (error) {
+      setState({ status: "error", user: null, session: null, error: error.message });
+    }
+  }
+
   async function signOut(): Promise<void> {
     await client.auth.signOut();
     // onAuthStateChange's SIGNED_OUT event updates state.
@@ -133,6 +156,7 @@ export function createAuthStore(
     },
     signUp,
     signIn,
+    signInWithGoogle,
     signOut,
     dispose: () => {
       subscription.unsubscribe();
@@ -159,6 +183,7 @@ export function useAuth() {
     ...state,
     signUp: store.signUp,
     signIn: store.signIn,
+    signInWithGoogle: store.signInWithGoogle,
     signOut: store.signOut,
   };
 }

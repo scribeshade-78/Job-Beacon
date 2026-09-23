@@ -15,6 +15,7 @@ interface Recorded {
   table?: string;
   columns?: string;
   orders: Array<[string, unknown]>;
+  nots: Array<[string, string, unknown]>;
   range?: [number, number];
 }
 
@@ -23,11 +24,15 @@ interface Recorded {
  * resolves to `result`. order() is chained twice, then range().
  */
 function makeClient(result: { data: unknown; error?: unknown }) {
-  const recorded: Recorded = { orders: [] };
+  const recorded: Recorded = { orders: [], nots: [] };
 
   const builder: Record<string, unknown> = {
     select: (columns: string) => {
       recorded.columns = columns;
+      return builder;
+    },
+    not: (column: string, operator: string, value: unknown) => {
+      recorded.nots.push([column, operator, value]);
       return builder;
     },
     order: (column: string, opts: unknown) => {
@@ -218,6 +223,15 @@ describe("listOpportunities — query shape", () => {
 
     // The view's WHERE owns this; a client-side filter would duplicate it.
     expect(recorded.columns).not.toContain("status=");
+  });
+
+  it("excludes the [MOCK] local-fixture postings in SQL, before paging", async () => {
+    const { client, recorded } = makeClient({ data: [] });
+    await listOpportunities(client);
+
+    // Excluded in the query rather than after the fetch, so a page still
+    // returns a full page of real rows instead of a short one.
+    expect(recorded.nots).toContainEqual(["source_code", "eq", "local_fixture"]);
   });
 });
 

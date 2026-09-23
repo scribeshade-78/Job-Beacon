@@ -228,5 +228,12 @@ export function App() {
     );
   }
 
-  return <AuthCard onSignUp={auth.signUp} onSignIn={auth.signIn} error={auth.status === "error" ? auth.error : null} />;
+  return (
+    <AuthCard
+      onSignUp={auth.signUp}
+      onSignIn={auth.signIn}
+      onSignInWithGoogle={auth.signInWithGoogle}
+      error={auth.status === "error" ? auth.error : null}
+    />
+  );
 }
