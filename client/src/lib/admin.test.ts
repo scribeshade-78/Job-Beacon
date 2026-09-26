@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getAdminRoles, grantAdminRole, revokeAdminRole } from "./admin";
+import { getAdminRoles, getAdminSourceHealth, grantAdminRole, revokeAdminRole } from "./admin";
 
 /**
  * R8.2 role management client. The wiring assertions that matter here are the
@@ -124,5 +124,48 @@ describe("revokeAdminRole", () => {
     expect(await revokeAdminRole("u1", "admin", "tok", fetchImpl as unknown as typeof fetch)).toEqual({
       kind: "forbidden",
     });
+  });
+});
+
+describe("getAdminSourceHealth", () => {
+  it("builds the filter query string and returns the window", async () => {
+    const payload = { events: [], sources: [], limit: 50, truncated: false };
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse(payload));
+
+    const result = await getAdminSourceHealth(
+      { limit: 50, sourceCode: "jooble", status: "error" },
+      "tok",
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(result).toEqual({ kind: "success", data: payload });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/source-health?limit=50&sourceCode=jooble&status=error", {
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("omits the query string entirely when no filter is set", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events: [], sources: [], limit: 100, truncated: false }));
+
+    await getAdminSourceHealth({}, "tok", fetchImpl as unknown as typeof fetch);
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/source-health", {
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("encodes the source code rather than splicing it into the URL", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events: [], sources: [], limit: 100, truncated: false }));
+
+    await getAdminSourceHealth({ sourceCode: "a&b=c" }, "tok", fetchImpl as unknown as typeof fetch);
+
+    const [path] = (fetchImpl as unknown as { mock: { calls: Array<[string]> } }).mock.calls[0];
+    expect(path).toBe("/api/admin/source-health?sourceCode=a%26b%3Dc");
+  });
+
+  it("returns forbidden on 403", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: "Forbidden" }) });
+
+    expect(await getAdminSourceHealth({}, "tok", fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
   });
 });

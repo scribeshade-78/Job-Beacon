@@ -34,6 +34,11 @@ import {
   revokeRole,
 } from "./admin/roles.js";
 import {
+  isSourceHealthStatus,
+  listSourceHealthEvents,
+  SOURCE_HEALTH_STATUSES,
+} from "./admin/sourceHealth.js";
+import {
   findActivePrice,
   isBillingInterval,
   isBillingRegion,
@@ -1709,6 +1714,63 @@ export function createApp(options: CreateAppOptions = {}) {
       }
     },
   );
+
+  /**
+   * Source health: the per-run fetch log in source_health_events (PRD §21.1).
+   *
+   * READ-ONLY BY CONSTRUCTION, not by convention — the table grants service_role
+   * SELECT and INSERT only, so there is no update or delete for this route to
+   * expose. What it deliberately does NOT show: a policy refusal (kill switch,
+   * discovery disabled, no policy row) is thrown before the fetch and writes no
+   * row at all, and a rate limit is recorded as status 'error' with the status
+   * code only in error_message. Both are stated in the UI.
+   */
+  app.get("/api/admin/source-health", requireAuth, requireAdmin, async (request, response) => {
+    const query = request.query as Record<string, unknown>;
+
+    let limit: number | undefined;
+    const rawLimit = query.limit;
+
+    if (rawLimit !== undefined) {
+      const parsed = typeof rawLimit === "string" ? Number(rawLimit) : Number.NaN;
+
+      // Refused rather than coerced, unlike the audit-events route's
+      // Number.parseInt: that lets "12abc" through as 12 and leaves NaN as NaN,
+      // and a NaN limit reaches PostgREST as an unparseable range.
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        response.status(400).json({ error: "limit must be a positive integer" });
+        return;
+      }
+
+      limit = parsed;
+    }
+
+    const rawStatus = query.status;
+
+    if (rawStatus !== undefined && !isSourceHealthStatus(rawStatus)) {
+      response.status(400).json({ error: "status must be one of " + SOURCE_HEALTH_STATUSES.join(", ") });
+      return;
+    }
+
+    // A blank sourceCode is treated as "no filter" rather than refused: the
+    // select that sends it has an "All sources" option whose value is empty.
+    const rawSourceCode = query.sourceCode;
+    const sourceCode =
+      typeof rawSourceCode === "string" && rawSourceCode.trim() !== "" ? rawSourceCode.trim() : null;
+
+    try {
+      const health = await listSourceHealthEvents(resolveServiceClient(), {
+        limit,
+        sourceCode,
+        status: isSourceHealthStatus(rawStatus) ? rawStatus : null,
+      });
+      response.status(200).json(health);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Source health read failed:", message);
+      response.status(500).json({ error: "Failed to load source health" });
+    }
+  });
 
   app.get("/api/admin/trust-scores", requireAuth, requireAdmin, async (_request, response) => {
     try {

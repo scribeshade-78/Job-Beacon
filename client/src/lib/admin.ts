@@ -244,3 +244,82 @@ export function revokeAdminRole(
   const path = "/api/admin/roles/" + encodeURIComponent(userId) + "/" + encodeURIComponent(role);
   return adminSend<RevokeAdminRoleResult>(path, accessToken, { method: "DELETE" }, fetchImpl);
 }
+
+/**
+ * Source health — GET /api/admin/source-health.
+ *
+ * Read-only mirror of public.source_health_events, the per-run fetch log the
+ * intake path and the scheduled worker both write. The route enforces the
+ * window; this module only names it.
+ */
+export type SourceHealthStatus = "success" | "error";
+
+/** Keep in sync with server/admin/sourceHealth.ts SOURCE_HEALTH_STATUSES. */
+export const SOURCE_HEALTH_STATUSES: readonly SourceHealthStatus[] = ["success", "error"];
+
+export interface SourceHealthEvent {
+  id: string;
+  sourceCode: string;
+  vacancySourceId: string | null;
+  status: SourceHealthStatus;
+  vacanciesFetched: number;
+  /** Where the useful failure detail lives, including any HTTP status inside it. */
+  errorMessage: string | null;
+  durationMs: number | null;
+  runAt: string;
+}
+
+/** One source's rollup over the loaded window only — not lifetime totals. */
+export interface SourceHealthSummary {
+  sourceCode: string;
+  latestRunAt: string;
+  latestStatus: SourceHealthStatus;
+  latestErrorMessage: string | null;
+  latestVacanciesFetched: number;
+  latestDurationMs: number | null;
+  eventsInWindow: number;
+  errorsInWindow: number;
+}
+
+export interface SourceHealthList {
+  events: SourceHealthEvent[];
+  sources: SourceHealthSummary[];
+  /** The clamped page size the server applied. */
+  limit: number;
+  /** Older rows exist beyond this window. */
+  truncated: boolean;
+}
+
+export interface SourceHealthQuery {
+  limit?: number;
+  sourceCode?: string;
+  status?: SourceHealthStatus;
+}
+
+export function getAdminSourceHealth(
+  query: SourceHealthQuery,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  const params = new URLSearchParams();
+
+  if (query.limit !== undefined) {
+    params.set("limit", String(query.limit));
+  }
+
+  if (query.sourceCode) {
+    params.set("sourceCode", query.sourceCode);
+  }
+
+  if (query.status) {
+    params.set("status", query.status);
+  }
+
+  const queryString = params.toString();
+
+  return adminGet<SourceHealthList>(
+    "/api/admin/source-health" + (queryString ? "?" + queryString : ""),
+    accessToken,
+    fetchImpl,
+  );
+}

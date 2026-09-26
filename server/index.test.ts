@@ -1293,6 +1293,173 @@ describe("DELETE /api/admin/roles/:userId/:role", () => {
   });
 });
 
+describe("GET /api/admin/source-health", () => {
+  const sampleRow = {
+    id: "e1",
+    source_code: "remotive",
+    vacancy_source_id: "vs-1",
+    status: "success",
+    vacancies_fetched: 12,
+    error_message: null,
+    duration_ms: 340,
+    run_at: "2026-09-26T10:00:00.000Z",
+  };
+
+  function makeHealthClient(result: { data: unknown; error: unknown } = { data: [], error: null }) {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const builder: Record<string, unknown> = {};
+    const chain = (method: string) => (...args: unknown[]) => {
+      calls.push({ method, args });
+      return builder;
+    };
+
+    builder.select = chain("select");
+    builder.eq = chain("eq");
+    builder.order = chain("order");
+    builder.limit = chain("limit");
+    builder.then = (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+      Promise.resolve(result).then(onFulfilled, onRejected);
+
+    const from = vi.fn(() => builder);
+    return { serviceClient: { from } as never, calls };
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/source-health`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the events, the per-source summary and the applied limit", async () => {
+    const { serviceClient } = makeHealthClient({ data: [sampleRow], error: null });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          events: [
+            {
+              id: "e1",
+              sourceCode: "remotive",
+              vacancySourceId: "vs-1",
+              status: "success",
+              vacanciesFetched: 12,
+              errorMessage: null,
+              durationMs: 340,
+              runAt: "2026-09-26T10:00:00.000Z",
+            },
+          ],
+          sources: [
+            {
+              sourceCode: "remotive",
+              latestRunAt: "2026-09-26T10:00:00.000Z",
+              latestStatus: "success",
+              latestErrorMessage: null,
+              latestVacanciesFetched: 12,
+              latestDurationMs: 340,
+              eventsInWindow: 1,
+              errorsInWindow: 0,
+            },
+          ],
+          limit: 100,
+          truncated: false,
+        });
+      },
+    );
+  });
+
+  it("returns 400 when limit is not a positive integer", async () => {
+    for (const limit of ["abc", "0", "-3", "1.5"]) {
+      await withTestServer(
+        { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+        async (testBaseUrl) => {
+          const response = await fetch(`${testBaseUrl}/api/admin/source-health?limit=${limit}`, {
+            headers: { Authorization: "Bearer valid-test-token" },
+          });
+          expect(response.status).toBe(400);
+        },
+      );
+    }
+  });
+
+  it("returns 400 for a status the table does not have", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health?status=skipped`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("passes the sourceCode and status filters through to the query", async () => {
+    const { serviceClient, calls } = makeHealthClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health?sourceCode=jooble&status=error`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(calls).toContainEqual({ method: "eq", args: ["source_code", "jooble"] });
+        expect(calls).toContainEqual({ method: "eq", args: ["status", "error"] });
+      },
+    );
+  });
+
+  it("treats a blank sourceCode as no filter rather than refusing it", async () => {
+    const { serviceClient, calls } = makeHealthClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health?sourceCode=`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(calls.some((call) => call.method === "eq")).toBe(false);
+      },
+    );
+  });
+
+  it("returns 500 when the read fails", async () => {
+    const { serviceClient } = makeHealthClient({ data: null, error: { message: "db error" } });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/source-health`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
 describe("GET /api/admin/trust-scores", () => {
   it("returns 403 for an authenticated non-admin", async () => {
     await withTestServer(
