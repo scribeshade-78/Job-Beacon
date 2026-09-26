@@ -86,12 +86,20 @@ fi
 # ---- 2. package --------------------------------------------------------------
 log "Packaging source into ${ARCHIVE_NAME}"
 # --exclude of .env* is a security control, not tidiness. See the header.
+#
+# *.txt is excluded for the same reason, and was added after finding an untracked
+# "chatgpt api key.txt" in the repository root: it is git-ignored, so nothing
+# else would have stopped it being tarred, uploaded to the VPS and left there.
+# It is not the only one either — docker-compose.yml.txt is a stray copy and
+# docs/sample-emails/interview.txt is a manual-test fixture. None is read at
+# build or run time, so excluding the whole extension costs nothing.
 tar -czf "${ARCHIVE_NAME}" \
   --exclude='./node_modules' \
   --exclude='./dist' \
   --exclude='./.git' \
   --exclude='./.env' \
   --exclude='./.env.*' \
+  --exclude='*.txt' \
   --exclude="./${ARCHIVE_NAME}" \
   --exclude='./coverage' \
   --exclude='./supabase/.temp' \
@@ -104,6 +112,14 @@ tar -czf "${ARCHIVE_NAME}" \
 if tar -tzf "${ARCHIVE_NAME}" | grep -qE '(^|/)\.env($|\.)' | grep -qvE '\.env\.example$|\.env\.build\.example$'; then
   rm -f "${ARCHIVE_NAME}"
   fail "Refusing to deploy: the archive contains a .env file. This is a bug in deploy.sh."
+fi
+
+# Same reasoning as the .env check above: prove the exclusion rather than
+# trusting the flag, because a pattern typo would otherwise ship untracked local
+# files silently. Nothing the build or the server reads ends in .txt.
+if tar -tzf "${ARCHIVE_NAME}" | grep -qE '\.txt$'; then
+  rm -f "${ARCHIVE_NAME}"
+  fail "Refusing to deploy: the archive contains a .txt file. This is a bug in deploy.sh."
 fi
 
 # ---- 3. upload ---------------------------------------------------------------
