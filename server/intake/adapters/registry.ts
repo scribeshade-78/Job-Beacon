@@ -3,6 +3,7 @@ import { remotiveIntakeAdapter } from "./remotive.js";
 import { joobleIntakeAdapter } from "./joobleIntake.js";
 import { adzunaIntakeAdapter } from "./adzunaIntake.js";
 import { theMuseIntakeAdapter } from "./themuse.js";
+import { readSerpApiKey, serpapiIntakeAdapter } from "./serpapi.js";
 
 /**
  * Registry of on-demand intake adapters.
@@ -32,6 +33,12 @@ const ADAPTERS: readonly IntakeAdapter[] = [
 export const THE_MUSE_INTAKE_FLAG = "THE_MUSE_INTAKE_ENABLED";
 
 /**
+ * SerpApi's opt-in flag. This source needs TWO conditions rather than one, which
+ * is why the OPT_IN entries below carry a predicate instead of a flag name.
+ */
+export const SERPAPI_INTAKE_FLAG = "SERPAPI_INTAKE_ENABLED";
+
+/**
  * Sources that are registered in code but OFF unless an operator turns them on.
  *
  * WHY THE MUSE IS OPT-IN WHEN JOOBLE AND ADZUNA ARE NOT. All three are
@@ -42,8 +49,20 @@ export const THE_MUSE_INTAKE_FLAG = "THE_MUSE_INTAKE_ENABLED";
  * variable; shipping it on would be this change making that decision for
  * whoever deploys next.
  */
-const OPT_IN: ReadonlyArray<{ flag: string; adapter: IntakeAdapter }> = [
-  { flag: THE_MUSE_INTAKE_FLAG, adapter: theMuseIntakeAdapter },
+const OPT_IN: ReadonlyArray<{ adapter: IntakeAdapter; isEnabled: (env: NodeJS.ProcessEnv) => boolean }> = [
+  { adapter: theMuseIntakeAdapter, isEnabled: (env) => isOptInIntakeEnabled(THE_MUSE_INTAKE_FLAG, env) },
+  /**
+   * SerpApi requires the flag AND a key, unlike The Muse, and the quota is the
+   * reason: 100 searches per MONTH is the tightest budget in this fan-out by two
+   * orders of magnitude. A flag alone would let an operator enable the source
+   * against a deployment with no credential, so every candidate click would
+   * report a skipped source. The key is only presence-checked here; the adapter
+   * reads it.
+   */
+  {
+    adapter: serpapiIntakeAdapter,
+    isEnabled: (env) => isOptInIntakeEnabled(SERPAPI_INTAKE_FLAG, env) && readSerpApiKey(env) !== undefined,
+  },
 ];
 
 /**
@@ -57,6 +76,11 @@ export function isOptInIntakeEnabled(flag: string, env: NodeJS.ProcessEnv = proc
 
 export function isTheMuseIntakeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return isOptInIntakeEnabled(THE_MUSE_INTAKE_FLAG, env);
+}
+
+/** The flag alone is not enough — see the OPT_IN entry for why a key is required too. */
+export function isSerpApiIntakeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isOptInIntakeEnabled(SERPAPI_INTAKE_FLAG, env) && readSerpApiKey(env) !== undefined;
 }
 
 /**
@@ -76,7 +100,7 @@ export const intakeAdapterRegistry: ReadonlyMap<string, IntakeAdapter> = new Map
  * when it started.
  */
 export function listIntakeAdapters(env: NodeJS.ProcessEnv = process.env): readonly IntakeAdapter[] {
-  const enabled = OPT_IN.filter((entry) => isOptInIntakeEnabled(entry.flag, env)).map((entry) => entry.adapter);
+  const enabled = OPT_IN.filter((entry) => entry.isEnabled(env)).map((entry) => entry.adapter);
 
   return enabled.length > 0 ? [...ADAPTERS, ...enabled] : ADAPTERS;
 }
