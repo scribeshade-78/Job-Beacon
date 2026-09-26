@@ -323,3 +323,123 @@ export function getAdminSourceHealth(
     fetchImpl,
   );
 }
+
+/**
+ * Queue and worker administration.
+ *
+ * Read a queue, re-arm a dead-lettered job, or run a worker batch. The triggers
+ * are session + requireAdmin on the server; the browser never holds
+ * WORKER_TRIGGER_SECRET, which is what the /api/worker/* routes require.
+ */
+export type AdminQueueName = "ingestion_jobs" | "fit_analysis_jobs" | "company_registry_lookup_jobs";
+
+export const ADMIN_QUEUE_LABELS: Record<AdminQueueName, string> = {
+  ingestion_jobs: "Ingestion",
+  fit_analysis_jobs: "Fit analysis",
+  company_registry_lookup_jobs: "Company registry",
+};
+
+export type AdminQueueJobStatus = "pending" | "leased" | "done" | "failed";
+
+export interface AdminQueueCounts {
+  pending: number;
+  leased: number;
+  done: number;
+  failed: number;
+}
+
+export interface AdminDeadLetterJob {
+  id: string;
+  /** A queue-specific one-line identity, so this is not just a uuid on screen. */
+  label: string;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminQueueSummary {
+  queue: AdminQueueName;
+  counts: AdminQueueCounts;
+  /** How long the oldest pending row has been waiting. Null when nothing is pending. */
+  oldestPendingAt: string | null;
+  deadLetters: AdminDeadLetterJob[];
+}
+
+export interface AdminQueuesOverview {
+  queues: AdminQueueSummary[];
+  deadLetterLimit: number;
+}
+
+export interface AdminQueueRetryResult {
+  queue: AdminQueueName;
+  jobId: string;
+  rearmed: boolean;
+}
+
+/** Keep in sync with server/admin/workerTasks.ts ADMIN_WORKER_TASKS. */
+export type AdminWorkerTaskName =
+  | "ingestion"
+  | "fit-analysis"
+  | "classify-messages"
+  | "match-messages"
+  | "anti-ghosting"
+  | "mailbox-poll"
+  | "calendar-sync";
+
+export const ADMIN_WORKER_TASKS: readonly AdminWorkerTaskName[] = [
+  "match-messages",
+  "classify-messages",
+  "fit-analysis",
+  "ingestion",
+  "anti-ghosting",
+  "mailbox-poll",
+  "calendar-sync",
+];
+
+/**
+ * Ordered cheapest-and-safest first, which is also the order the buttons render
+ * in: linking costs nothing, classification and fit cost model calls, ingestion
+ * spends third-party quota, and the two Google tasks can be unconfigured.
+ */
+export const ADMIN_WORKER_TASK_LABELS: Record<AdminWorkerTaskName, string> = {
+  "match-messages": "Match messages",
+  "classify-messages": "Classify messages",
+  "fit-analysis": "Fit analysis",
+  ingestion: "Ingestion fetch",
+  "anti-ghosting": "Anti-ghosting sweep",
+  "mailbox-poll": "Mailbox poll",
+  "calendar-sync": "Calendar sync",
+};
+
+export interface AdminWorkerTaskResult {
+  task: AdminWorkerTaskName;
+  /** The runner's own counters. Shape differs per task, so it stays open. */
+  result: Record<string, unknown>;
+}
+
+export function getAdminQueues(accessToken: string, fetchImpl: typeof fetch = fetch) {
+  return adminGet<AdminQueuesOverview>("/api/admin/queues", accessToken, fetchImpl);
+}
+
+export function retryAdminQueueJob(
+  queue: AdminQueueName,
+  jobId: string,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  const path =
+    "/api/admin/queues/" + encodeURIComponent(queue) + "/" + encodeURIComponent(jobId) + "/retry";
+
+  return adminSend<AdminQueueRetryResult>(path, accessToken, { method: "POST" }, fetchImpl);
+}
+
+export function runAdminWorkerTask(
+  task: AdminWorkerTaskName,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  const path = "/api/admin/worker/" + encodeURIComponent(task);
+
+  return adminSend<AdminWorkerTaskResult>(path, accessToken, { method: "POST" }, fetchImpl);
+}

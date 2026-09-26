@@ -27,6 +27,8 @@ import { createCheckoutSession, readStripeConfig } from "./billing/stripe.js";
 import { cancelCandidateSubscription, getCandidateSubscription } from "./billing/subscription.js";
 import { evaluateEntitlements } from "./billing/entitlements.js";
 import { getAdminBilling } from "./admin/billing.js";
+import { listQueues, rearmFailedJob } from "./admin/queues.js";
+import { runAdminWorkerTask, WorkerTaskNotConfiguredError } from "./admin/workerTasks.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
 // these route-level tests only care about auth/ownership/rate-limit/status-
@@ -68,6 +70,21 @@ vi.mock("./opportunities/runner.js", () => ({
 // verifyStripeSignature is deliberately NOT stubbed — the webhook tests exercise
 // the real verification, which is the whole point of that route.
 vi.mock("./admin/billing.js", () => ({ getAdminBilling: vi.fn() }));
+
+// Final admin phase. The queue read/re-arm and the worker task runner are data
+// layers with their own unit tests (server/admin/queues.test.ts,
+// server/admin/workerTasks.test.ts). These route tests are about auth-gating,
+// validation, status mapping and the audit trail, so those two functions are
+// stubbed while the guards and constants stay real — the allow-list and the
+// queue-name check are part of what is being tested.
+vi.mock("./admin/queues.js", async () => {
+  const actual = await vi.importActual<typeof import("./admin/queues.js")>("./admin/queues.js");
+  return { ...actual, listQueues: vi.fn(), rearmFailedJob: vi.fn() };
+});
+vi.mock("./admin/workerTasks.js", async () => {
+  const actual = await vi.importActual<typeof import("./admin/workerTasks.js")>("./admin/workerTasks.js");
+  return { ...actual, runAdminWorkerTask: vi.fn() };
+});
 vi.mock("./billing/entitlements.js", () => ({ evaluateEntitlements: vi.fn() }));
 vi.mock("./billing/plans.js", async () => {
   const actual = await vi.importActual<typeof import("./billing/plans.js")>("./billing/plans.js");
@@ -1476,6 +1493,287 @@ function makeLogClient(result: { data: unknown; error: unknown } = { data: [], e
 
   return { serviceClient: { from: vi.fn(() => builder) } as never, calls };
 }
+
+function makeAuditCapturingClient() {
+  const auditRows: Array<Record<string, unknown>> = [];
+  const from = vi.fn((table: string) => {
+    if (table === "audit_events") {
+      return {
+        insert: async (row: Record<string, unknown>) => {
+          auditRows.push(row);
+          return { data: null, error: null };
+        },
+      };
+    }
+    throw new Error("Unexpected table: " + table);
+  });
+
+  return { serviceClient: { from } as never, auditRows };
+}
+
+describe("GET /api/admin/queues", () => {
+  const overview = { queues: [], deadLetterLimit: 10 };
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/queues`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/queues`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the queue overview for an admin", async () => {
+    vi.mocked(listQueues).mockResolvedValue(overview as never);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from: vi.fn() } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/queues`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(overview);
+      },
+    );
+  });
+
+  it("returns 500 when the read fails", async () => {
+    vi.mocked(listQueues).mockRejectedValue(new Error("db down"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from: vi.fn() } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/queues`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
+describe("POST /api/admin/queues/:queue/:jobId/retry", () => {
+  const jobId = "44444444-4444-4444-4444-444444444444";
+
+  function retry(testBaseUrl: string, queue: string, id: string) {
+    return fetch(`${testBaseUrl}/api/admin/queues/${queue}/${id}/retry`, {
+      method: "POST",
+      headers: { Authorization: "Bearer valid-test-token" },
+    });
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/queues/ingestion_jobs/${jobId}/retry`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await retry(testBaseUrl, "ingestion_jobs", jobId);
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 400 for a queue this console does not read", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await retry(testBaseUrl, "application_attempts", jobId);
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 when jobId is not a uuid", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await retry(testBaseUrl, "ingestion_jobs", "not-a-uuid");
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 404 when no dead-lettered row matched", async () => {
+    vi.mocked(rearmFailedJob).mockResolvedValue(false);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from: vi.fn() } as never },
+      async (testBaseUrl) => {
+        const response = await retry(testBaseUrl, "ingestion_jobs", jobId);
+
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it("returns 200 and audits when a failed row was re-armed", async () => {
+    vi.mocked(rearmFailedJob).mockResolvedValue(true);
+    const { serviceClient, auditRows } = makeAuditCapturingClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await retry(testBaseUrl, "fit_analysis_jobs", jobId);
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ queue: "fit_analysis_jobs", jobId, rearmed: true });
+        expect(rearmFailedJob).toHaveBeenCalledWith(expect.anything(), "fit_analysis_jobs", jobId);
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({
+          actor_id: "user-123",
+          actor_role: "admin",
+          action: "queue_job.retried",
+          entity_type: "queue_job",
+          entity_id: jobId,
+        });
+      },
+    );
+  });
+});
+
+describe("POST /api/admin/worker/:task", () => {
+  function trigger(testBaseUrl: string, task: string) {
+    return fetch(`${testBaseUrl}/api/admin/worker/${task}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer valid-test-token" },
+    });
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/worker/match-messages`, { method: "POST" });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "match-messages");
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 400 for applications, which must never be one click away", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "applications");
+
+        expect(response.status).toBe(400);
+        expect(runAdminWorkerTask).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns 400 for an unknown task name", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "make-coffee");
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 200, runs the task and audits the trigger", async () => {
+    vi.mocked(runAdminWorkerTask).mockResolvedValue({ scanned: 2, linked: 2 });
+    const { serviceClient, auditRows } = makeAuditCapturingClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "match-messages");
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ task: "match-messages", result: { scanned: 2, linked: 2 } });
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({
+          actor_id: "user-123",
+          actor_role: "admin",
+          action: "worker.triggered",
+          entity_type: "worker_task",
+          entity_id: "match-messages",
+          new_values: { scanned: 2, linked: 2 },
+        });
+      },
+    );
+  });
+
+  it("returns 503 with the missing-variable reason and audits the failure", async () => {
+    vi.mocked(runAdminWorkerTask).mockRejectedValue(
+      new WorkerTaskNotConfiguredError("mailbox-poll", "Missing GOOGLE_OAUTH_CLIENT_ID."),
+    );
+    const { serviceClient, auditRows } = makeAuditCapturingClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "mailbox-poll");
+
+        expect(response.status).toBe(503);
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toContain("GOOGLE_OAUTH_CLIENT_ID");
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({ action: "worker.trigger_failed", entity_id: "mailbox-poll" });
+      },
+    );
+  });
+
+  it("returns 500 and audits when the batch itself throws", async () => {
+    vi.mocked(runAdminWorkerTask).mockRejectedValue(new Error("openrouter down"));
+    const { serviceClient, auditRows } = makeAuditCapturingClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await trigger(testBaseUrl, "fit-analysis");
+
+        expect(response.status).toBe(500);
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({ action: "worker.trigger_failed" });
+      },
+    );
+  });
+
+  it("rate-limits one admin to 10 triggers per window, returning 429 on the 11th", async () => {
+    vi.mocked(runAdminWorkerTask).mockResolvedValue({ scanned: 0 });
+    const { serviceClient } = makeAuditCapturingClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        for (let index = 0; index < 10; index += 1) {
+          expect((await trigger(testBaseUrl, "match-messages")).status).toBe(200);
+        }
+
+        expect((await trigger(testBaseUrl, "match-messages")).status).toBe(429);
+      },
+    );
+  });
+});
 
 describe("GET /api/admin/audit-events", () => {
   const auditRow = {

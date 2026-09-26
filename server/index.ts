@@ -39,6 +39,18 @@ import {
   SOURCE_HEALTH_STATUSES,
 } from "./admin/sourceHealth.js";
 import {
+  isQueueName,
+  listQueues,
+  QUEUE_NAMES,
+  rearmFailedJob,
+} from "./admin/queues.js";
+import {
+  ADMIN_WORKER_TASKS,
+  isAdminWorkerTask,
+  runAdminWorkerTask,
+  WorkerTaskNotConfiguredError,
+} from "./admin/workerTasks.js";
+import {
   findActivePrice,
   isBillingInterval,
   isBillingRegion,
@@ -482,6 +494,21 @@ export function createApp(options: CreateAppOptions = {}) {
     legacyHeaders: false,
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many interview preparation requests. Please try again later." },
+  });
+
+  // Admin-triggered worker batches. These spend third-party quota and model
+  // spend per click (Jooble's free plan is a 500-request LIFETIME budget), so
+  // the ceiling is per admin rather than per IP: an office sharing one address
+  // should not share one operator's budget, and one operator should not be able
+  // to drain a queue in a loop. Keyed on the verified session, which requireAuth
+  // has already set by the time this runs.
+  const adminWorkerRunRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many worker triggers. Please try again later." },
   });
 
   // Candidate-facing "Fetch latest jobs" trigger for the Opportunities page.
@@ -1783,6 +1810,147 @@ export function createApp(options: CreateAppOptions = {}) {
       response.status(500).json({ error: "Failed to load source health" });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Queue observability, dead-letter retry, and admin-triggered worker runs.
+  //
+  // WHY TRIGGERS LIVE HERE AND NOT BEHIND /api/worker/*. Those routes are
+  // authenticated by WORKER_TRIGGER_SECRET, which the browser cannot hold and
+  // must not — putting it there would hand every admin session the credential an
+  // external cron uses. These call the same functions behind requireAuth +
+  // requireAdmin instead, so the browser never sees a shared secret. They do not
+  // replace /api/worker/*; an external cron still has no session.
+  //
+  // EVERY TRIGGER IS AUDITED, success or failure, because "who ran the ingestion
+  // batch that spent the Jooble quota" is the first question anyone asks.
+  // -------------------------------------------------------------------------
+
+  app.get("/api/admin/queues", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const overview = await listQueues(resolveServiceClient());
+      response.status(200).json(overview);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Queue overview read failed:", message);
+      response.status(500).json({ error: "Failed to load queue state" });
+    }
+  });
+
+  app.post(
+    "/api/admin/queues/:queue/:jobId/retry",
+    requireAuth,
+    requireAdmin,
+    async (request: AuthenticatedRequest, response) => {
+      const queue = request.params.queue;
+      const jobId = request.params.jobId as string;
+
+      if (!isQueueName(queue)) {
+        response.status(400).json({ error: "queue must be one of " + QUEUE_NAMES.join(", ") });
+        return;
+      }
+
+      if (!UUID_PATTERN.test(jobId)) {
+        response.status(400).json({ error: "jobId must be a uuid" });
+        return;
+      }
+
+      try {
+        const client = resolveServiceClient();
+        const rearmed = await rearmFailedJob(client, queue, jobId);
+
+        if (!rearmed) {
+          // Only a dead-lettered row can be re-armed, so nothing matching means
+          // the id is wrong or the row is not failed — both a 404 rather than a
+          // success that changed nothing.
+          response.status(404).json({ error: "No failed job with that id in that queue." });
+          return;
+        }
+
+        await recordAuditEvent(client, {
+          actorId: request.user!.id,
+          actorRole: "admin",
+          action: "queue_job.retried",
+          entityType: "queue_job",
+          entityId: jobId,
+          summary: "Re-armed a failed job in " + queue,
+          previousValues: { status: "failed" },
+          newValues: { status: "pending", attempts: 0 },
+        });
+
+        response.status(200).json({ queue, jobId, rearmed: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Queue job re-arm failed:", message);
+        response.status(500).json({ error: "Failed to re-arm the job" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/worker/:task",
+    requireAuth,
+    requireAdmin,
+    adminWorkerRunRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const task = request.params.task;
+
+      if (!isAdminWorkerTask(task)) {
+        response.status(400).json({ error: "task must be one of " + ADMIN_WORKER_TASKS.join(", ") });
+        return;
+      }
+
+      // Declared outside the try so the failure path can still audit with the
+      // same client; resolveServiceClient itself can throw on a misconfigured
+      // deployment, and auditing that has to be best-effort rather than fatal.
+      let client: SupabaseClient | undefined;
+
+      try {
+        client = resolveServiceClient();
+
+        const result = await runAdminWorkerTask(client, task, {
+          openai: resolveOpenAIClient,
+          googleOAuthConfig: resolveGoogleOAuthConfig,
+          mailboxEncryptionKey: resolveMailboxEncryptionKey,
+        });
+
+        await recordAuditEvent(client, {
+          actorId: request.user!.id,
+          actorRole: "admin",
+          action: "worker.triggered",
+          entityType: "worker_task",
+          entityId: task,
+          summary: "Ran the " + task + " worker batch",
+          newValues: result,
+        });
+
+        response.status(200).json({ task, result });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        if (client) {
+          await recordAuditEvent(client, {
+            actorId: request.user!.id,
+            actorRole: "admin",
+            action: "worker.trigger_failed",
+            entityType: "worker_task",
+            entityId: task,
+            summary: "The " + task + " worker batch could not run: " + message,
+            newValues: { error: message },
+          });
+        }
+
+        if (error instanceof WorkerTaskNotConfiguredError) {
+          // A deployment problem, not the caller's fault, and the fix is an
+          // environment variable — so say which one rather than a generic 500.
+          response.status(503).json({ error: message });
+          return;
+        }
+
+        console.error("Admin worker trigger failed:", message);
+        response.status(500).json({ error: "Failed to run the worker batch" });
+      }
+    },
+  );
 
   app.get("/api/admin/trust-scores", requireAuth, requireAdmin, async (_request, response) => {
     try {

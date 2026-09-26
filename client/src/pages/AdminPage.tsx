@@ -22,6 +22,7 @@ import { AuditSection } from "./admin/AuditSection";
 import { ModerationSection } from "./admin/ModerationSection";
 import { TrustScoringSection } from "./admin/TrustScoringSection";
 import { UsersBillingSection } from "./admin/UsersBillingSection";
+import { QueuesSection } from "./admin/QueuesSection";
 import { AdminCard, MockBadge } from "./admin/shared";
 
 interface AdminPageProps {
@@ -46,7 +47,7 @@ const NAV: Array<{ id: SectionId; label: string; Icon: LucideIcon }> = [
   { id: "moderation", label: "Moderation Queue", Icon: ShieldAlert },
   { id: "trust", label: "Trust Scoring", Icon: Gauge },
   { id: "users", label: "Users & Billing", Icon: Users },
-  { id: "errors", label: "Errors & Health", Icon: Activity },
+  { id: "errors", label: "Queues & Workers", Icon: Activity },
   { id: "audit", label: "Audit Log", Icon: ScrollText },
   { id: "settings", label: "Settings", Icon: Settings },
 ];
@@ -154,7 +155,7 @@ export function AdminPage({ onLogout }: AdminPageProps) {
             {section === "moderation" && <ModerationSection />}
             {section === "trust" && <TrustScoringSection />}
             {section === "users" && <UsersBillingSection />}
-            {section === "errors" && <ErrorsHealthMock />}
+            {section === "errors" && <QueuesSection />}
             {section === "audit" && <AuditSection />}
             {section === "settings" && <SettingsMock />}
           </main>
@@ -164,9 +165,8 @@ export function AdminPage({ onLogout }: AdminPageProps) {
   );
 }
 
-/* ---- Mock sections: no backing schema yet (error_events later). Static
-   placeholders so the console shell is complete; deleted wholesale when their
-   real routes land.
+/* ---- Mock sections: no backing schema yet. Static placeholders so the console
+   shell is complete; deleted wholesale when their real routes land.
 
    Users & Billing used to live here. Task H1 removed it: subscriptions,
    regional_prices, subscription_plans and plan_limits now exist, so the section
@@ -178,32 +178,12 @@ export function AdminPage({ onLogout }: AdminPageProps) {
    it. The section now reads audit_events and security_events through the real
    routes and carries no badge.
 
-   What is left below is Errors & Health and Settings, both still waiting on
-   tables (error_events, and any admin-config table). ---- */
+   Errors & Health used to live here as well, inventing an error_events table
+   that still does not exist. The final admin phase replaced it with the real
+   Queues & Workers section, which reads the three job queues that do exist — so
+   the badge is gone from that slot too.
 
-function ErrorsHealthMock() {
-  const rows = [
-    { at: "10:04", service: "worker:fit", level: "error", message: "OpenAI 429 — backoff engaged" },
-    { at: "09:41", service: "api", level: "warn", message: "slow query: candidate_opportunities 1.8s" },
-  ];
-  return (
-    <AdminCard title="Errors & health" description="Wired to a real error_events table in a later phase.">
-      <div className="mb-3">
-        <MockBadge />
-      </div>
-      <ul className="space-y-2">
-        {rows.map((row) => (
-          <li key={row.at} className="rounded border border-slate-800 bg-slate-950/40 p-3 text-sm">
-            <span className="font-mono text-xs text-slate-500">{row.at}</span>{" "}
-            <span className={row.level === "error" ? "text-rose-400" : "text-amber-400"}>{row.level}</span>{" "}
-            <span className="text-slate-400">{row.service}</span>
-            <p className="mt-1 text-slate-300">{row.message}</p>
-          </li>
-        ))}
-      </ul>
-    </AdminCard>
-  );
-}
+   What is left below is Settings, still waiting on an admin-config table. ---- */
 
 function SettingsMock() {
   return (

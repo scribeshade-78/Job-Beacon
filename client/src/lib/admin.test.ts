@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { getAdminRoles, getAdminSourceHealth, grantAdminRole, revokeAdminRole } from "./admin";
+import {
+  getAdminQueues,
+  getAdminRoles,
+  getAdminSourceHealth,
+  grantAdminRole,
+  retryAdminQueueJob,
+  revokeAdminRole,
+  runAdminWorkerTask,
+} from "./admin";
 
 /**
  * R8.2 role management client. The wiring assertions that matter here are the
@@ -167,5 +175,90 @@ describe("getAdminSourceHealth", () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: "Forbidden" }) });
 
     expect(await getAdminSourceHealth({}, "tok", fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
+  });
+});
+
+describe("getAdminQueues", () => {
+  it("fetches the queue overview with a bearer token", async () => {
+    const payload = { queues: [], deadLetterLimit: 10 };
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse(payload));
+
+    const result = await getAdminQueues("tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ kind: "success", data: payload });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/queues", {
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("returns forbidden on 403", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: "Forbidden" }) });
+
+    expect(await getAdminQueues("tok", fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
+  });
+});
+
+describe("retryAdminQueueJob", () => {
+  it("posts to the retry path for that queue and job", async () => {
+    const payload = { queue: "ingestion_jobs", jobId: "j1", rearmed: true };
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse(payload));
+
+    const result = await retryAdminQueueJob("ingestion_jobs", "j1", "tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ kind: "success", data: payload });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/queues/ingestion_jobs/j1/retry", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("surfaces the 404 reason so a wrong id is not mistaken for a retry", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: "No failed job with that id in that queue." }),
+    });
+
+    const result = await retryAdminQueueJob("ingestion_jobs", "j1", "tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ kind: "error", message: "No failed job with that id in that queue." });
+  });
+});
+
+describe("runAdminWorkerTask", () => {
+  it("posts to the task path with no body", async () => {
+    const payload = { task: "match-messages", result: { scanned: 2 } };
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse(payload));
+
+    const result = await runAdminWorkerTask("match-messages", "tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ kind: "success", data: payload });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/worker/match-messages", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("surfaces the 503 configuration reason verbatim so the operator sees the variable", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        error: 'The "mailbox-poll" task is not configured on this deployment: Missing GOOGLE_OAUTH_CLIENT_ID.',
+      }),
+    });
+
+    const result = await runAdminWorkerTask("mailbox-poll", "tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result.kind).toBe("error");
+    expect((result as { message: string }).message).toContain("GOOGLE_OAUTH_CLIENT_ID");
+  });
+
+  it("returns forbidden on 403", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: "Forbidden" }) });
+
+    expect(await runAdminWorkerTask("ingestion", "tok", fetchImpl as unknown as typeof fetch)).toEqual({
+      kind: "forbidden",
+    });
   });
 });
