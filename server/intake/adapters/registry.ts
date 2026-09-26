@@ -1,5 +1,6 @@
 import type { IntakeAdapter } from "./types.js";
 import { remotiveIntakeAdapter } from "./remotive.js";
+import { arbeitnowIntakeAdapter } from "./arbeitnow.js";
 import { joobleIntakeAdapter } from "./joobleIntake.js";
 import { adzunaIntakeAdapter } from "./adzunaIntake.js";
 import { theMuseIntakeAdapter } from "./themuse.js";
@@ -14,14 +15,16 @@ import { readSerpApiKey, serpapiIntakeAdapter } from "./serpapi.js";
  * that still requires a DiscoveryAdapter plus a vacancy_sources row.
  */
 /**
- * Order is the fan-out's execution order, and it is deliberate: Remotive first,
- * because it needs neither a credential nor any candidate context and therefore
- * still returns listings when the two credentialed aggregators are skipped for a
- * missing preference. A run that ends with nothing is then at least known to
- * have tried the one source that cannot fail for configuration reasons.
+ * Order is the fan-out's execution order, and it is deliberate: the two keyless
+ * sources run first, because they need neither a credential nor any candidate
+ * context and therefore still return listings when the credentialed aggregators
+ * are skipped for a missing preference. A run that ends with nothing is then at
+ * least known to have tried the sources that cannot fail for configuration
+ * reasons.
  */
 const ADAPTERS: readonly IntakeAdapter[] = [
   remotiveIntakeAdapter,
+  arbeitnowIntakeAdapter,
   joobleIntakeAdapter,
   adzunaIntakeAdapter,
 ];

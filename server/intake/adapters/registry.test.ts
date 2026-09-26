@@ -26,7 +26,7 @@ describe("intake adapter registry — The Muse is opt-in", () => {
     const codes = listIntakeAdapters(OFF).map((adapter) => adapter.sourceCode);
 
     expect(codes).not.toContain("themuse");
-    expect(codes).toEqual(["remotive", "jooble", "adzuna"]);
+    expect(codes).toEqual(["remotive", "arbeitnow", "jooble", "adzuna"]);
   });
 
   it("is off for every value that is not exactly \"true\"", () => {
@@ -34,7 +34,7 @@ describe("intake adapter registry — The Muse is opt-in", () => {
     // meant to turn on.
     for (const value of ["", "1", "yes", "TRUE", "True", "on", "false", "true "]) {
       expect(isTheMuseIntakeEnabled({ [THE_MUSE_INTAKE_FLAG]: value })).toBe(false);
-      expect(listIntakeAdapters({ [THE_MUSE_INTAKE_FLAG]: value })).toHaveLength(3);
+      expect(listIntakeAdapters({ [THE_MUSE_INTAKE_FLAG]: value })).toHaveLength(4);
     }
   });
 
@@ -43,16 +43,21 @@ describe("intake adapter registry — The Muse is opt-in", () => {
     const codes = listIntakeAdapters(env).map((adapter) => adapter.sourceCode);
 
     expect(isTheMuseIntakeEnabled(env)).toBe(true);
-    expect(codes).toEqual(["remotive", "jooble", "adzuna", "themuse"]);
+    expect(codes).toEqual(["remotive", "arbeitnow", "jooble", "adzuna", "themuse"]);
   });
 
   it("keeps the always-on sources first, so the fan-out order is unchanged by opting in", () => {
-    // Remotive runs first because it needs no credential and no candidate
-    // context, so a run still returns something when the credentialed sources
-    // are skipped. An opt-in source must not displace that.
+    // The two keyless sources run first because they need no credential and no
+    // candidate context, so a run still returns something when the credentialed
+    // sources are skipped. An opt-in source must not displace that.
     const enabled = listIntakeAdapters({ [THE_MUSE_INTAKE_FLAG]: "true" });
 
-    expect(enabled.slice(0, 3).map((adapter) => adapter.sourceCode)).toEqual(["remotive", "jooble", "adzuna"]);
+    expect(enabled.slice(0, 4).map((adapter) => adapter.sourceCode)).toEqual([
+      "remotive",
+      "arbeitnow",
+      "jooble",
+      "adzuna",
+    ]);
   });
 
   it("resolves the adapter only when it is enabled", () => {
@@ -63,11 +68,12 @@ describe("intake adapter registry — The Muse is opt-in", () => {
   it("names only the sources a caller could actually have used", () => {
     // Listing "themuse" to someone who could not have selected it is worse than
     // saying nothing: it reads as a source that exists but is broken.
-    expect(() => getIntakeAdapter("nope", OFF)).toThrow(/Registered: remotive, jooble, adzuna\./);
+    expect(() => getIntakeAdapter("nope", OFF)).toThrow(/Registered: remotive, arbeitnow, jooble, adzuna\./);
   });
 
   it("resolves an always-on source regardless of the flag", () => {
     expect(getIntakeAdapter("remotive", OFF).sourceCode).toBe("remotive");
+    expect(getIntakeAdapter("arbeitnow", OFF).sourceCode).toBe("arbeitnow");
     expect(getIntakeAdapter("jooble", { [THE_MUSE_INTAKE_FLAG]: "true" }).sourceCode).toBe("jooble");
   });
 });
