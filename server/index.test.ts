@@ -910,6 +910,389 @@ describe("PATCH /api/admin/sources/:sourceCode", () => {
   });
 });
 
+describe("GET /api/admin/roles", () => {
+  function makeListClient() {
+    const from = vi.fn((table: string) => {
+      if (table !== "user_roles") {
+        throw new Error("Unexpected table: " + table);
+      }
+      return {
+        select: () => ({
+          order: async () => ({
+            data: [{ user_id: "user-123", role: "admin", created_at: "2026-09-01T00:00:00Z" }],
+            error: null,
+          }),
+        }),
+      };
+    });
+    const listUsers = vi.fn(async () => ({
+      data: { users: [{ id: "user-123", email: "person@example.com" }] },
+      error: null,
+    }));
+    return { from, auth: { admin: { listUsers } } };
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/roles`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/roles`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with assignments, their emails, and the isSelf flag", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: makeListClient() as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/roles`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          assignments: [
+            {
+              userId: "user-123",
+              role: "admin",
+              createdAt: "2026-09-01T00:00:00Z",
+              email: "person@example.com",
+              isSelf: true,
+            },
+          ],
+          truncated: false,
+        });
+      },
+    );
+  });
+
+  it("returns 500 when the role read fails", async () => {
+    const from = vi.fn(() => ({
+      select: () => ({ order: async () => ({ data: null, error: { message: "db error" } }) }),
+    }));
+    const listUsers = vi.fn(async () => ({ data: { users: [] }, error: null }));
+
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        checkIsAdmin: async () => true,
+        serviceClient: { from, auth: { admin: { listUsers } } } as never,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/roles`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
+describe("POST /api/admin/roles", () => {
+  function makeGrantClient(options: { existingRole?: unknown } = {}) {
+    const upsert = vi.fn(async () => ({ data: null, error: null }));
+    const auditRows: Array<Record<string, unknown>> = [];
+    const from = vi.fn((table: string) => {
+      if (table === "user_roles") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({ maybeSingle: async () => ({ data: options.existingRole ?? null, error: null }) }),
+            }),
+          }),
+          upsert,
+        };
+      }
+      if (table === "audit_events") {
+        return {
+          insert: async (row: Record<string, unknown>) => {
+            auditRows.push(row);
+            return { data: null, error: null };
+          },
+        };
+      }
+      throw new Error("Unexpected table: " + table);
+    });
+    const listUsers = vi.fn(async () => ({
+      data: { users: [{ id: "user-999", email: "New.Admin@Example.com" }] },
+      error: null,
+    }));
+
+    return { serviceClient: { from, auth: { admin: { listUsers } } } as never, upsert, auditRows };
+  }
+
+  function grantRequest(testBaseUrl: string, body: unknown) {
+    return fetch(`${testBaseUrl}/api/admin/roles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/roles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "person@example.com", role: "admin" }),
+      });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { email: "person@example.com", role: "admin" });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 400 when email is missing", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { role: "admin" });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 for a role this console cannot grant", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { email: "person@example.com", role: "superadmin" });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 404 when no registered account has that email", async () => {
+    const from = vi.fn(() => {
+      throw new Error("no database call expected");
+    });
+    const listUsers = vi.fn(async () => ({
+      data: { users: [{ id: "user-999", email: "someone@example.com" }] },
+      error: null,
+    }));
+
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        checkIsAdmin: async () => true,
+        serviceClient: { from, auth: { admin: { listUsers } } } as never,
+      },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { email: "nobody@example.com", role: "admin" });
+        expect(response.status).toBe(404);
+        expect(from).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("grants case-insensitively, echoes the registered address, and audits the grant", async () => {
+    const { serviceClient, upsert, auditRows } = makeGrantClient();
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { email: "new.admin@example.com", role: "admin" });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          userId: "user-999",
+          email: "New.Admin@Example.com",
+          role: "admin",
+          alreadyHeld: false,
+        });
+        expect(upsert).toHaveBeenCalledWith(
+          { user_id: "user-999", role: "admin" },
+          { onConflict: "user_id,role", ignoreDuplicates: true },
+        );
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({
+          actor_id: "user-123",
+          actor_role: "admin",
+          action: "role.granted",
+          entity_type: "user_role",
+          entity_id: "user-999",
+        });
+      },
+    );
+  });
+
+  it("reports alreadyHeld, writes nothing, and audits nothing when the role is already held", async () => {
+    const { serviceClient, upsert, auditRows } = makeGrantClient({ existingRole: { role: "admin" } });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await grantRequest(testBaseUrl, { email: "new.admin@example.com", role: "admin" });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          userId: "user-999",
+          email: "New.Admin@Example.com",
+          role: "admin",
+          alreadyHeld: true,
+        });
+        expect(upsert).not.toHaveBeenCalled();
+        expect(auditRows).toHaveLength(0);
+      },
+    );
+  });
+});
+
+describe("DELETE /api/admin/roles/:userId/:role", () => {
+  const adminId = "22222222-2222-2222-2222-222222222222";
+  const otherUserId = "33333333-3333-3333-3333-333333333333";
+
+  const uuidVerifier = async (token: string) =>
+    token === "valid-test-token" ? { id: adminId, email: "person@example.com", aal: "aal1" as const } : null;
+
+  function makeRevokeClient(options: { removed?: boolean } = {}) {
+    const auditRows: Array<Record<string, unknown>> = [];
+    const from = vi.fn((table: string) => {
+      if (table === "user_roles") {
+        return {
+          delete: () => ({
+            eq: () => ({
+              eq: () => ({
+                select: async () => ({
+                  data: options.removed ? [{ user_id: otherUserId }] : [],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "audit_events") {
+        return {
+          insert: async (row: Record<string, unknown>) => {
+            auditRows.push(row);
+            return { data: null, error: null };
+          },
+        };
+      }
+      throw new Error("Unexpected table: " + table);
+    });
+
+    return { serviceClient: { from } as never, auditRows };
+  }
+
+  function revokeRequest(testBaseUrl: string, userId: string, role: string) {
+    return fetch(`${testBaseUrl}/api/admin/roles/${userId}/${role}`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer valid-test-token" },
+    });
+  }
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/roles/${otherUserId}/admin`, {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, otherUserId, "admin");
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 400 when userId is not a uuid", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, "not-a-uuid", "admin");
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 for a role this console cannot revoke", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, otherUserId, "superadmin");
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 400 and never touches the database when an admin targets their own admin row", async () => {
+    const from = vi.fn(() => {
+      throw new Error("no database call expected");
+    });
+
+    await withTestServer(
+      { verifyAccessToken: uuidVerifier, checkIsAdmin: async () => true, serviceClient: { from } as never },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, adminId, "admin");
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: "You cannot revoke your own admin role." });
+        expect(from).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("revokes the admin role of another account and audits it", async () => {
+    const { serviceClient, auditRows } = makeRevokeClient({ removed: true });
+
+    await withTestServer(
+      { verifyAccessToken: uuidVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, otherUserId, "admin");
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ userId: otherUserId, role: "admin", removed: true });
+        expect(auditRows).toHaveLength(1);
+        expect(auditRows[0]).toMatchObject({
+          actor_id: adminId,
+          actor_role: "admin",
+          action: "role.revoked",
+          entity_type: "user_role",
+          entity_id: otherUserId,
+        });
+      },
+    );
+  });
+
+  it("reports removed: false and audits nothing when the role was not held", async () => {
+    const { serviceClient, auditRows } = makeRevokeClient({ removed: false });
+
+    await withTestServer(
+      { verifyAccessToken: uuidVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await revokeRequest(testBaseUrl, otherUserId, "moderator");
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ userId: otherUserId, role: "moderator", removed: false });
+        expect(auditRows).toHaveLength(0);
+      },
+    );
+  });
+});
+
 describe("GET /api/admin/trust-scores", () => {
   it("returns 403 for an authenticated non-admin", async () => {
     await withTestServer(

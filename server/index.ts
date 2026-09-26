@@ -26,6 +26,14 @@ import {
 import { getRecentTrustScores } from "./admin/trustScores.js";
 import { getAdminBilling } from "./admin/billing.js";
 import {
+  findUserByEmail,
+  grantRole,
+  isManageableRole,
+  listRoleAssignments,
+  MANAGEABLE_ROLES,
+  revokeRole,
+} from "./admin/roles.js";
+import {
   findActivePrice,
   isBillingInterval,
   isBillingRegion,
@@ -1904,6 +1912,144 @@ export function createApp(options: CreateAppOptions = {}) {
       response.status(500).json({ error: "Failed to load billing data" });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Role management — granting and revoking 'admin' / 'moderator' from the
+  // Users & Billing section instead of by hand-written SQL after bootstrap.
+  //
+  // ALL THREE ARE requireAuth + requireAdmin, and that pair is the real
+  // boundary: public.user_roles is service_role-only at the database grant
+  // level (20260816222822_user_roles.sql), so this route family is the only
+  // write path a role ever takes. Hiding the UI would not revoke the ability.
+  // -------------------------------------------------------------------------
+
+  app.get("/api/admin/roles", requireAuth, requireAdmin, async (request: AuthenticatedRequest, response) => {
+    try {
+      const { assignments, truncated } = await listRoleAssignments(resolveServiceClient());
+      response.status(200).json({
+        // isSelf comes from the verified token, never from the request body or
+        // query — and it only ever disables a button. The delete route below
+        // refuses the self-revocation regardless of what the client sends.
+        assignments: assignments.map((assignment) => ({
+          ...assignment,
+          isSelf: assignment.userId === request.user!.id,
+        })),
+        truncated,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Admin roles read failed:", message);
+      response.status(500).json({ error: "Failed to load role assignments" });
+    }
+  });
+
+  app.post("/api/admin/roles", requireAuth, requireAdmin, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const role = body.role;
+
+    if (email === "") {
+      response.status(400).json({ error: "email is required" });
+      return;
+    }
+
+    if (!isManageableRole(role)) {
+      response.status(400).json({ error: "role must be one of " + MANAGEABLE_ROLES.join(", ") });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      const user = await findUserByEmail(client, email);
+
+      if (!user) {
+        // A real 404 rather than a silent success: the admin named an address
+        // with no registered account, and granting a role to nobody must not
+        // be reported as having granted it.
+        response.status(404).json({ error: "No registered user with that email address." });
+        return;
+      }
+
+      const { alreadyHeld } = await grantRole(client, user.id, role);
+
+      // Audited only on a state change: an audit row asserting a grant that
+      // changed nothing would be the more misleading record, and the response
+      // already tells the caller which of the two happened.
+      if (!alreadyHeld) {
+        await recordAuditEvent(client, {
+          actorId: request.user!.id,
+          actorRole: "admin",
+          action: "role.granted",
+          entityType: "user_role",
+          entityId: user.id,
+          summary: "Granted the " + role + " role to " + (user.email ?? email),
+          previousValues: null,
+          newValues: { userId: user.id, email: user.email, role },
+        });
+      }
+
+      response.status(200).json({ userId: user.id, email: user.email ?? email, role, alreadyHeld });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Admin role grant failed:", message);
+      response.status(500).json({ error: "Failed to grant the role" });
+    }
+  });
+
+  // Path params rather than a DELETE request body: a body on DELETE is legal
+  // HTTP but a reverse proxy is free to strip it, which would turn a revoke
+  // into an unmatched request in production while working perfectly in dev.
+  app.delete(
+    "/api/admin/roles/:userId/:role",
+    requireAuth,
+    requireAdmin,
+    async (request: AuthenticatedRequest, response) => {
+      const userId = request.params.userId as string;
+      const role = request.params.role;
+
+      if (!UUID_PATTERN.test(userId)) {
+        response.status(400).json({ error: "userId must be a uuid" });
+        return;
+      }
+
+      if (!isManageableRole(role)) {
+        response.status(400).json({ error: "role must be one of " + MANAGEABLE_ROLES.join(", ") });
+        return;
+      }
+
+      // Self-lockout guard: the caller's own admin row is the access that
+      // reaches this console at all, and revoking it takes effect immediately
+      // (isAdmin is read per request). Refused before any write is attempted.
+      if (userId === request.user!.id && role === "admin") {
+        response.status(400).json({ error: "You cannot revoke your own admin role." });
+        return;
+      }
+
+      try {
+        const client = resolveServiceClient();
+        const removed = await revokeRole(client, userId, role);
+
+        if (removed) {
+          await recordAuditEvent(client, {
+            actorId: request.user!.id,
+            actorRole: "admin",
+            action: "role.revoked",
+            entityType: "user_role",
+            entityId: userId,
+            summary: "Revoked the " + role + " role from user " + userId,
+            previousValues: { userId, role },
+            newValues: null,
+          });
+        }
+
+        response.status(200).json({ userId, role, removed });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Admin role revoke failed:", message);
+        response.status(500).json({ error: "Failed to revoke the role" });
+      }
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Task H4 — audit, security events, and ATS credential administration.

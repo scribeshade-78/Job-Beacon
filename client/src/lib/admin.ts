@@ -131,3 +131,116 @@ export async function updateAdminSource(
 
   return { kind: "success", data: (await response.json()) as SourcePolicy };
 }
+
+/** The two roles this console can grant. Mirrors server/admin/roles.ts MANAGEABLE_ROLES. */
+export type ManageableRole = "admin" | "moderator";
+
+export const MANAGEABLE_ROLES: readonly ManageableRole[] = ["admin", "moderator"];
+
+export interface AdminRoleAssignment {
+  userId: string;
+  role: ManageableRole;
+  createdAt: string;
+  /** Null when the account has no email, or when it fell outside the server page bound. */
+  email: string | null;
+  /** True for the signed-in admin own row — a UX signal only; the server refuses self-revocation regardless. */
+  isSelf: boolean;
+}
+
+export interface AdminRoleList {
+  assignments: AdminRoleAssignment[];
+  truncated: boolean;
+}
+
+export interface GrantAdminRoleResult {
+  userId: string;
+  /** The registered address, which may differ in casing from what was submitted. */
+  email: string;
+  role: ManageableRole;
+  /** The row already existed, so nothing was written and no audit event was recorded. */
+  alreadyHeld: boolean;
+}
+
+export interface RevokeAdminRoleResult {
+  userId: string;
+  role: ManageableRole;
+  removed: boolean;
+}
+
+/**
+ * R8.2 role management. These three routes are the only write path to
+ * public.user_roles, which is service_role-only at the database grant level —
+ * so nothing here could grant a role by talking to Supabase directly even if
+ * it tried. The server decides, validates, and audits.
+ */
+async function adminSend<T>(
+  path: string,
+  accessToken: string,
+  init: RequestInit,
+  fetchImpl: typeof fetch,
+): Promise<AdminFetchResult<T>> {
+  let response: Response;
+
+  try {
+    response = await fetchImpl(path, {
+      ...init,
+      headers: { ...(init.headers ?? {}), Authorization: "Bearer " + accessToken },
+    });
+  } catch {
+    return { kind: "error", message: "Network error contacting the server." };
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    return { kind: "forbidden" };
+  }
+
+  if (!response.ok) {
+    // These routes carry reasons worth reading verbatim: which field was
+    // missing, that no account has the address, or the self-lockout refusal.
+    let message = GENERIC_FAILURE;
+    try {
+      const body = (await response.json()) as { error?: unknown };
+      if (typeof body?.error === "string" && body.error.trim() !== "") {
+        message = body.error;
+      }
+    } catch {
+      // keep the generic message
+    }
+    return { kind: "error", message };
+  }
+
+  return { kind: "success", data: (await response.json()) as T };
+}
+
+export function getAdminRoles(accessToken: string, fetchImpl: typeof fetch = fetch) {
+  return adminGet<AdminRoleList>("/api/admin/roles", accessToken, fetchImpl);
+}
+
+export function grantAdminRole(
+  email: string,
+  role: ManageableRole,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  return adminSend<GrantAdminRoleResult>(
+    "/api/admin/roles",
+    accessToken,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, role }),
+    },
+    fetchImpl,
+  );
+}
+
+export function revokeAdminRole(
+  userId: string,
+  role: ManageableRole,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  // Path segments, not a DELETE body: a proxy is free to strip the latter.
+  const path = "/api/admin/roles/" + encodeURIComponent(userId) + "/" + encodeURIComponent(role);
+  return adminSend<RevokeAdminRoleResult>(path, accessToken, { method: "DELETE" }, fetchImpl);
+}

@@ -1,10 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   formatMinorUnits,
   getAdminBilling,
   type AdminBilling,
   type AdminBillingCandidate,
 } from "../../lib/billing";
+import {
+  getAdminRoles,
+  grantAdminRole,
+  revokeAdminRole,
+  MANAGEABLE_ROLES,
+  type AdminRoleAssignment,
+  type AdminRoleList,
+  type ManageableRole,
+} from "../../lib/admin";
 import { AdminCard, SectionMessage, getAccessToken } from "./shared";
 
 /**
@@ -50,6 +59,219 @@ function statusClass(status: string): string {
     return "text-slate-500";
   }
   return "text-slate-300";
+}
+
+const FIELD_CLASS =
+  "mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-200 placeholder:text-slate-600";
+
+const BUTTON_CLASS =
+  "rounded bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:bg-slate-700 disabled:opacity-40";
+
+/**
+ * R8.2 role management: the admin/moderator assignment surface that replaces
+ * hand-written SQL against public.user_roles after the initial bootstrap.
+ *
+ * THIS IS NOT THE AUTHORIZATION BOUNDARY. The three routes behind it are
+ * requireAuth + requireAdmin, and user_roles is service_role-only at the
+ * database grant level, so hiding a control here would change nothing about
+ * who can grant a role. The disabled Revoke button on the signed-in admin's own
+ * admin row mirrors the server's self-lockout refusal: belt and braces, not the
+ * enforcement.
+ */
+function RolesCard() {
+  const [roles, setRoles] = useState<AdminRoleList | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<ManageableRole>("moderator");
+
+  async function load() {
+    const accessToken = await getAccessToken();
+    if (!accessToken) {
+      setError("Your session has expired.");
+      return;
+    }
+
+    const result = await getAdminRoles(accessToken);
+    if (result.kind === "success") {
+      setRoles(result.data);
+      setError(null);
+    } else if (result.kind === "forbidden") {
+      setError("You don't have admin access.");
+    } else {
+      setError(result.message);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function grant(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+
+    const accessToken = await getAccessToken();
+    if (!accessToken) {
+      setError("Your session has expired.");
+      setBusy(false);
+      return;
+    }
+
+    const result = await grantAdminRole(email.trim(), role, accessToken);
+    if (result.kind === "success") {
+      // alreadyHeld is stated rather than inferred: a second grant is a no-op,
+      // and telling the admin that is more useful than a second success notice.
+      setNotice(
+        result.data.alreadyHeld
+          ? result.data.email + " already has the " + role + " role."
+          : "Granted the " + role + " role to " + result.data.email + ".",
+      );
+      setEmail("");
+      await load();
+    } else if (result.kind === "forbidden") {
+      setError("You don't have admin access.");
+    } else {
+      setError(result.message);
+    }
+
+    setBusy(false);
+  }
+
+  async function revoke(assignment: AdminRoleAssignment) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+
+    const accessToken = await getAccessToken();
+    if (!accessToken) {
+      setError("Your session has expired.");
+      setBusy(false);
+      return;
+    }
+
+    const result = await revokeAdminRole(assignment.userId, assignment.role, accessToken);
+    if (result.kind === "success") {
+      const who = assignment.email ?? assignment.userId;
+      setNotice(
+        result.data.removed
+          ? "Revoked the " + assignment.role + " role from " + who + "."
+          : who + " did not have the " + assignment.role + " role.",
+      );
+      await load();
+    } else if (result.kind === "forbidden") {
+      setError("You don't have admin access.");
+    } else {
+      setError(result.message);
+    }
+
+    setBusy(false);
+  }
+
+  return (
+    <AdminCard
+      title="Admins & moderators"
+      description="Grant or revoke the admin and moderator roles. Every change is audited, and only the server can write public.user_roles."
+    >
+      {error && <SectionMessage tone="error">{error}</SectionMessage>}
+      {notice && <p className="text-sm text-emerald-300">{notice}</p>}
+
+      <form onSubmit={grant} className="mt-3 flex flex-wrap items-end gap-2">
+        <label className="min-w-[220px] flex-1 text-xs text-slate-400">
+          Email
+          <input
+            type="email"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="person@example.com"
+            className={FIELD_CLASS}
+          />
+        </label>
+        <label className="text-xs text-slate-400">
+          Role
+          <select
+            value={role}
+            onChange={(event) => setRole(event.target.value as ManageableRole)}
+            className={FIELD_CLASS}
+          >
+            {MANAGEABLE_ROLES.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="submit" disabled={busy} className={BUTTON_CLASS}>
+          Grant role
+        </button>
+      </form>
+
+      {roles === null ? (
+        <p className="mt-4 text-sm text-slate-500">Loading…</p>
+      ) : roles.assignments.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-500">No admin or moderator roles have been granted yet.</p>
+      ) : (
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[560px] border-collapse text-left">
+            <thead>
+              <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                <th className="py-2 pr-4 font-medium">User</th>
+                <th className="py-2 pr-4 font-medium">Role</th>
+                <th className="py-2 pr-4 font-medium">Granted</th>
+                <th className="py-2 pr-4 font-medium" aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {roles.assignments.map((assignment) => {
+                const selfAdmin = assignment.isSelf && assignment.role === "admin";
+                return (
+                  <tr key={assignment.userId + assignment.role} className="border-b border-slate-900">
+                    <td className="py-2 pr-4 text-xs text-slate-300">
+                      {assignment.email ?? assignment.userId}
+                      {assignment.isSelf && <span className="ml-2 text-slate-500">(you)</span>}
+                    </td>
+                    <td className="py-2 pr-4 text-xs">
+                      <span className={assignment.role === "admin" ? "text-sky-300" : "text-emerald-300"}>
+                        {assignment.role}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 font-mono text-xs text-slate-400" title={assignment.createdAt}>
+                      {assignment.createdAt.slice(0, 10)}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <button
+                        type="button"
+                        disabled={busy || selfAdmin}
+                        onClick={() => void revoke(assignment)}
+                        title={selfAdmin ? "You cannot revoke your own admin role." : undefined}
+                        className={BUTTON_CLASS}
+                      >
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {roles?.truncated && (
+        <p className="mt-3 text-xs text-amber-400">
+          The email lookup reached the server page limit, so some rows show an account id instead of an address.
+        </p>
+      )}
+
+      <p className="mt-3 text-xs text-slate-500">
+        Revoking admin from your own account is refused by the server, so this console cannot be locked out by mistake.
+      </p>
+    </AdminCard>
+  );
 }
 
 function CandidateRow({ candidate }: { candidate: AdminBillingCandidate }) {
@@ -118,19 +340,28 @@ export function UsersBillingSection() {
     };
   }, []);
 
+  // The roles card renders in every billing state: a role read does not depend
+  // on the billing read, and hiding it behind a revenue failure would make the
+  // one section that can fix a missing admin unavailable exactly when needed.
   if (error) {
     return (
-      <AdminCard title="Users & billing">
-        <SectionMessage tone="error">{error}</SectionMessage>
-      </AdminCard>
+      <div className="space-y-4">
+        <AdminCard title="Users & billing">
+          <SectionMessage tone="error">{error}</SectionMessage>
+        </AdminCard>
+        <RolesCard />
+      </div>
     );
   }
 
   if (!billing) {
     return (
-      <AdminCard title="Users & billing">
-        <SectionMessage tone="muted">Loading…</SectionMessage>
-      </AdminCard>
+      <div className="space-y-4">
+        <AdminCard title="Users & billing">
+          <SectionMessage tone="muted">Loading…</SectionMessage>
+        </AdminCard>
+        <RolesCard />
+      </div>
     );
   }
 
@@ -139,6 +370,8 @@ export function UsersBillingSection() {
 
   return (
     <div className="space-y-4">
+      <RolesCard />
+
       <AdminCard
         title="Revenue"
         description="Computed from active subscriptions joined to the regional price they were sold at. Annual prices are normalised to a monthly figure."
