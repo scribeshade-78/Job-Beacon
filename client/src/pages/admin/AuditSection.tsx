@@ -7,7 +7,7 @@ import {
   type SecurityEventRecord,
   type SecuritySeverity,
 } from "../../lib/audit";
-import { AdminCard, SectionMessage, getAccessToken } from "./shared";
+import { AdminCard, RefreshButton, SectionMessage, getAccessToken } from "./shared";
 
 /**
  * Task H4 — "Audit Log", wired to real tables.
@@ -36,7 +36,13 @@ import { AdminCard, SectionMessage, getAccessToken } from "./shared";
  *
  * THE TWO FETCHES FAIL INDEPENDENTLY on purpose. One route being down must not
  * blank the other table, and an empty audit trail must never read as "no
- * security events have ever been recorded".
+ * security events have ever been recorded". Each card therefore has its own
+ * window, its own refresh and its own error state.
+ *
+ * A FULL WINDOW IS NOT THE END OF THE TABLE. Both routes fetch one row beyond
+ * the requested window and report truncation, so the note under each table can
+ * say rows exist beyond it. Before that, a 100-row page of a 10,000-row trail
+ * looked exactly like a trail that ended at 100.
  */
 
 const SEVERITY_CLASS: Record<SecuritySeverity, string> = {
@@ -44,6 +50,9 @@ const SEVERITY_CLASS: Record<SecuritySeverity, string> = {
   medium: "bg-amber-500/20 text-amber-300",
   low: "bg-slate-800 text-slate-400",
 };
+
+/** The windows on offer. The server clamps to its own 1..500 range regardless. */
+const WINDOW_OPTIONS = [50, 100, 250, 500] as const;
 
 /**
  * Times are shown in the reader's locale (matching TrustScoringSection) with the
@@ -140,60 +149,140 @@ function AuditRow({ event }: { event: AuditEventRecord }) {
   );
 }
 
+function LogWindowControl({
+  limit,
+  busy,
+  onLimitChange,
+  onRefresh,
+}: {
+  limit: number;
+  busy: boolean;
+  onLimitChange: (limit: number) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-xs text-slate-500">
+        Window
+        <select
+          value={limit}
+          onChange={(event) => onLimitChange(Number(event.target.value))}
+          className="ml-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200"
+        >
+          {WINDOW_OPTIONS.map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </select>
+      </label>
+      <RefreshButton onClick={onRefresh} busy={busy} />
+    </div>
+  );
+}
+
 export function AuditSection() {
   const [events, setEvents] = useState<AuditEventRecord[] | null>(null);
   const [securityEvents, setSecurityEvents] = useState<SecurityEventRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [securityError, setSecurityError] = useState<string | null>(null);
+  const [auditLimit, setAuditLimit] = useState<number>(100);
+  const [securityLimit, setSecurityLimit] = useState<number>(100);
+  const [auditTruncated, setAuditTruncated] = useState(false);
+  const [securityTruncated, setSecurityTruncated] = useState(false);
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [securityBusy, setSecurityBusy] = useState(false);
+  // Bumping a token re-runs its effect, so Refresh re-reads through exactly the
+  // same cancelled code path as a window change instead of a second one that
+  // could race it.
+  const [auditReloadToken, setAuditReloadToken] = useState(0);
+  const [securityReloadToken, setSecurityReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
+      setAuditBusy(true);
+
       const accessToken = await getAccessToken();
       if (!accessToken) {
         if (!cancelled) {
           setError("Your session has expired.");
-          setSecurityError("Your session has expired.");
+          setAuditBusy(false);
         }
         return;
       }
 
-      const [auditResult, securityResult] = await Promise.all([
-        listAuditEvents(accessToken),
-        listSecurityEvents(accessToken),
-      ]);
+      const result = await listAuditEvents(accessToken, { limit: auditLimit });
       if (cancelled) return;
 
-      if (auditResult.kind === "success") {
-        setEvents(auditResult.data.events);
+      if (result.kind === "success") {
+        setEvents(result.data.events);
+        setAuditTruncated(result.data.truncated);
         setError(null);
-      } else if (auditResult.kind === "forbidden") {
+      } else if (result.kind === "forbidden") {
         setError("You don't have admin access.");
       } else {
-        setError(auditResult.message);
+        setError(result.message);
       }
 
-      if (securityResult.kind === "success") {
-        setSecurityEvents(securityResult.data.events);
-        setSecurityError(null);
-      } else if (securityResult.kind === "forbidden") {
-        setSecurityError("You don't have admin access.");
-      } else {
-        setSecurityError(securityResult.message);
-      }
+      setAuditBusy(false);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [auditLimit, auditReloadToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      setSecurityBusy(true);
+
+      const accessToken = await getAccessToken();
+      if (!accessToken) {
+        if (!cancelled) {
+          setSecurityError("Your session has expired.");
+          setSecurityBusy(false);
+        }
+        return;
+      }
+
+      const result = await listSecurityEvents(accessToken, { limit: securityLimit });
+      if (cancelled) return;
+
+      if (result.kind === "success") {
+        setSecurityEvents(result.data.events);
+        setSecurityTruncated(result.data.truncated);
+        setSecurityError(null);
+      } else if (result.kind === "forbidden") {
+        setSecurityError("You don't have admin access.");
+      } else {
+        setSecurityError(result.message);
+      }
+
+      setSecurityBusy(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [securityLimit, securityReloadToken]);
 
   return (
     <div className="space-y-4">
       <AdminCard
         title="Audit trail"
         description="Newest first, from audit_events. Append-only: service_role can INSERT and SELECT and nothing else, so a row here cannot have been rewritten after the fact (PRD v3 §21.1; the previous/new values below are what makes §21.2's corrections-creates-new-versions checkable)."
+        action={
+          <LogWindowControl
+            limit={auditLimit}
+            busy={auditBusy}
+            onLimitChange={setAuditLimit}
+            onRefresh={() => setAuditReloadToken((current) => current + 1)}
+          />
+        }
       >
         {error && <SectionMessage tone="error">{error}</SectionMessage>}
 
@@ -224,11 +313,25 @@ export function AuditSection() {
             </table>
           </div>
         )}
+
+        {auditTruncated && (
+          <p className="mt-3 text-xs text-amber-400">
+            Older events exist beyond this window of {auditLimit}. Raise it to see them.
+          </p>
+        )}
       </AdminCard>
 
       <AdminCard
         title="Security events"
         description="Detections from the untrusted-content defences (RI PRD §10.3): injected instructions in email, job descriptions and web pages, stripped active HTML and tracking pixels, disallowed link schemes. Also append-only. Written to a table rather than logged, so a refusal is visible — a sanitizer that rewrites text silently looks exactly like one that is not running."
+        action={
+          <LogWindowControl
+            limit={securityLimit}
+            busy={securityBusy}
+            onLimitChange={setSecurityLimit}
+            onRefresh={() => setSecurityReloadToken((current) => current + 1)}
+          />
+        }
       >
         {securityError && <SectionMessage tone="error">{securityError}</SectionMessage>}
 
@@ -288,6 +391,12 @@ export function AuditSection() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {securityTruncated && (
+          <p className="mt-3 text-xs text-amber-400">
+            Older events exist beyond this window of {securityLimit}. Raise it to see them.
+          </p>
         )}
       </AdminCard>
     </div>

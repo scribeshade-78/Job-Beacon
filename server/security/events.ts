@@ -85,29 +85,59 @@ interface SecurityRow {
   detail: Record<string, unknown> | null;
 }
 
+export const DEFAULT_SECURITY_EVENT_LIMIT = 100;
+export const MAX_SECURITY_EVENT_LIMIT = 500;
+
+/** Clamped into range, defaulting rather than propagating a non-finite value into the query. */
+export function clampSecurityEventLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) {
+    return DEFAULT_SECURITY_EVENT_LIMIT;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), MAX_SECURITY_EVENT_LIMIT);
+}
+
+export interface SecurityEventList {
+  events: SecurityEventRecord[];
+  /** The clamped page size actually applied. */
+  limit: number;
+  /** True when older rows exist beyond the window. */
+  truncated: boolean;
+}
+
+/**
+ * Newest first, bounded — the same window contract as listAuditEvents, and the
+ * same limit + 1 probe so a full page is not mistaken for the end of the table.
+ */
 export async function listSecurityEvents(
   client: SupabaseClient,
   options: { limit?: number } = {},
-): Promise<SecurityEventRecord[]> {
-  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+): Promise<SecurityEventList> {
+  const limit = clampSecurityEventLimit(options.limit);
 
   const { data, error } = await client
     .from("security_events")
     .select("id, occurred_at, event_type, severity, source, subject_id, detail")
     .order("occurred_at", { ascending: false })
-    .limit(limit);
+    .limit(limit + 1);
 
   if (error) {
     throw error;
   }
 
-  return ((data ?? []) as SecurityRow[]).map((row) => ({
-    id: row.id,
-    occurredAt: row.occurred_at,
-    eventType: row.event_type,
-    severity: row.severity,
-    source: row.source,
-    subjectId: row.subject_id,
-    detail: row.detail,
-  }));
+  const rows = (data ?? []) as SecurityRow[];
+
+  return {
+    events: rows.slice(0, limit).map((row) => ({
+      id: row.id,
+      occurredAt: row.occurred_at,
+      eventType: row.event_type,
+      severity: row.severity,
+      source: row.source,
+      subjectId: row.subject_id,
+      detail: row.detail,
+    })),
+    limit,
+    truncated: rows.length > limit,
+  };
 }

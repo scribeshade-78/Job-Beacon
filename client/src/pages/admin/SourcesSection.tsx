@@ -9,7 +9,7 @@ import {
   type SourcePolicy,
   type EditableSourcePolicyField,
 } from "../../lib/admin";
-import { AdminCard, SectionMessage, getAccessToken } from "./shared";
+import { AdminCard, RefreshButton, SectionMessage, getAccessToken } from "./shared";
 
 const FIELD_LABELS: Record<EditableSourcePolicyField, string> = {
   discovery_allowed: "Discovery",
@@ -189,15 +189,24 @@ function SourceHealthCard({ sourceCodes }: { sourceCodes: string[] }) {
   const [sourceCode, setSourceCode] = useState("");
   const [status, setStatus] = useState<"" | SourceHealthStatus>("");
   const [limit, setLimit] = useState<number>(100);
+  const [busy, setBusy] = useState(false);
+  // Bumping the token re-runs the effect, so Refresh re-reads through the same
+  // cancelled path as a filter change.
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
+      if (!cancelled) {
+        setBusy(true);
+      }
+
       const accessToken = await getAccessToken();
       if (!accessToken) {
         if (!cancelled) {
           setError("Your session has expired.");
+          setBusy(false);
         }
         return;
       }
@@ -223,13 +232,15 @@ function SourceHealthCard({ sourceCodes }: { sourceCodes: string[] }) {
       } else {
         setError(result.message);
       }
+
+      setBusy(false);
     }
 
     void load();
     return () => {
       cancelled = true;
     };
-  }, [sourceCode, status, limit]);
+  }, [sourceCode, status, limit, reloadToken]);
 
   // The policy table's own source codes plus whatever this window contained, so
   // the filter still offers real sources when the policy read failed.
@@ -241,6 +252,7 @@ function SourceHealthCard({ sourceCodes }: { sourceCodes: string[] }) {
     <AdminCard
       title="Source health"
       description="One row per source fetch, written by the on-demand intake path and the scheduled worker. Read-only — source_health_events grants SELECT and INSERT only."
+      action={<RefreshButton onClick={() => setReloadToken((current) => current + 1)} busy={busy} />}
     >
       {error && <SectionMessage tone="error">{error}</SectionMessage>}
 

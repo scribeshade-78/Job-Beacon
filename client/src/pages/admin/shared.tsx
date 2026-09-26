@@ -17,18 +17,53 @@ export async function getAccessToken(): Promise<string | null> {
 export function AdminCard({
   title,
   description,
+  action,
   children,
 }: {
   title: string;
   description?: string;
+  /** Optional control(s) rendered top-right, e.g. a RefreshButton or a window selector. */
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">{title}</h2>
-      {description && <p className="mt-1 text-xs text-slate-500">{description}</p>}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">{title}</h2>
+          {description && <p className="mt-1 text-xs text-slate-500">{description}</p>}
+        </div>
+        {/* shrink-0 so the control keeps its size instead of being squeezed by a long title. */}
+        {action && <div className="shrink-0">{action}</div>}
+      </div>
       <div className="mt-4 text-sm text-slate-200">{children}</div>
     </section>
+  );
+}
+
+/**
+ * A manual re-read for a card whose data changes without this page doing
+ * anything: a scheduler tick, a worker drain, another operator. Disabled while a
+ * read is in flight, so a double click cannot stack two requests.
+ */
+export function RefreshButton({
+  onClick,
+  busy = false,
+  label = "Refresh",
+}: {
+  onClick: () => void;
+  busy?: boolean;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="rounded border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-300 transition-colors hover:bg-slate-800 disabled:opacity-40"
+    >
+      {busy ? "Refreshing…" : label}
+    </button>
   );
 }
 

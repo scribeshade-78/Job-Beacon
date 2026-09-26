@@ -36,11 +36,11 @@ describe("listAuditEvents", () => {
         newValues: { decision: "cleared" },
       },
     ];
-    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events }));
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events, limit: 100, truncated: false }));
 
-    const result = await listAuditEvents("tok", fetchImpl as unknown as typeof fetch);
+    const result = await listAuditEvents("tok", {}, fetchImpl as unknown as typeof fetch);
 
-    expect(result).toEqual({ kind: "success", data: { events } });
+    expect(result).toEqual({ kind: "success", data: { events, limit: 100, truncated: false } });
     expect(fetchImpl).toHaveBeenCalledWith("/api/admin/audit-events", {
       method: "GET",
       headers: { Authorization: "Bearer tok" },
@@ -50,20 +50,20 @@ describe("listAuditEvents", () => {
   it("returns forbidden on 401 and 403 rather than an error message", async () => {
     for (const status of [401, 403]) {
       const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, json: async () => ({ error: "nope" }) });
-      expect(await listAuditEvents("tok", fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
+      expect(await listAuditEvents("tok", {}, fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
     }
   });
 
   it("returns a generic error when the server says nothing useful", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
-    const result = await listAuditEvents("tok", fetchImpl as unknown as typeof fetch);
+    const result = await listAuditEvents("tok", {}, fetchImpl as unknown as typeof fetch);
     expect(result.kind).toBe("error");
     expect((result as { message: string }).message).toContain("Something went wrong");
   });
 
   it("returns an error rather than throwing when the network fails", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-    const result = await listAuditEvents("tok", fetchImpl as unknown as typeof fetch);
+    const result = await listAuditEvents("tok", {}, fetchImpl as unknown as typeof fetch);
     expect(result).toEqual({ kind: "error", message: "Network error contacting the server." });
   });
 });
@@ -71,7 +71,7 @@ describe("listAuditEvents", () => {
 describe("listSecurityEvents and listAtsCredentials", () => {
   it("hit their own routes", async () => {
     const security = vi.fn().mockResolvedValue(okResponse({ events: [] }));
-    await listSecurityEvents("tok", security as unknown as typeof fetch);
+    await listSecurityEvents("tok", {}, security as unknown as typeof fetch);
     expect(security).toHaveBeenCalledWith("/api/admin/security-events", expect.anything());
 
     const credentials = vi.fn().mockResolvedValue(okResponse({ credentials: [] }));
@@ -150,5 +150,47 @@ describe("setAtsCredentialActive", () => {
     expect(path).toBe("/api/admin/ats-credentials/c1/active");
     expect(JSON.parse(String(init.body))).toEqual({ isActive: false });
     expect(result.kind).toBe("success");
+  });
+});
+
+describe("listAuditEvents and listSecurityEvents windows", () => {
+  it("adds the limit to the query string only when one is given", async () => {
+    const auditFetch = vi.fn().mockResolvedValue(okResponse({ events: [], limit: 250, truncated: true }));
+
+    await listAuditEvents("tok", { limit: 250 }, auditFetch as unknown as typeof fetch);
+
+    expect(auditFetch).toHaveBeenCalledWith("/api/admin/audit-events?limit=250", {
+      method: "GET",
+      headers: { Authorization: "Bearer tok" },
+    });
+
+    const securityFetch = vi.fn().mockResolvedValue(okResponse({ events: [], limit: 50, truncated: false }));
+
+    await listSecurityEvents("tok", { limit: 50 }, securityFetch as unknown as typeof fetch);
+
+    expect(securityFetch).toHaveBeenCalledWith("/api/admin/security-events?limit=50", {
+      method: "GET",
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("omits the query string entirely when no limit is given", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events: [], limit: 100, truncated: false }));
+
+    await listAuditEvents("tok", {}, fetchImpl as unknown as typeof fetch);
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/audit-events", {
+      method: "GET",
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("returns the truncation flag so a caller can say more rows exist", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse({ events: [], limit: 50, truncated: true }));
+
+    expect(await listSecurityEvents("tok", { limit: 50 }, fetchImpl as unknown as typeof fetch)).toEqual({
+      kind: "success",
+      data: { events: [], limit: 50, truncated: true },
+    });
   });
 });

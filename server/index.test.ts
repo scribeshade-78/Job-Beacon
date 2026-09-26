@@ -1460,6 +1460,227 @@ describe("GET /api/admin/source-health", () => {
   });
 });
 
+function makeLogClient(result: { data: unknown; error: unknown } = { data: [], error: null }) {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const builder: Record<string, unknown> = {};
+  const chain = (method: string) => (...args: unknown[]) => {
+    calls.push({ method, args });
+    return builder;
+  };
+
+  builder.select = chain("select");
+  builder.order = chain("order");
+  builder.limit = chain("limit");
+  builder.then = (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+    Promise.resolve(result).then(onFulfilled, onRejected);
+
+  return { serviceClient: { from: vi.fn(() => builder) } as never, calls };
+}
+
+describe("GET /api/admin/audit-events", () => {
+  const auditRow = {
+    id: "a1",
+    occurred_at: "2026-09-26T10:00:00.000Z",
+    actor_id: "user-123",
+    actor_role: "admin",
+    action: "role.granted",
+    entity_type: "user_role",
+    entity_id: "user-999",
+    summary: "Granted the admin role",
+    reason: null,
+    previous_values: null,
+    new_values: { role: "admin" },
+  };
+
+  const expectedEvent = {
+    id: "a1",
+    occurredAt: "2026-09-26T10:00:00.000Z",
+    actorId: "user-123",
+    actorRole: "admin",
+    action: "role.granted",
+    entityType: "user_role",
+    entityId: "user-999",
+    summary: "Granted the admin role",
+    reason: null,
+    previousValues: null,
+    newValues: { role: "admin" },
+  };
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/audit-events`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/audit-events`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the events, the applied limit and the truncation flag", async () => {
+    const { serviceClient, calls } = makeLogClient({ data: [auditRow], error: null });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/audit-events?limit=50`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ events: [expectedEvent], limit: 50, truncated: false });
+        expect(calls).toContainEqual({ method: "limit", args: [51] });
+      },
+    );
+  });
+
+  it("returns 400 when limit is not a positive integer", async () => {
+    for (const limit of ["abc", "0", "1.5", "-2", "12abc"]) {
+      await withTestServer(
+        { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+        async (testBaseUrl) => {
+          const response = await fetch(`${testBaseUrl}/api/admin/audit-events?limit=${limit}`, {
+            headers: { Authorization: "Bearer valid-test-token" },
+          });
+          expect(response.status).toBe(400);
+        },
+      );
+    }
+  });
+
+  it("reports truncation when older rows exist beyond the window", async () => {
+    const { serviceClient } = makeLogClient({
+      data: [auditRow, { ...auditRow, id: "a2" }, { ...auditRow, id: "a3" }],
+      error: null,
+    });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/audit-events?limit=2`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        const body = (await response.json()) as { events: unknown[]; limit: number; truncated: boolean };
+        expect(response.status).toBe(200);
+        expect(body.limit).toBe(2);
+        expect(body.truncated).toBe(true);
+        expect(body.events).toHaveLength(2);
+      },
+    );
+  });
+
+  it("returns 500 when the read fails", async () => {
+    const { serviceClient } = makeLogClient({ data: null, error: { message: "db error" } });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/audit-events`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
+describe("GET /api/admin/security-events", () => {
+  const securityRow = {
+    id: "s1",
+    occurred_at: "2026-09-26T10:00:00.000Z",
+    event_type: "script_tag_removed",
+    severity: "low",
+    source: "email_html",
+    subject_id: null,
+    detail: null,
+  };
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/security-events`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/security-events`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with the events, the applied limit and the truncation flag", async () => {
+    const { serviceClient, calls } = makeLogClient({ data: [securityRow], error: null });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/security-events?limit=250`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          events: [
+            {
+              id: "s1",
+              occurredAt: "2026-09-26T10:00:00.000Z",
+              eventType: "script_tag_removed",
+              severity: "low",
+              source: "email_html",
+              subjectId: null,
+              detail: null,
+            },
+          ],
+          limit: 250,
+          truncated: false,
+        });
+        expect(calls).toContainEqual({ method: "limit", args: [251] });
+      },
+    );
+  });
+
+  it("returns 400 when limit is not a positive integer", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/security-events?limit=nope`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(400);
+      },
+    );
+  });
+
+  it("returns 500 when the read fails", async () => {
+    const { serviceClient } = makeLogClient({ data: null, error: { message: "db error" } });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/security-events`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
 describe("GET /api/admin/trust-scores", () => {
   it("returns 403 for an authenticated non-admin", async () => {
     await withTestServer(

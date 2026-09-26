@@ -117,38 +117,65 @@ interface AuditRow {
 export const DEFAULT_AUDIT_LIMIT = 100;
 export const MAX_AUDIT_LIMIT = 500;
 
+/** Clamped into range, defaulting rather than propagating a non-finite value into the query. */
+export function clampAuditLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) {
+    return DEFAULT_AUDIT_LIMIT;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), MAX_AUDIT_LIMIT);
+}
+
+export interface AuditEventList {
+  events: AuditEventRecord[];
+  /** The clamped page size actually applied. */
+  limit: number;
+  /** True when older rows exist beyond the window. */
+  truncated: boolean;
+}
+
 /**
  * Newest first, bounded. Unbounded is not offered: audit_events is append-only,
  * so its row count only ever grows, and "return everything" would eventually be
  * a query that cannot finish.
+ *
+ * limit + 1 rows are fetched so "are there older rows?" is answered by the data
+ * rather than inferred from a full page — a page that happens to be exactly full
+ * is otherwise indistinguishable from the end of the table.
  */
 export async function listAuditEvents(
   client: SupabaseClient,
   options: { limit?: number } = {},
-): Promise<AuditEventRecord[]> {
-  const limit = Math.min(Math.max(options.limit ?? DEFAULT_AUDIT_LIMIT, 1), MAX_AUDIT_LIMIT);
+): Promise<AuditEventList> {
+  const limit = clampAuditLimit(options.limit);
 
   const { data, error } = await client
     .from("audit_events")
     .select("id, occurred_at, actor_id, actor_role, action, entity_type, entity_id, summary, reason, previous_values, new_values")
     .order("occurred_at", { ascending: false })
-    .limit(limit);
+    .limit(limit + 1);
 
   if (error) {
     throw error;
   }
 
-  return ((data ?? []) as AuditRow[]).map((row) => ({
-    id: row.id,
-    occurredAt: row.occurred_at,
-    actorId: row.actor_id,
-    actorRole: row.actor_role,
-    action: row.action,
-    entityType: row.entity_type,
-    entityId: row.entity_id,
-    summary: row.summary,
-    reason: row.reason,
-    previousValues: row.previous_values,
-    newValues: row.new_values,
-  }));
+  const rows = (data ?? []) as AuditRow[];
+
+  return {
+    events: rows.slice(0, limit).map((row) => ({
+      id: row.id,
+      occurredAt: row.occurred_at,
+      actorId: row.actor_id,
+      actorRole: row.actor_role,
+      action: row.action,
+      entityType: row.entity_type,
+      entityId: row.entity_id,
+      summary: row.summary,
+      reason: row.reason,
+      previousValues: row.previous_values,
+      newValues: row.new_values,
+    })),
+    limit,
+    truncated: rows.length > limit,
+  };
 }

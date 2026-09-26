@@ -203,6 +203,28 @@ export interface CreateAppOptions {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Strict `?limit=` parsing shared by the newest-N admin log routes.
+ *
+ * Deliberately Number + Number.isInteger rather than Number.parseInt: parseInt
+ * accepts "12abc" as 12 and leaves NaN for "abc", and a NaN reaches PostgREST as
+ * an unparseable range rather than an error anyone can act on. An absent value
+ * is a valid "use the default", not an invalid one.
+ */
+function parseLimitQuery(raw: unknown): { ok: true; limit: number | undefined } | { ok: false } {
+  if (raw === undefined) {
+    return { ok: true, limit: undefined };
+  }
+
+  const parsed = typeof raw === "string" ? Number(raw) : Number.NaN;
+
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return { ok: false };
+  }
+
+  return { ok: true, limit: parsed };
+}
+
 /** The subscription states the database CHECK accepts, so a Stripe status outside this set is refused rather than written. */
 const STRIPE_SUBSCRIPTION_STATUSES = ["incomplete", "trialing", "active", "past_due", "unpaid", "canceled"] as const;
 
@@ -1728,21 +1750,11 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/api/admin/source-health", requireAuth, requireAdmin, async (request, response) => {
     const query = request.query as Record<string, unknown>;
 
-    let limit: number | undefined;
-    const rawLimit = query.limit;
+    const parsedLimit = parseLimitQuery(query.limit);
 
-    if (rawLimit !== undefined) {
-      const parsed = typeof rawLimit === "string" ? Number(rawLimit) : Number.NaN;
-
-      // Refused rather than coerced, unlike the audit-events route's
-      // Number.parseInt: that lets "12abc" through as 12 and leaves NaN as NaN,
-      // and a NaN limit reaches PostgREST as an unparseable range.
-      if (!Number.isInteger(parsed) || parsed < 1) {
-        response.status(400).json({ error: "limit must be a positive integer" });
-        return;
-      }
-
-      limit = parsed;
+    if (!parsedLimit.ok) {
+      response.status(400).json({ error: "limit must be a positive integer" });
+      return;
     }
 
     const rawStatus = query.status;
@@ -1760,7 +1772,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
     try {
       const health = await listSourceHealthEvents(resolveServiceClient(), {
-        limit,
+        limit: parsedLimit.limit,
         sourceCode,
         status: isSourceHealthStatus(rawStatus) ? rawStatus : null,
       });
@@ -2119,12 +2131,16 @@ export function createApp(options: CreateAppOptions = {}) {
 
   /** The system audit trail (PRD v3 §21.1). Read-only: nothing can write through this route. */
   app.get("/api/admin/audit-events", requireAuth, requireAdmin, async (request, response) => {
-    const rawLimit = (request.query as Record<string, unknown>).limit;
-    const limit = typeof rawLimit === "string" ? Number.parseInt(rawLimit, 10) : undefined;
+    const parsedLimit = parseLimitQuery((request.query as Record<string, unknown>).limit);
+
+    if (!parsedLimit.ok) {
+      response.status(400).json({ error: "limit must be a positive integer" });
+      return;
+    }
 
     try {
-      const events = await listAuditEvents(resolveServiceClient(), { limit });
-      response.status(200).json({ events });
+      const { events, limit, truncated } = await listAuditEvents(resolveServiceClient(), { limit: parsedLimit.limit });
+      response.status(200).json({ events, limit, truncated });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Audit events read failed:", message);
@@ -2133,10 +2149,17 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   /** Detections from the RI PRD §10.3 defences. Read-only. */
-  app.get("/api/admin/security-events", requireAuth, requireAdmin, async (_request, response) => {
+  app.get("/api/admin/security-events", requireAuth, requireAdmin, async (request, response) => {
+    const parsedLimit = parseLimitQuery((request.query as Record<string, unknown>).limit);
+
+    if (!parsedLimit.ok) {
+      response.status(400).json({ error: "limit must be a positive integer" });
+      return;
+    }
+
     try {
-      const events = await listSecurityEvents(resolveServiceClient());
-      response.status(200).json({ events });
+      const { events, limit, truncated } = await listSecurityEvents(resolveServiceClient(), { limit: parsedLimit.limit });
+      response.status(200).json({ events, limit, truncated });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Security events read failed:", message);

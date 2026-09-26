@@ -75,7 +75,7 @@ function SignedInRoutes({
   }
 
   return (
-    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator} showAdminLink={isAdmin}>
+    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator || isAdmin} showAdminLink={isAdmin}>
       {identityError && (
         <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
           {identityError}

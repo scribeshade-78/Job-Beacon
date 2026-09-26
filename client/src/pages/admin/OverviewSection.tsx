@@ -1,18 +1,32 @@
 import { useEffect, useState } from "react";
 import { getAdminOverview, type AdminOverview } from "../../lib/admin";
-import { AdminCard, SectionMessage, getAccessToken } from "./shared";
+import { AdminCard, RefreshButton, SectionMessage, getAccessToken } from "./shared";
 
+/**
+ * R8.1 Overview. Three real counts, and a manual refresh because every one of
+ * them moves without this page doing anything — a scheduler tick, a worker
+ * drain, a moderation decision recorded elsewhere.
+ */
 export function OverviewSection() {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Bumping the token re-runs the effect, so Refresh re-reads through the same
+  // cancelled path as the initial load.
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
+      setBusy(true);
+
       const accessToken = await getAccessToken();
       if (!accessToken) {
-        if (!cancelled) setError("Your session has expired.");
+        if (!cancelled) {
+          setError("Your session has expired.");
+          setBusy(false);
+        }
         return;
       }
 
@@ -27,12 +41,14 @@ export function OverviewSection() {
       } else {
         setError(result.message);
       }
+
+      setBusy(false);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadToken]);
 
   const stats: Array<{ label: string; value: number | undefined }> = [
     { label: "Open moderation cases", value: overview?.openModerationCases },
@@ -44,6 +60,7 @@ export function OverviewSection() {
     <AdminCard
       title="System overview"
       description="Live counts from moderation_cases, source_policies, and candidate_profiles. MRR and error rate arrive with their own schema in a later phase."
+      action={<RefreshButton onClick={() => setReloadToken((current) => current + 1)} busy={busy} />}
     >
       {error ? (
         <SectionMessage tone="error">{error}</SectionMessage>

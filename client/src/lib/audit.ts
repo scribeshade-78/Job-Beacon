@@ -141,18 +141,51 @@ async function request<T>(
   return { kind: "success", data: (await response.json()) as T };
 }
 
-export function listAuditEvents(accessToken: string, fetchImpl: typeof fetch = fetch) {
-  return request<{ events: AuditEventRecord[] }>(
-    "/api/admin/audit-events",
+/** Mirrors server/audit/log.ts AuditEventList. */
+export interface AuditEventList {
+  events: AuditEventRecord[];
+  /** The clamped page size the server applied. */
+  limit: number;
+  /** Older rows exist beyond this window. */
+  truncated: boolean;
+}
+
+/** Mirrors server/security/events.ts SecurityEventList. */
+export interface SecurityEventList {
+  events: SecurityEventRecord[];
+  limit: number;
+  truncated: boolean;
+}
+
+export interface LogWindowOptions {
+  /** Clamped server-side (1..500); omitted means the server default of 100. */
+  limit?: number;
+}
+
+function withLimit(path: string, limit: number | undefined): string {
+  return limit === undefined ? path : path + "?limit=" + encodeURIComponent(String(limit));
+}
+
+export function listAuditEvents(
+  accessToken: string,
+  options: LogWindowOptions = {},
+  fetchImpl: typeof fetch = fetch,
+) {
+  return request<AuditEventList>(
+    withLimit("/api/admin/audit-events", options.limit),
     accessToken,
     { method: "GET" },
     fetchImpl,
   );
 }
 
-export function listSecurityEvents(accessToken: string, fetchImpl: typeof fetch = fetch) {
-  return request<{ events: SecurityEventRecord[] }>(
-    "/api/admin/security-events",
+export function listSecurityEvents(
+  accessToken: string,
+  options: LogWindowOptions = {},
+  fetchImpl: typeof fetch = fetch,
+) {
+  return request<SecurityEventList>(
+    withLimit("/api/admin/security-events", options.limit),
     accessToken,
     { method: "GET" },
     fetchImpl,
