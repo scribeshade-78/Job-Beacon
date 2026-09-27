@@ -74,6 +74,8 @@ function allNullLimits(): Record<string, unknown> {
     plan_id: "plan-1",
     max_active_target_roles: null,
     max_verified_applications_per_month: null,
+    max_auto_apply_india_per_month: null,
+    max_auto_apply_us_per_month: null,
     premium_source_access: null,
     max_ats_resume_variants: null,
     max_mailbox_connections: null,
@@ -93,12 +95,17 @@ function find(summary: Awaited<ReturnType<typeof evaluateEntitlements>>, dimensi
 }
 
 describe("ENTITLEMENT_DIMENSIONS", () => {
-  it("covers the eight §27.2 bullets, with the compound one split in two", () => {
-    expect(ENTITLEMENT_DIMENSIONS).toHaveLength(9);
+  it("covers the eight §27.2 bullets, with the compound one split, plus the two destination quotas", () => {
+    // 9 + 2. The eight §27.2 bullets occupy nine entries because the eighth is
+    // compound and split; the destination auto-apply allowance adds two more,
+    // since the product states it once for India and once for the US.
+    expect(ENTITLEMENT_DIMENSIONS).toHaveLength(11);
     const labels = new Set(ENTITLEMENT_DIMENSIONS.map((spec) => spec.prdLabel));
-    expect(labels.size).toBe(8);
+    expect(labels.size).toBe(10);
     const shared = ENTITLEMENT_DIMENSIONS.filter((spec) => spec.prdLabel === "Historical analytics and exports");
     expect(shared.map((spec) => spec.id)).toEqual(["analytics_history_days", "data_exports_enabled"]);
+    const destinations = ENTITLEMENT_DIMENSIONS.filter((spec) => spec.id.startsWith("auto_apply"));
+    expect(destinations.map((spec) => spec.id)).toEqual(["auto_apply_india_per_month", "auto_apply_us_per_month"]);
   });
 });
 
@@ -109,7 +116,7 @@ describe("evaluateEntitlements with no subscription", () => {
     expect(summary.hasLiveSubscription).toBe(false);
     expect(summary.planCode).toBeNull();
     expect(summary.allUnconfigured).toBe(true);
-    expect(summary.evaluations).toHaveLength(9);
+    expect(summary.evaluations).toHaveLength(11);
     expect(summary.evaluations.every((entry) => entry.configured === false && entry.allowed === true)).toBe(true);
   });
 
@@ -138,6 +145,44 @@ describe("evaluateEntitlements with an all-NULL plan", () => {
     expect(summary.planCode).toBe("pro");
     expect(summary.allUnconfigured).toBe(true);
     expect(summary.evaluations.every((entry) => entry.allowed)).toBe(true);
+  });
+});
+
+describe("destination auto-apply quotas", () => {
+  it("reports a configured allowance with NO measured usage, rather than a fabricated zero", async () => {
+    const summary = await evaluateEntitlements(
+      fakeClient({
+        subscription: LIVE_SUBSCRIPTION,
+        plan: PLAN,
+        limits: { ...allNullLimits(), max_auto_apply_india_per_month: 100, max_auto_apply_us_per_month: 300 },
+      }),
+      "cand-1",
+    );
+
+    const india = find(summary, "auto_apply_india_per_month");
+    expect(india.configured).toBe(true);
+    expect(india.limit).toBe(100);
+    // Nothing counts applications per destination yet, so a usage of 0 would be
+    // an invented number. usage and remaining stay null, and allowed answers only
+    // whether the plan includes the allowance at all.
+    expect(india.usage).toBeNull();
+    expect(india.remaining).toBeNull();
+    expect(india.allowed).toBe(true);
+    expect(find(summary, "auto_apply_us_per_month").limit).toBe(300);
+  });
+
+  it("withholds the allowance when the plan grants none, which is the Free plan", async () => {
+    const summary = await evaluateEntitlements(
+      fakeClient({
+        subscription: LIVE_SUBSCRIPTION,
+        plan: PLAN,
+        limits: { ...allNullLimits(), max_auto_apply_india_per_month: 0, max_auto_apply_us_per_month: 0 },
+      }),
+      "cand-1",
+    );
+
+    expect(find(summary, "auto_apply_india_per_month").allowed).toBe(false);
+    expect(find(summary, "auto_apply_us_per_month").allowed).toBe(false);
   });
 });
 

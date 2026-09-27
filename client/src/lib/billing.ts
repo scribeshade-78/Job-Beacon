@@ -7,8 +7,12 @@
  * if it tried — every mutation goes through a route that decides for itself.
  */
 
+import { type BillingRegion } from "../../../shared/pricing";
+
 export type BillingInterval = "month" | "year";
-export type BillingRegion = "IN" | "US" | "EU";
+
+/** Region list lives in shared/pricing.ts so the client cannot offer one the server rejects. */
+export type { BillingRegion };
 
 /** Mirrors server/billing/plans.ts PlanLimits. Every field nullable; NULL is "not configured". */
 export interface PlanLimits {
@@ -21,6 +25,8 @@ export interface PlanLimits {
   priorityActionRequiredSupport: boolean | null;
   analyticsHistoryDays: number | null;
   dataExportsEnabled: boolean | null;
+  maxAutoApplyIndiaPerMonth: number | null;
+  maxAutoApplyUsPerMonth: number | null;
 }
 
 export interface RegionalPrice {

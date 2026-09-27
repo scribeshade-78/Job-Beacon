@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { BILLING_REGIONS as PRICING_REGIONS, type BillingRegion } from "../../shared/pricing.js";
 
 /**
  * Task H1 — reading the plan catalogue.
@@ -12,9 +13,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type CompanyIntelligenceDepth = "none" | "basic" | "full";
 export type BillingInterval = "month" | "year";
-export type BillingRegion = "IN" | "US" | "EU";
 
-export const BILLING_REGIONS: readonly BillingRegion[] = ["IN", "US", "EU"];
+/**
+ * Region comes from shared/pricing.ts rather than being listed again here. A
+ * second list is exactly how "IN, US, EU" survived in the validation message
+ * while another file gained UK.
+ */
+export type { BillingRegion };
+export const BILLING_REGIONS: readonly BillingRegion[] = PRICING_REGIONS;
 export const BILLING_INTERVALS: readonly BillingInterval[] = ["month", "year"];
 
 /**
@@ -36,6 +42,10 @@ export interface PlanLimits {
   priorityActionRequiredSupport: boolean | null;
   analyticsHistoryDays: number | null;
   dataExportsEnabled: boolean | null;
+  /** Auto-apply allowance per month for jobs whose destination is India. */
+  maxAutoApplyIndiaPerMonth: number | null;
+  /** Auto-apply allowance per month for jobs whose destination is the US. */
+  maxAutoApplyUsPerMonth: number | null;
 }
 
 export interface RegionalPrice {
@@ -68,6 +78,8 @@ const EMPTY_LIMITS: PlanLimits = {
   priorityActionRequiredSupport: null,
   analyticsHistoryDays: null,
   dataExportsEnabled: null,
+  maxAutoApplyIndiaPerMonth: null,
+  maxAutoApplyUsPerMonth: null,
 };
 
 interface PlanRow {
@@ -90,6 +102,8 @@ interface LimitRow {
   priority_action_required_support: boolean | null;
   analytics_history_days: number | null;
   data_exports_enabled: boolean | null;
+  max_auto_apply_india_per_month: number | null;
+  max_auto_apply_us_per_month: number | null;
 }
 
 interface PriceRow {
@@ -131,6 +145,8 @@ export async function listPlans(client: SupabaseClient): Promise<BillingPlan[]> 
       priorityActionRequiredSupport: row.priority_action_required_support,
       analyticsHistoryDays: row.analytics_history_days,
       dataExportsEnabled: row.data_exports_enabled,
+      maxAutoApplyIndiaPerMonth: row.max_auto_apply_india_per_month,
+      maxAutoApplyUsPerMonth: row.max_auto_apply_us_per_month,
     });
   }
 

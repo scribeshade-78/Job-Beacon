@@ -42,15 +42,22 @@ export interface EntitlementDimensionSpec {
 /**
  * The §27.2 bullets, mapped to the columns that store them.
  *
- * NINE entries for EIGHT dimensions, and the extra one is deliberate: the eighth
- * bullet, "Historical analytics and exports", names two separable capabilities
- * joined by "and", so plan_limits stores it as two columns and it appears here
- * twice. Splitting it is the only way a plan can grant analytics history without
- * also granting exports; collapsing it would make the pair inseparable.
+ * ELEVEN entries now. Nine came from the eight §27.2 bullets, where the eighth
+ * bullet ("Historical analytics and exports") names two separable capabilities
+ * joined by "and" and therefore occupies two columns — the only way a plan can
+ * grant analytics history without also granting exports. The remaining two are
+ * the destination auto-apply quotas, which the product states per destination
+ * and which §27.2's single "verified applications per month" bullet cannot
+ * express.
  */
 export const ENTITLEMENT_DIMENSIONS: readonly EntitlementDimensionSpec[] = [
   { id: "active_target_roles", prdLabel: "Active target roles", kind: "count" },
   { id: "verified_applications_per_month", prdLabel: "Verified applications per month", kind: "count" },
+  // The one allowance the product states per DESTINATION rather than per
+  // candidate. Two entries, not one, because a single number cannot express
+  // "30 for India, 80 for the US".
+  { id: "auto_apply_india_per_month", prdLabel: "Auto-apply, India jobs (per month)", kind: "count" },
+  { id: "auto_apply_us_per_month", prdLabel: "Auto-apply, US jobs (per month)", kind: "count" },
   { id: "premium_source_access", prdLabel: "Premium source access", kind: "capability" },
   { id: "ats_resume_variants", prdLabel: "ATS resume variants", kind: "count" },
   { id: "mailbox_connections", prdLabel: "Mailbox connections", kind: "count" },
@@ -100,6 +107,8 @@ const USAGE_BY_DIMENSION: Record<string, keyof UsageRow> = {
 const LIMIT_BY_DIMENSION: Record<string, keyof PlanLimits> = {
   active_target_roles: "maxActiveTargetRoles",
   verified_applications_per_month: "maxVerifiedApplicationsPerMonth",
+  auto_apply_india_per_month: "maxAutoApplyIndiaPerMonth",
+  auto_apply_us_per_month: "maxAutoApplyUsPerMonth",
   premium_source_access: "premiumSourceAccess",
   ats_resume_variants: "maxAtsResumeVariants",
   mailbox_connections: "maxMailboxConnections",
@@ -180,6 +189,8 @@ export async function evaluateEntitlements(
           priorityActionRequiredSupport: row.priority_action_required_support as boolean | null,
           analyticsHistoryDays: row.analytics_history_days as number | null,
           dataExportsEnabled: row.data_exports_enabled as boolean | null,
+          maxAutoApplyIndiaPerMonth: row.max_auto_apply_india_per_month as number | null,
+          maxAutoApplyUsPerMonth: row.max_auto_apply_us_per_month as number | null,
         };
       }
     }
@@ -220,6 +231,26 @@ function evaluateDimension(
   }
 
   if (spec.kind === "count" && typeof limit === "number") {
+    // A configured allowance whose usage is not measured. Reporting 0 here would
+    // dress a unknown up as a fact, so usage and remaining stay null and
+    // `allowed` answers the narrower question the data can support: does this
+    // plan include the allowance at all? The two destination auto-apply quotas
+    // are in this state because candidate_entitlement_usage counts applications
+    // globally and has no destination split yet. Give them a USAGE_BY_DIMENSION
+    // entry once it does, and this branch stops applying to them.
+    if (usageKey === undefined) {
+      return {
+        dimension: spec.id,
+        prdLabel: spec.prdLabel,
+        kind: spec.kind,
+        configured: true,
+        allowed: limit > 0,
+        limit,
+        usage: null,
+        remaining: null,
+      };
+    }
+
     const current = used ?? 0;
     return {
       dimension: spec.id,

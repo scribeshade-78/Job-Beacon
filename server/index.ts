@@ -51,6 +51,7 @@ import {
   WorkerTaskNotConfiguredError,
 } from "./admin/workerTasks.js";
 import {
+  BILLING_REGIONS,
   findActivePrice,
   isBillingInterval,
   isBillingRegion,
@@ -2033,7 +2034,9 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     if (!isBillingRegion(region)) {
-      response.status(400).json({ error: "region must be one of IN, US, EU" });
+      // Built from the region list rather than spelled out, so adding a region
+      // cannot leave this message naming the old set.
+      response.status(400).json({ error: "region must be one of " + BILLING_REGIONS.join(", ") });
       return;
     }
 
@@ -2066,6 +2069,18 @@ export function createApp(options: CreateAppOptions = {}) {
         // 409 rather than 400 because the request was well-formed and the
         // catalogue is what lacks the answer.
         response.status(409).json({ error: "This plan is not priced for that region and billing period yet." });
+        return;
+      }
+
+      // A zero-price plan must never reach a payment provider. Checked on the
+      // AMOUNT rather than the plan code so it holds for any future plan priced
+      // at zero: a Stripe session for £0 is either a broken checkout or a free
+      // upgrade path that still takes a card. 400 rather than 409 because the
+      // request is wrong, not the catalogue.
+      if (price.amountMinor === 0) {
+        response.status(400).json({
+          error: "The Free plan costs nothing and needs no payment, so it cannot be checked out.",
+        });
         return;
       }
 

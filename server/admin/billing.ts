@@ -94,6 +94,8 @@ const LIMIT_KEYS: Array<keyof PlanLimits> = [
   "priorityActionRequiredSupport",
   "analyticsHistoryDays",
   "dataExportsEnabled",
+  "maxAutoApplyIndiaPerMonth",
+  "maxAutoApplyUsPerMonth",
 ];
 
 const ZERO_USAGE: AdminBillingUsage = {
