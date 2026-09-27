@@ -36,6 +36,37 @@ interface MailboxConnectionRow {
   created_at: string;
 }
 
+/**
+ * Reads the server's own explanation out of a failed response, and prefers it to
+ * a fixed string.
+ *
+ * WHY THIS EXISTS. /api/mailbox/connect/start answers 503 with an `error` plus a
+ * `reason` naming the unset variable — "Missing Google OAuth configuration:
+ * GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and
+ * GOOGLE_OAUTH_REDIRECT_URI are required." Discarding that in favour of "Please
+ * try again" turns a two-minute configuration fix into a support thread; this
+ * symptom was diagnosed from the server env only because the UI hid the reason.
+ * `reason` is server prose about the deployment — an environment variable name,
+ * never a token or a key — so it is safe to display. Same shape as lib/audit.ts.
+ */
+async function readFailureMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: unknown; reason?: unknown };
+    const error = typeof body?.error === "string" && body.error.trim() !== "" ? body.error.trim() : null;
+    const reason = typeof body?.reason === "string" && body.reason.trim() !== "" ? body.reason.trim() : null;
+
+    if (error && reason) {
+      return error + " " + reason;
+    }
+
+    return error ?? reason ?? fallback;
+  } catch {
+    // A non-JSON body — a proxy error page, an empty 502 — keeps the fallback
+    // rather than showing the reader a JSON parse error.
+    return fallback;
+  }
+}
+
 const GENERIC_FAILURE_MESSAGE = "Could not load your mailbox connections. Please try again.";
 
 export type ListMailboxConnectionsResult =
@@ -107,7 +138,7 @@ export async function startMailboxConnect(
   }
 
   if (!response.ok) {
-    return { kind: "error", message: GENERIC_CONNECT_FAILURE_MESSAGE };
+    return { kind: "error", message: await readFailureMessage(response, GENERIC_CONNECT_FAILURE_MESSAGE) };
   }
 
   const body = (await response.json()) as { authorizeUrl: string };
@@ -135,7 +166,7 @@ export async function disconnectMailboxConnection(
   }
 
   if (!response.ok) {
-    return { kind: "error", message: GENERIC_DISCONNECT_FAILURE_MESSAGE };
+    return { kind: "error", message: await readFailureMessage(response, GENERIC_DISCONNECT_FAILURE_MESSAGE) };
   }
 
   return { kind: "success" };

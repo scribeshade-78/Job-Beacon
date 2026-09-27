@@ -95,8 +95,47 @@ describe("startMailboxConnect", () => {
     });
   });
 
-  it("returns a generic error on a non-ok response", async () => {
+  it("surfaces the server's own error text on a non-ok response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: "boom" }) });
+    const result = await startMailboxConnect("tok", fetchImpl as unknown as typeof fetch);
+    expect(result).toEqual({ kind: "error", message: "boom" });
+  });
+
+  it("appends the server's reason, which names the unset configuration", async () => {
+    // The real 503 shape from this route. Before it was surfaced the UI showed
+    // "Please try again" and an operator could not see which variable was missing,
+    // which is exactly how the Gmail-connect failure had to be diagnosed from the
+    // server environment instead of from the screen.
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({
+        error: "Mailbox connection is not configured on this deployment.",
+        reason:
+          "Missing Google OAuth configuration: GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI are required.",
+      }),
+    });
+
+    const result = await startMailboxConnect("tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result.kind).toBe("error");
+    const message = (result as { message: string }).message;
+    expect(message).toContain("not configured on this deployment");
+    expect(message).toContain("GOOGLE_OAUTH_CLIENT_ID");
+  });
+
+  it("falls back to the generic message when the body says nothing useful", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) });
+    const result = await startMailboxConnect("tok", fetchImpl as unknown as typeof fetch);
+    expect(result).toEqual({ kind: "error", message: "Could not start connecting your mailbox. Please try again." });
+  });
+
+  it("falls back to the generic message when the body is not JSON", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => {
+        throw new Error("Unexpected token < in JSON at position 0");
+      },
+    });
     const result = await startMailboxConnect("tok", fetchImpl as unknown as typeof fetch);
     expect(result).toEqual({ kind: "error", message: "Could not start connecting your mailbox. Please try again." });
   });
@@ -121,10 +160,10 @@ describe("disconnectMailboxConnection", () => {
     });
   });
 
-  it("returns a generic error on a non-ok response", async () => {
+  it("surfaces the server's own error text on a non-ok response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: "not found" }) });
     const result = await disconnectMailboxConnection("conn-1", "tok", fetchImpl as unknown as typeof fetch);
-    expect(result).toEqual({ kind: "error", message: "Could not disconnect this mailbox. Please try again." });
+    expect(result).toEqual({ kind: "error", message: "not found" });
   });
 
   it("returns a network-error message when fetch itself throws", async () => {

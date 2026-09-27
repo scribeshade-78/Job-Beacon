@@ -292,6 +292,33 @@ describe("serpapiIntakeAdapter.fetchLiveJobs", () => {
     expect(result).toEqual({ vacancies: [], received: 0, skipped: 0 });
   });
 
+  it("treats SerpApi's no-results ERROR STRING as an empty result, which is the shape production actually returns", async () => {
+    // The empty-array case above is not what a zero-match google_jobs search
+    // returns. It returns HTTP 200 with this error string and NO jobs_results key
+    // at all, so before this was handled a successful-but-empty search was
+    // written to source_health_events as status 'error' — and a production row
+    // with exactly this message is what prompted the fix.
+    vi.stubEnv("SERPAPI_API_KEY", "k");
+    const fetchImpl = fixtureFetch({ error: "Google hasn't returned any results for this query." });
+
+    const result = await serpapiIntakeAdapter.fetchLiveJobs({ limit: 10, keywords: "a" }, fetchImpl);
+
+    expect(result).toEqual({ vacancies: [], received: 0, skipped: 0 });
+  });
+
+  it("still throws for an error string that is NOT a no-results message", async () => {
+    // The guard against over-matching: an unrecognised error must stay an error
+    // rather than being quietly reinterpreted as "no jobs found".
+    vi.stubEnv("SERPAPI_API_KEY", "k");
+
+    await expect(
+      serpapiIntakeAdapter.fetchLiveJobs(
+        { limit: 10, keywords: "a" },
+        fixtureFetch({ error: "Something else went wrong entirely." }),
+      ),
+    ).rejects.toBeInstanceOf(SerpApiPayloadError);
+  });
+
   it("reports received and skipped honestly, and slices to the caller's limit", async () => {
     vi.stubEnv("SERPAPI_API_KEY", "k");
     const unmappable = { ...FIXTURE_JOB, job_id: undefined };

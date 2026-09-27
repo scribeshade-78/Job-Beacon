@@ -57,6 +57,28 @@ export class SerpApiPayloadError extends Error {
   }
 }
 
+/**
+ * The phrasings SerpApi uses in its 200-with-an-error-string channel to mean
+ * "this query matched nothing".
+ *
+ * DELIBERATELY NARROW. Anything not listed here still throws, so a phrase that
+ * means something else — a quota problem, an auth problem, a shape change — is
+ * reported rather than silently reinterpreted as an empty result. Only phrasings
+ * that specifically describe the search returning nothing are accepted.
+ */
+const NO_RESULTS_MARKERS = [
+  "hasn't returned any results",
+  "didn't return any results",
+  "did not return any results",
+  "haven't returned any results",
+  "have not returned any results",
+  "no results returned",
+];
+
+function isNoResultsMessage(lowercasedApiError: string): boolean {
+  return NO_RESULTS_MARKERS.some((marker) => lowercasedApiError.includes(marker));
+}
+
 interface SerpApiApplyOption {
   title?: unknown;
   link?: unknown;
@@ -278,6 +300,19 @@ export const serpapiIntakeAdapter: IntakeAdapter = {
     // rather than trusting the status alone.
     if (apiError) {
       const lower = apiError.toLowerCase();
+
+      // A QUERY THAT MATCHED NOTHING IS NOT A FAILURE. google_jobs answers a
+      // zero-result search with HTTP 200 and
+      // {"error": "Google hasn't returned any results for this query."} — with no
+      // jobs_results key at all — so treating every error string as fatal
+      // recorded a normal outcome as a source failure. Production showed exactly
+      // that: a source_health_events row with status 'error' and that message, so
+      // the admin console counted a successful-but-empty search as an error and
+      // the fan-out reported the source as failed. The empty-array form is
+      // handled further down; this is the other half of the same outcome.
+      if (isNoResultsMessage(lower)) {
+        return { vacancies: [], received: 0, skipped: 0 };
+      }
 
       // Quota and auth are the two that need different language, because one is
       // waited out and the other is fixed by an operator.
