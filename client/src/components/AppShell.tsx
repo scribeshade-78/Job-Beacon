@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { APP_NAME } from "../../../shared/app";
 import { cn } from "../lib/utils";
+import { CopilotDrawer } from "./CopilotDrawer";
 
 interface NavItem {
   href: string;
@@ -169,6 +170,12 @@ export function AppShell({ email, onLogout, children, showModeratorLink, showAdm
 
         <main className="mx-auto max-w-[1200px] p-6">{children}</main>
       </div>
+
+      {/* AI Career Copilot. Rendered here rather than per page so the floating
+          trigger is reachable from every candidate view; absent from the
+          moderator, admin and employer shells in App.tsx, which belong to other
+          personas and render bare. */}
+      <CopilotDrawer />
     </div>
   );
 }

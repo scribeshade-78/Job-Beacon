@@ -88,6 +88,8 @@ import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
+import { AGENT_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_WINDOW_MS } from "../shared/agent.js";
 
 /**
  * Task A2: how much fit analysis one "Fetch latest jobs" press may trigger.
@@ -495,6 +497,20 @@ export function createApp(options: CreateAppOptions = {}) {
     legacyHeaders: false,
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many interview preparation requests. Please try again later." },
+  });
+
+  // AI Career Copilot. Chat is the most repeatable model call in the product — a
+  // candidate types a follow-up every few seconds — and the whole transcript is
+  // re-sent on every turn, so the cost of a request grows with its own
+  // conversation. Bounded per candidate on the same 15-minute window the two
+  // limits above use, keyed on the verified session requireAuth has set.
+  const agentChatRateLimit = rateLimit({
+    windowMs: AGENT_RATE_LIMIT_WINDOW_MS,
+    limit: AGENT_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many Copilot messages. Please try again later." },
   });
 
   // Admin-triggered worker batches. These spend third-party quota and model
@@ -906,6 +922,69 @@ export function createApp(options: CreateAppOptions = {}) {
             return;
           case "malformed_prep":
             response.status(422).json({ error: result.message });
+            return;
+          case "error":
+            response.status(500).json({ error: result.message });
+            return;
+        }
+      } catch (error) {
+        // resolveServiceClient / resolveOpenAIClient throw when their env is
+        // unset — a 500 with the real reason beats a silent misconfiguration.
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // AI Career Copilot.
+  //
+  // POST /api/agent/chat
+  //
+  // THE CONVERSATION IS CLIENT-HELD. The drawer sends the transcript it has and
+  // the server answers its last turn; nothing is written, so there is no table,
+  // no migration, and no stored copy of what a candidate asked. Same
+  // no-persistence stance as the interview-prep route above.
+  //
+  // THE CANDIDATE'S CONTEXT IS RESOLVED SERVER-SIDE from the verified token's
+  // user id, never from the body. A client therefore cannot describe the
+  // candidate to the model, so it cannot feed it experience the candidate does
+  // not have — the only thing the request controls is the question.
+  //
+  // The model is a body field, so it is checked against the shared whitelist
+  // rather than passed through: without that, any signed-in candidate could name
+  // an arbitrary OpenRouter model and spend it against this deployment's key.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/agent/chat",
+    requireAuth,
+    agentChatRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const parsed = parseAgentChatRequest(request.body ?? {});
+
+      if (!parsed.ok) {
+        response.status(400).json({ error: parsed.message });
+        return;
+      }
+
+      try {
+        const result = await answerAgentChat(resolveServiceClient(), resolveOpenAIClient(), {
+          candidateId: request.user!.id,
+          messages: parsed.messages,
+          model: parsed.model,
+        });
+
+        switch (result.kind) {
+          case "success":
+            // Generated per request and never cached; no-store keeps a shared
+            // proxy from holding one candidate's answer.
+            response.set("Cache-Control", "no-store");
+            response.status(200).json({ message: result.message, model: result.model });
+            return;
+          case "empty_reply":
+            // 502 rather than 500: the request was well-formed and this server
+            // was up, so the failure is upstream and a retry is worth offering.
+            response.status(502).json({ error: result.message });
             return;
           case "error":
             response.status(500).json({ error: result.message });
