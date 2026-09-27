@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Briefcase,
   Building2,
+  CreditCard,
   FileText,
   Inbox,
   LayoutDashboard,
@@ -43,6 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   // on already being one.
   { href: "/employer", label: "Employer", Icon: Landmark },
   { href: "/security", label: "Security", Icon: ShieldCheck },
+  { href: "/billing", label: "Plans & Billing", Icon: CreditCard },
 ];
 
 interface AppShellProps {

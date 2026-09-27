@@ -11,6 +11,7 @@ import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 import { ActionRequiredPage } from "./pages/ActionRequiredPage";
 import { AdminPage } from "./pages/AdminPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
+import { BillingPage } from "./pages/BillingPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
 import { EmployerPage } from "./pages/EmployerPage";
 import { ModeratorPage } from "./pages/ModeratorPage";
@@ -117,6 +118,9 @@ function SignedInRoutes({
         </Route>
         <Route path="/security">
           <SecurityPage />
+        </Route>
+        <Route path="/billing">
+          <BillingPage />
         </Route>
         <Route>
           <Redirect to="/" />
