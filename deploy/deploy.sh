@@ -39,9 +39,15 @@ VPS_HOST="187.127.138.151"
 SSH_KEY="${SSH_KEY:-}"
 REMOTE_DIR="/root/jobbeacon"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+APP_CONTAINER="${APP_CONTAINER:-jobbeacon-app}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:5000/api/health}"
 HEALTH_ATTEMPTS="${HEALTH_ATTEMPTS:-30}"
 HEALTH_DELAY_SECONDS="${HEALTH_DELAY_SECONDS:-5}"
+# SEPARATE FROM HEALTH_URL ON PURPOSE, AND ON BY DEFAULT. HEALTH_URL polls the
+# host's own loopback, which proves only that the container is up — a deploy that
+# left Traefik with no router for the domain still reported success while every
+# real visitor got a 404. Set PUBLIC_HEALTH_URL= (empty) to skip the check.
+PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL-https://jobbeacon.in/api/health}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCHIVE_NAME="jobbeacon-deploy.tar.gz"
@@ -207,6 +213,29 @@ until ssh "${SSH_OPTS[@]}" "${REMOTE}" "curl -fsS -o /dev/null '${HEALTH_URL}'" 
   sleep "${HEALTH_DELAY_SECONDS}"
 done
 
+# ---- 6. public health ---------------------------------------------------------
+# THE LOOPBACK CHECK ABOVE CANNOT SEE A ROUTING FAILURE, and that is not
+# hypothetical: the container was healthy on 127.0.0.1:5000 while jobbeacon.in
+# answered with Traefik's own 404, because the app had no Traefik router. A
+# deploy must not report success in that state.
+if [ -n "${PUBLIC_HEALTH_URL}" ]; then
+  log "Verifying public routing at ${PUBLIC_HEALTH_URL}"
+  public_attempt=1
+  until ssh "${SSH_OPTS[@]}" "${REMOTE}" "curl -fsS -o /dev/null '${PUBLIC_HEALTH_URL}'" 2>/dev/null; do
+    if [ "${public_attempt}" -ge "${HEALTH_ATTEMPTS}" ]; then
+      printf '\n'
+      fail "The container is healthy but ${PUBLIC_HEALTH_URL} never answered.
+     This is a ROUTING failure, not an application failure. Check that the app
+     service still carries its Traefik labels and joined the proxy network:
+     ssh ${REMOTE} 'docker inspect ${APP_CONTAINER} --format {{json .Config.Labels}}'
+     ssh ${REMOTE} 'docker network inspect traefik-proxy --format {{range .Containers}}{{.Name}} {{end}}'"
+    fi
+    printf '.'
+    public_attempt=$((public_attempt + 1))
+    sleep "${HEALTH_DELAY_SECONDS}"
+  done
+fi
+
 rm -f "${ARCHIVE_PATH}"
 rmdir "$(dirname "${ARCHIVE_PATH}")" 2>/dev/null || true
-log "Deployed. ${HEALTH_URL} is healthy."
+log "Deployed. ${HEALTH_URL} is healthy and ${PUBLIC_HEALTH_URL} answers."

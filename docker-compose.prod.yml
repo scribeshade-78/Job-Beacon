@@ -98,3 +98,60 @@ services:
 
     security_opt:
       - no-new-privileges:true
+
+    # ---------------------------------------------------------------------
+    # Traefik routing. There is no config file to edit: Traefik runs with the
+    # Docker provider and exposedbydefault=false, so these labels ARE the
+    # routing configuration, and without traefik.enable=true nothing routes.
+    #
+    # traefik.docker.network is required rather than redundant. This container
+    # joins two networks, and without naming the one Traefik should dial it
+    # picks whichever it finds first — which may be an address it cannot reach.
+    #
+    # THE LOOPBACK PORT PUBLISH ABOVE IS KEPT, and it is not redundant with
+    # these labels. deploy.sh's local health check polls 127.0.0.1:5000 from the
+    # host; Traefik reaches the container over traefik-proxy instead. The two
+    # checks answer different questions: "is the process up" and "is the route
+    # up". Only the second one would have caught the 404s this replaces.
+    #
+    # The router and service are named jobbeacon rather than reusing the
+    # stopped jobbeacon-web stack's names, so that starting that stack later
+    # cannot silently collide with this one.
+    # ---------------------------------------------------------------------
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-proxy"
+
+      - "traefik.http.routers.jobbeacon.rule=Host(`jobbeacon.in`) || Host(`www.jobbeacon.in`)"
+      - "traefik.http.routers.jobbeacon.entrypoints=websecure"
+      - "traefik.http.routers.jobbeacon.tls=true"
+      - "traefik.http.routers.jobbeacon.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jobbeacon.service=jobbeacon"
+      - "traefik.http.routers.jobbeacon.middlewares=jobbeacon-secure-headers"
+
+      - "traefik.http.services.jobbeacon.loadbalancer.server.port=5000"
+      - "traefik.http.services.jobbeacon.loadbalancer.server.scheme=http"
+      - "traefik.http.services.jobbeacon.loadbalancer.healthcheck.path=/api/health"
+      - "traefik.http.services.jobbeacon.loadbalancer.healthcheck.interval=20s"
+
+      # HSTS is set with the same values the previous stack used, so browsers
+      # that already cached a policy for this domain see no change. Note
+      # stsIncludeSubdomains + stsPreload cover every subdomain of jobbeacon.in.
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.forceSTSHeader=true"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.jobbeacon-secure-headers.headers.referrerPolicy=strict-origin-when-cross-origin"
+
+    networks:
+      - default
+      - traefik-proxy
+
+# Traefik's own compose declares this external, so it is referenced rather than
+# created here: a stack that tried to define it would clash with the running
+# proxy on the network name.
+networks:
+  traefik-proxy:
+    external: true
