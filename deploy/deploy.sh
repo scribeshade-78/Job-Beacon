@@ -93,12 +93,38 @@ log "Packaging source into ${ARCHIVE_NAME}"
 # It is not the only one either — docker-compose.yml.txt is a stray copy and
 # docs/sample-emails/interview.txt is a manual-test fixture. None is read at
 # build or run time, so excluding the whole extension costs nothing.
+#
+# THE .env PATTERNS ARE LISTED TWICE ON PURPOSE, and the pairs are not
+# redundant. tar stores members as "./path" when handed ".", so the "./" forms
+# match the repository ROOT and nothing else — a .env inside a subdirectory
+# (a nested worktree under .kilo, say) matched neither and relied entirely on
+# the assertion below to stop the deploy. The bare forms cover any depth.
+# A leaked .env is a service-role key on a production host, so both are kept.
+#
+# .kilo is a local worktree directory: a second checkout of this repository,
+# complete with its own docs, Dockerfile and env templates. Shipping it would
+# bloat the upload and put a parallel copy of the source on the VPS.
+# --warning=no-file-changed IS LOAD-BEARING, not noise suppression. The archive
+# is written INTO the directory being archived, so GNU tar notices that "."
+# changed while it was reading it and exits 1 — and under set -e that aborts the
+# deploy before anything is uploaded. Measured on both shells available here
+# (Git Bash and WSL, GNU tar 1.35): a fresh archive exits 1 without this flag and
+# 0 with it, and an archive that already exists exits 0 either way — which is why
+# this only ever failed on the first run after a cleanup, and why it looked
+# intermittent. The warning is a false positive here because the archive excludes
+# itself; the content assertions below are what prove nothing sensitive got in.
 tar -czf "${ARCHIVE_NAME}" \
+  --warning=no-file-changed \
   --exclude='./node_modules' \
   --exclude='./dist' \
   --exclude='./.git' \
+  --exclude='./.kilo' \
   --exclude='./.env' \
   --exclude='./.env.*' \
+  --exclude='.env' \
+  --exclude='.env.*' \
+  --exclude='*/.env' \
+  --exclude='*/.env.*' \
   --exclude='*.txt' \
   --exclude="./${ARCHIVE_NAME}" \
   --exclude='./coverage' \
