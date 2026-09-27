@@ -45,6 +45,9 @@ HEALTH_DELAY_SECONDS="${HEALTH_DELAY_SECONDS:-5}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCHIVE_NAME="jobbeacon-deploy.tar.gz"
+# The local archive lives OUTSIDE the repository: see the packaging stage for why
+# that placement is required rather than cosmetic.
+ARCHIVE_PATH="$(mktemp -d)/${ARCHIVE_NAME}"
 
 log()  { printf '\n==> %s\n' "$*"; }
 fail() { printf '\n!! %s\n' "$*" >&2; exit 1; }
@@ -104,17 +107,17 @@ log "Packaging source into ${ARCHIVE_NAME}"
 # .kilo is a local worktree directory: a second checkout of this repository,
 # complete with its own docs, Dockerfile and env templates. Shipping it would
 # bloat the upload and put a parallel copy of the source on the VPS.
-# --warning=no-file-changed IS LOAD-BEARING, not noise suppression. The archive
-# is written INTO the directory being archived, so GNU tar notices that "."
-# changed while it was reading it and exits 1 — and under set -e that aborts the
-# deploy before anything is uploaded. Measured on both shells available here
-# (Git Bash and WSL, GNU tar 1.35): a fresh archive exits 1 without this flag and
-# 0 with it, and an archive that already exists exits 0 either way — which is why
-# this only ever failed on the first run after a cleanup, and why it looked
-# intermittent. The warning is a false positive here because the archive excludes
-# itself; the content assertions below are what prove nothing sensitive got in.
-tar -czf "${ARCHIVE_NAME}" \
-  --warning=no-file-changed \
+# THE ARCHIVE IS WRITTEN OUTSIDE THE REPOSITORY, and that placement is
+# load-bearing rather than tidiness. Writing it into the tree it is archiving
+# makes GNU tar see "." change while it is still reading it and exit 1 — and
+# under set -e that aborted the deploy right here, before anything was uploaded,
+# leaving a complete-looking archive behind and no explanation in the log.
+#
+# The obvious fix, --warning=no-file-changed, DOES NOT WORK: it suppresses the
+# message but tar still returns 1. That was measured on this repository with
+# GNU tar 1.35 and a 1.8 MB archive. Keeping the archive out of the tree removes
+# the cause instead of muting the symptom.
+tar -czf "${ARCHIVE_PATH}" \
   --exclude='./node_modules' \
   --exclude='./dist' \
   --exclude='./.git' \
@@ -135,16 +138,16 @@ tar -czf "${ARCHIVE_NAME}" \
 # The two committed *.example templates are the only permitted matches — they
 # carry no values. .env.build is deliberately NOT shipped, same as
 # .env.production: the VPS holds its own copy, placed by hand.
-if tar -tzf "${ARCHIVE_NAME}" | grep -qE '(^|/)\.env($|\.)' | grep -qvE '\.env\.example$|\.env\.build\.example$'; then
-  rm -f "${ARCHIVE_NAME}"
+if tar -tzf "${ARCHIVE_PATH}" | grep -qE '(^|/)\.env($|\.)' | grep -qvE '\.env\.example$|\.env\.build\.example$'; then
+  rm -f "${ARCHIVE_PATH}"
   fail "Refusing to deploy: the archive contains a .env file. This is a bug in deploy.sh."
 fi
 
 # Same reasoning as the .env check above: prove the exclusion rather than
 # trusting the flag, because a pattern typo would otherwise ship untracked local
 # files silently. Nothing the build or the server reads ends in .txt.
-if tar -tzf "${ARCHIVE_NAME}" | grep -qE '\.txt$'; then
-  rm -f "${ARCHIVE_NAME}"
+if tar -tzf "${ARCHIVE_PATH}" | grep -qE '\.txt$'; then
+  rm -f "${ARCHIVE_PATH}"
   fail "Refusing to deploy: the archive contains a .txt file. This is a bug in deploy.sh."
 fi
 
@@ -153,7 +156,7 @@ log "Ensuring ${REMOTE_DIR} exists on ${REMOTE}"
 ssh "${SSH_OPTS[@]}" "${REMOTE}" "mkdir -p '${REMOTE_DIR}'"
 
 log "Uploading ${ARCHIVE_NAME} to ${REMOTE}:${REMOTE_DIR}"
-scp "${SCP_OPTS[@]}" "${ARCHIVE_NAME}" "${REMOTE}:${REMOTE_DIR}/${ARCHIVE_NAME}"
+scp "${SCP_OPTS[@]}" "${ARCHIVE_PATH}" "${REMOTE}:${REMOTE_DIR}/${ARCHIVE_NAME}"
 
 # ---- 4. rebuild and restart --------------------------------------------------
 log "Rebuilding and restarting the container"
@@ -204,5 +207,6 @@ until ssh "${SSH_OPTS[@]}" "${REMOTE}" "curl -fsS -o /dev/null '${HEALTH_URL}'" 
   sleep "${HEALTH_DELAY_SECONDS}"
 done
 
-rm -f "${ARCHIVE_NAME}"
+rm -f "${ARCHIVE_PATH}"
+rmdir "$(dirname "${ARCHIVE_PATH}")" 2>/dev/null || true
 log "Deployed. ${HEALTH_URL} is healthy."
