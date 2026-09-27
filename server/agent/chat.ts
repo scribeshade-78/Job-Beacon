@@ -3,7 +3,9 @@ import type OpenAI from "openai";
 import {
   AGENT_MAX_HISTORY_TURNS,
   AGENT_MAX_MESSAGE_CHARS,
+  AGENT_MAX_TOOL_PROPOSALS,
   isAgentModelId,
+  type AgentActionProposal,
   type AgentChatMessage,
   type AgentModelId,
 } from "../../shared/agent.js";
@@ -11,9 +13,13 @@ import { loadCandidateContext } from "./context.js";
 import {
   buildAgentMessages,
   EmptyAgentReplyError,
+  parseToolCallArguments,
   readAgentReply,
+  readAgentText,
+  readAgentToolCalls,
   readDefaultAgentModel,
 } from "./chatPrompt.js";
+import { agentToolDescriptors, buildAgentProposal } from "./tools.js";
 
 /**
  * AI Career Copilot — the endpoint's application logic.
@@ -28,6 +34,12 @@ import {
  * copy of what a candidate asked. The transcript lives in the drawer for the
  * life of the page and is gone on reload.
  *
+ * R4 ADDED TOOL CALLS WITHOUT ADDING A WRITE. Everything this function can
+ * return is either prose or a PROPOSAL: an inert object the drawer renders with
+ * an Approve button. The model cannot cause a write from here — the only write
+ * path is actions.ts, reachable solely from POST /api/agent/actions/execute
+ * after a human approves.
+ *
  * THE REQUEST BODY IS VALIDATED HERE, NOT IN THE ROUTE, because the bounds are
  * part of the feature's contract rather than of HTTP: the same parser is what
  * the tests exercise, and a second caller (a worker, a script) would get the
@@ -35,7 +47,7 @@ import {
  */
 
 export type AgentChatResult =
-  | { kind: "success"; message: string; model: AgentModelId }
+  | { kind: "success"; message: string; model: AgentModelId; proposals: AgentActionProposal[] }
   /** The model answered with nothing usable. A 502: the request was fine, the upstream reply was not. */
   | { kind: "empty_reply"; message: string }
   | { kind: "error"; message: string };
@@ -126,6 +138,10 @@ export function parseAgentChatRequest(body: unknown): ParsedAgentChatRequest {
   };
 }
 
+/** Shown when every tool call was refused and the model said nothing itself. */
+const UNPREPARABLE_ACTION_MESSAGE =
+  "I could not prepare that action. Try naming the job you mean, or ask me to list your matches first.";
+
 export async function answerAgentChat(
   client: Pick<SupabaseClient, "from">,
   openaiClient: Pick<OpenAI, "chat">,
@@ -141,9 +157,62 @@ export async function answerAgentChat(
     const completion = await openaiClient.chat.completions.create({
       model,
       messages: buildAgentMessages(context, history),
+      // Derived from the registry, so the model can only ever be offered tools
+      // the server can actually carry out.
+      tools: agentToolDescriptors(),
+      tool_choice: "auto",
     });
 
-    return { kind: "success", message: readAgentReply(completion), model };
+    const rawCalls = readAgentToolCalls(completion);
+
+    if (rawCalls.length === 0) {
+      // No proposal, so this is an ordinary answer — and an empty one is a
+      // failure the route reports as 502.
+      return { kind: "success", message: readAgentReply(completion), model, proposals: [] };
+    }
+
+    const text = readAgentText(completion);
+    const proposals: AgentActionProposal[] = [];
+
+    // Capped: a model that emits ten calls should not produce ten Approve
+    // buttons for a human to read their way through.
+    for (const call of rawCalls.slice(0, AGENT_MAX_TOOL_PROPOSALS)) {
+      const parsedArguments = parseToolCallArguments(call.argumentsJson);
+
+      if (!parsedArguments.ok) {
+        continue;
+      }
+
+      // Refused whole for an unknown tool, bad arguments, or a vacancy that is
+      // not in JobBeacon — see buildAgentProposal. A refused call is dropped
+      // rather than surfaced as a card that would fail on approval.
+      const built = await buildAgentProposal(
+        client as SupabaseClient,
+        call.name,
+        parsedArguments.value,
+        params.candidateId,
+      );
+
+      if (built.ok) {
+        proposals.push(built.proposal);
+      }
+    }
+
+    if (proposals.length === 0) {
+      // The model tried to act and produced nothing executable. Returning an
+      // empty message would render a blank bubble, so the candidate is told the
+      // action could not be prepared, alongside whatever prose there was.
+      return {
+        kind: "success",
+        message: text === "" ? UNPREPARABLE_ACTION_MESSAGE : text,
+        model,
+        proposals: [],
+      };
+    }
+
+    // Message may be empty here: a purely tool-calling turn is normal, and the
+    // drawer renders the cards in place of prose.
+    return { kind: "success", message: text, model, proposals };
   } catch (error) {
     if (error instanceof EmptyAgentReplyError) {
       return {

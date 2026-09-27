@@ -71,3 +71,69 @@ export const AGENT_MAX_MESSAGE_CHARS = 4000;
 /** Per candidate, matching the interview-prep rate limit's shape. */
 export const AGENT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const AGENT_RATE_LIMIT_MAX = 10;
+
+// ---------------------------------------------------------------------------
+// R4 — action execution.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE EXECUTABLE-TOOL WHITELIST, AND THE ONLY THING THE MODEL MAY PROPOSE.
+ *
+ * Same reasoning as AGENT_MODEL_IDS: a tool name arrives from the client (the
+ * model's proposal is echoed back for approval), so it is checked against this
+ * list and never dispatched by name. A name absent here cannot execute, whatever
+ * the request says.
+ *
+ * ONLY IMPLEMENTED TOOLS ARE ADVERTISED to the model — a proposal the server
+ * cannot carry out would render an Approve button that always fails. Adding a
+ * name here without a matching entry in server/agent/tools.ts is a test failure,
+ * not a silent 500.
+ */
+export const AGENT_TOOL_NAMES = ["queue_applications"] as const;
+
+export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
+
+export function isAgentToolName(value: unknown): value is AgentToolName {
+  return typeof value === "string" && (AGENT_TOOL_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * An action the model has PROPOSED and a candidate may APPROVE.
+ *
+ * Nothing here has happened. Every field except `arguments` is built by the
+ * SERVER from the candidate's own rows — the title, the lines and the button
+ * label are deliberately NOT the model's words, so a model that invents a
+ * company name cannot make the card it appears on show one.
+ *
+ * `arguments` IS UNTRUSTED ON THE WAY BACK. The client echoes it, so it is
+ * re-validated from scratch at execution time and never dispatched as received.
+ */
+export interface AgentActionProposal {
+  tool: AgentToolName;
+  /** Server-built. Rendered as the card's heading. */
+  title: string;
+  /** Server-built. One entry per line of the card body. */
+  lines: string[];
+  /** Server-built. The button's own label, so "Queue 2 applications" is specific. */
+  confirmLabel: string;
+  /** Echoed back on approval; re-validated server-side. */
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Cards per reply are capped: a model that emits ten tool calls should not
+ * produce a wall of Approve buttons the candidate has to read to be safe.
+ */
+export const AGENT_MAX_TOOL_PROPOSALS = 3;
+
+/**
+ * Vacancies one proposed action may cover. Far below
+ * MAX_BULK_APPLY_VACANCIES (100) on purpose: that bound protects the endpoint
+ * from a huge fan-out, whereas this one keeps an approval card to a list a
+ * human can actually read before pressing the button.
+ */
+export const AGENT_MAX_ACTION_VACANCIES = 5;
+
+/** Tighter than the chat limit: an execution writes, and is not something a candidate does in a loop. */
+export const AGENT_ACTION_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+export const AGENT_ACTION_RATE_LIMIT_MAX = 5;

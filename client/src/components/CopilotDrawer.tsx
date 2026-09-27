@@ -4,16 +4,20 @@ import {
   AGENT_MODEL_OPTIONS,
   AGENT_QUICK_PROMPTS,
   DEFAULT_AGENT_MODEL,
+  type AgentActionProposal,
   type AgentModelId,
 } from "../../../shared/agent";
 import {
   appendAgentTurn,
   getActiveConversation,
   getAgentSnapshot,
+  requestAgentAction,
   requestAgentChat,
   selectConversation,
+  setProposalState,
   startNewConversation,
   subscribeAgentStore,
+  toRequestMessages,
 } from "../lib/agentChat";
 import { cn } from "../lib/utils";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
@@ -35,10 +39,78 @@ import { Spinner } from "./ui/spinner";
  * reload — which matches the server's no-persistence stance: there is no stored
  * copy of what a candidate asked, on either side.
  *
+ * HUMAN-IN-THE-LOOP IS STRUCTURAL HERE, NOT A CONVENTION. A model response can
+ * only ever add cards to the transcript; the single call that changes anything
+ * (requestAgentAction) appears in exactly one place in this file, inside an
+ * onClick. There is no effect, no render path and no auto-run that reaches it,
+ * so an action cannot happen because a card appeared — only because it was
+ * pressed. A card that has been decided is rendered without buttons, so it
+ * cannot be pressed twice.
+ *
  * A FAILED SEND KEEPS THE QUESTION. Dropping the candidate's text on error would
  * make them retype it; instead the turn stays in the transcript and the error is
  * shown with the reason the server gave.
  */
+
+function ProposalCard({
+  entryId,
+  index,
+  item,
+  onApprove,
+}: {
+  entryId: string;
+  index: number;
+  item: { proposal: AgentActionProposal; state: string; message: string };
+  onApprove: (entryId: string, index: number, proposal: AgentActionProposal) => void;
+}) {
+  return (
+    <div className="mt-2 w-full rounded-card border border-ios-separator bg-ios-card p-3 text-left">
+      <p className="text-sm font-semibold text-black">{item.proposal.title}</p>
+
+      <ul className="mt-1 list-disc pl-5 text-sm text-ios-text-secondary">
+        {item.proposal.lines.map((line, lineIndex) => (
+          <li key={lineIndex}>{line}</li>
+        ))}
+      </ul>
+
+      {item.state === "pending" && (
+        <>
+          <p className="mt-2 text-xs text-ios-text-secondary">
+            Nothing has happened yet. This runs only if you approve it.
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <Button size="sm" onClick={() => onApprove(entryId, index, item.proposal)}>
+              {item.proposal.confirmLabel}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setProposalState(entryId, index, "dismissed")}
+            >
+              Dismiss
+            </Button>
+          </div>
+        </>
+      )}
+
+      {item.state === "executing" && (
+        <p className="mt-2 flex items-center gap-2 text-sm text-ios-text-secondary">
+          <Spinner className="h-4 w-4" />
+          Working…
+        </p>
+      )}
+
+      {item.state === "done" && <p className="mt-2 text-sm text-status-verified-fg">{item.message}</p>}
+
+      {item.state === "failed" && <p className="mt-2 text-sm text-status-blocked-fg">{item.message}</p>}
+
+      {item.state === "dismissed" && (
+        <p className="mt-2 text-sm text-ios-text-secondary">Dismissed. Nothing was run.</p>
+      )}
+    </div>
+  );
+}
+
 export function CopilotDrawer() {
   const [open, setOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -79,6 +151,12 @@ export function CopilotDrawer() {
     setInput("");
   }
 
+  async function accessToken(): Promise<string | null> {
+    const { data } = await getSupabaseBrowserClient().auth.getSession();
+
+    return data.session?.access_token ?? null;
+  }
+
   async function send(text: string) {
     const content = text.trim();
 
@@ -96,26 +174,48 @@ export function CopilotDrawer() {
     setSending(true);
 
     try {
-      const { data } = await getSupabaseBrowserClient().auth.getSession();
-      const accessToken = data.session?.access_token;
+      const token = await accessToken();
 
-      if (!accessToken) {
+      if (!token) {
         setErrorMessage("Your session has expired. Please sign in again.");
         return;
       }
 
       // Read back through the store rather than closing over a stale copy, so
       // the turn just appended is the one sent.
-      const messages = getActiveConversation()?.messages ?? [];
-      const result = await requestAgentChat(messages, accessToken, { model });
+      const result = await requestAgentChat(toRequestMessages(getActiveConversation()), token, { model });
 
       if (result.kind === "success") {
-        appendAgentTurn("assistant", result.message);
+        // Proposals ride along inert; nothing here runs them.
+        appendAgentTurn("assistant", result.message, result.proposals);
       } else {
         setErrorMessage(result.message);
       }
     } finally {
       setSending(false);
+    }
+  }
+
+  /**
+   * THE ONLY CALL THAT CHANGES ANYTHING. It is reached from ProposalCard's
+   * Approve button and from nowhere else — no effect, no render, no auto-run.
+   */
+  async function approve(entryId: string, index: number, proposal: AgentActionProposal) {
+    setProposalState(entryId, index, "executing");
+
+    const token = await accessToken();
+
+    if (!token) {
+      setProposalState(entryId, index, "failed", "Your session has expired. Please sign in again.");
+      return;
+    }
+
+    const result = await requestAgentAction(proposal.tool, proposal.arguments, token);
+
+    if (result.kind === "executed") {
+      setProposalState(entryId, index, "done", result.summary);
+    } else {
+      setProposalState(entryId, index, "failed", result.message);
     }
   }
 
@@ -221,19 +321,33 @@ export function CopilotDrawer() {
             </div>
           ) : (
             <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-              {active?.messages.map((message, index) => (
+              {active?.messages.map((entry) => (
                 <div
-                  key={index}
-                  className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
+                  key={entry.id}
+                  className={cn("flex flex-col", entry.role === "user" ? "items-end" : "items-start")}
                 >
-                  <div
-                    className={cn(
-                      "max-w-[85%] whitespace-pre-wrap rounded-card px-3 py-2 text-sm",
-                      message.role === "user" ? "bg-ios-blue-button text-white" : "bg-ios-bg text-black",
-                    )}
-                  >
-                    {message.content}
-                  </div>
+                  {entry.content.trim() !== "" && (
+                    <div
+                      className={cn(
+                        "max-w-[85%] whitespace-pre-wrap rounded-card px-3 py-2 text-sm",
+                        entry.role === "user" ? "bg-ios-blue-button text-white" : "bg-ios-bg text-black",
+                      )}
+                    >
+                      {entry.content}
+                    </div>
+                  )}
+
+                  {entry.proposals.map((item, index) => (
+                    <ProposalCard
+                      key={index}
+                      entryId={entry.id}
+                      index={index}
+                      item={item}
+                      onApprove={(proposalEntryId, proposalIndex, proposal) =>
+                        void approve(proposalEntryId, proposalIndex, proposal)
+                      }
+                    />
+                  ))}
                 </div>
               ))}
 

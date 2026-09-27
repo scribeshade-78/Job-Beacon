@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AccessTokenVerifier } from "../requireAuth.js";
 import type { CreateAppOptions } from "../index.js";
-import { AGENT_RATE_LIMIT_MAX } from "../../shared/agent.js";
+import { AGENT_ACTION_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_MAX } from "../../shared/agent.js";
 
 /**
  * Route-level tests for POST /api/agent/chat.
@@ -16,6 +16,21 @@ import { AGENT_RATE_LIMIT_MAX } from "../../shared/agent.js";
  * repository, and a self-contained suite makes the whole feature's surface
  * readable in one place.
  */
+
+/**
+ * The action route delegates to bulkApplyToVacancies, so it is mocked: these
+ * tests are about the HTTP contract — auth, the whitelist, status mapping and
+ * the tighter rate limit — not about the eligibility engine, which
+ * actions.test.ts and bulkApply's own suite already cover.
+ */
+vi.mock("../applications/bulkApply.js", () => ({
+  MAX_BULK_APPLY_VACANCIES: 100,
+  bulkApplyToVacancies: vi.fn(),
+}));
+
+import { bulkApplyToVacancies } from "../applications/bulkApply.js";
+
+const bulkApplyMock = vi.mocked(bulkApplyToVacancies);
 
 const { createApp } = await import("../index.js");
 
@@ -106,6 +121,7 @@ describe("POST /api/agent/chat", () => {
         expect(await response.json()).toEqual({
           message: "You have two eligible plans.",
           model: "openai/gpt-4o-mini",
+          proposals: [],
         });
         // One candidate's answer must not be held by a shared proxy.
         expect(response.headers.get("cache-control")).toBe("no-store");
@@ -219,6 +235,179 @@ describe("POST /api/agent/chat", () => {
 
         expect(limited.status).toBe(429);
         expect((await limited.json()).error).toContain("Too many Copilot messages");
+      },
+    );
+  });
+});
+
+describe("POST /api/agent/actions/execute", () => {
+  const VACANCY_ID = "11111111-1111-1111-1111-111111111111";
+  const OTHER_VACANCY_ID = "22222222-2222-2222-2222-222222222222";
+
+  const QUEUED = {
+    requested: 1,
+    queued: 1,
+    blocked: 0,
+    errors: 0,
+    outcomes: [{ vacancyId: VACANCY_ID, status: "queued" as const, blockingGates: [] }],
+  };
+
+  /** Serves the vacancy lookup buildAgentProposal does, which the chat route path also uses. */
+  function makeActionServiceClient() {
+    return {
+      from: (table: string) => {
+        const data =
+          table === "vacancies"
+            ? [{ id: VACANCY_ID, raw_title: "Platform Engineer", companies: { displayed_name: "Acme" } }]
+            : [];
+        const builder: Record<string, unknown> = {};
+        const chain = () => builder;
+
+        // "insert" is in this list because the action route writes an audit
+        // event through the same client; without it recordAuditEvent fails and
+        // logs a warning that would drown the output these tests produce.
+        for (const method of ["select", "eq", "in", "order", "limit", "insert"]) {
+          builder[method] = chain;
+        }
+
+        builder.then = (resolve: (value: unknown) => unknown) => resolve({ data, error: null });
+
+        return builder;
+      },
+    } as never;
+  }
+
+  function execute(base: string, body: unknown, token: string | null = "valid-test-token") {
+    return fetch(`${base}/api/agent/actions/execute`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token === null ? {} : { Authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  const VALID_ACTION = { tool: "queue_applications", arguments: { vacancyIds: [VACANCY_ID] } };
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        const response = await execute(base, VALID_ACTION, null);
+
+        expect(response.status).toBe(401);
+      },
+    );
+  });
+
+  /**
+   * The whitelist is the enforcement for the denylist: a client asking for the
+   * very actions R4 refused must be turned away by name, not by luck.
+   */
+  it("returns 400 for a denied or unknown tool", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        for (const tool of ["send_follow_up_email", "submit_application", "cancel_subscription", "nope"]) {
+          const response = await execute(base, { tool, arguments: {} });
+
+          expect(response.status).toBe(400);
+          expect((await response.json()).error).toBe("tool is not one of the available actions.");
+        }
+      },
+    );
+  });
+
+  it("returns 400 when the tool rejects the arguments", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        const response = await execute(base, {
+          tool: "queue_applications",
+          arguments: { vacancyIds: ["not-a-uuid"] },
+        });
+
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toContain("vacancyId");
+        expect(bulkApplyMock).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("returns 200 with the summary and the per-vacancy detail", async () => {
+    bulkApplyMock.mockResolvedValue(QUEUED);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        const response = await execute(base, VALID_ACTION);
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          status: "executed",
+          tool: "queue_applications",
+          summary: "Queued 1 of 1.",
+          detail: QUEUED,
+        });
+        expect(response.headers.get("cache-control")).toBe("no-store");
+      },
+    );
+  });
+
+  it("scopes the action to the verified candidate, never the body", async () => {
+    bulkApplyMock.mockResolvedValue(QUEUED);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        // A body carrying someone else's candidateId must not influence the write.
+        await execute(base, { ...VALID_ACTION, candidateId: "someone-else" });
+        await execute(base, { ...VALID_ACTION, arguments: { ...VALID_ACTION.arguments, candidateId: "someone-else" } });
+
+        for (const call of bulkApplyMock.mock.calls) {
+          expect(call[1]).toMatchObject({ candidateId: "user-123" });
+        }
+      },
+    );
+  });
+
+  it("returns 500 when the action fails at the infrastructure level", async () => {
+    bulkApplyMock.mockRejectedValue(new Error("PostgREST unreachable"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        const response = await execute(base, VALID_ACTION);
+
+        expect(response.status).toBe(500);
+        expect((await response.json()).error).toBe("PostgREST unreachable");
+      },
+    );
+  });
+
+  /**
+   * Executions write, so they are bounded more tightly than chat. Asserted as a
+   * RELATIONSHIP rather than a literal, so raising one limit without the other
+   * fails the test that states the intent.
+   */
+  it("rate-limits executions more tightly than chat", async () => {
+    bulkApplyMock.mockResolvedValue(QUEUED);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: makeActionServiceClient() },
+      async (base) => {
+        expect(AGENT_ACTION_RATE_LIMIT_MAX).toBeLessThan(AGENT_RATE_LIMIT_MAX);
+
+        for (let attempt = 0; attempt < AGENT_ACTION_RATE_LIMIT_MAX; attempt += 1) {
+          const response = await execute(base, VALID_ACTION);
+          expect(response.status).toBe(200);
+        }
+
+        const limited = await execute(base, VALID_ACTION);
+
+        expect(limited.status).toBe(429);
+        expect((await limited.json()).error).toContain("Too many Copilot actions");
       },
     );
   });

@@ -89,7 +89,13 @@ import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
-import { AGENT_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_WINDOW_MS } from "../shared/agent.js";
+import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
+import {
+  AGENT_ACTION_RATE_LIMIT_MAX,
+  AGENT_ACTION_RATE_LIMIT_WINDOW_MS,
+  AGENT_RATE_LIMIT_MAX,
+  AGENT_RATE_LIMIT_WINDOW_MS,
+} from "../shared/agent.js";
 
 /**
  * Task A2: how much fit analysis one "Fetch latest jobs" press may trigger.
@@ -511,6 +517,18 @@ export function createApp(options: CreateAppOptions = {}) {
     legacyHeaders: false,
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many Copilot messages. Please try again later." },
+  });
+
+  // R4 action execution. This one WRITES, so it is bounded more tightly than
+  // chat and keyed on the candidate: approving an action is a deliberate act,
+  // not something anyone does in a loop.
+  const agentActionRateLimit = rateLimit({
+    windowMs: AGENT_ACTION_RATE_LIMIT_WINDOW_MS,
+    limit: AGENT_ACTION_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many Copilot actions. Please try again later." },
   });
 
   // Admin-triggered worker batches. These spend third-party quota and model
@@ -979,7 +997,13 @@ export function createApp(options: CreateAppOptions = {}) {
             // Generated per request and never cached; no-store keeps a shared
             // proxy from holding one candidate's answer.
             response.set("Cache-Control", "no-store");
-            response.status(200).json({ message: result.message, model: result.model });
+            response.status(200).json({
+              message: result.message,
+              model: result.model,
+              // INERT. Nothing here has run: each entry is a suggestion the
+              // drawer renders as a card with an Approve button and nothing else.
+              proposals: result.proposals,
+            });
             return;
           case "empty_reply":
             // 502 rather than 500: the request was well-formed and this server
@@ -993,6 +1017,71 @@ export function createApp(options: CreateAppOptions = {}) {
       } catch (error) {
         // resolveServiceClient / resolveOpenAIClient throw when their env is
         // unset — a 500 with the real reason beats a silent misconfiguration.
+        const message = error instanceof Error ? error.message : String(error);
+        response.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // R4 — executing an action a candidate has APPROVED.
+  //
+  // POST /api/agent/actions/execute
+  //
+  // A SEPARATE ROUTE FROM CHAT, ON PURPOSE. Chat is read-only and cheap to
+  // retry; this writes, so it carries its own tighter limit and its own audit
+  // entry, and nothing in a model's reply can reach it. A proposal existing is
+  // not sufficient to act: only this route acts, and only on a request that
+  // arrives from a human's click.
+  //
+  // THE BODY IS A HUMAN'S APPROVAL AND IS STILL NOT TRUSTED. The tool name is
+  // re-checked against the shared whitelist and the arguments are re-parsed by
+  // the tool itself; the candidate id comes from the verified token, never the
+  // body. A tampered approval can therefore only request an action the candidate
+  // could already have taken from the Opportunities page.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/agent/actions/execute",
+    requireAuth,
+    agentActionRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const parsed = parseAgentActionRequest(request.body ?? {});
+
+      if (!parsed.ok) {
+        response.status(400).json({ error: parsed.message });
+        return;
+      }
+
+      try {
+        const result = await executeAgentAction(resolveServiceClient(), {
+          candidateId: request.user!.id,
+          tool: parsed.tool,
+          args: parsed.args,
+        });
+
+        switch (result.kind) {
+          case "executed":
+            // Not cached: the result belongs to one candidate and reports a
+            // state that has just changed.
+            response.set("Cache-Control", "no-store");
+            response.status(200).json({
+              status: "executed",
+              tool: result.tool,
+              summary: result.summary,
+              detail: result.detail,
+            });
+            return;
+          case "invalid_request":
+          case "unknown_tool":
+            response.status(400).json({ error: result.message });
+            return;
+          case "failed":
+            response.status(500).json({ error: result.message });
+            return;
+        }
+      } catch (error) {
+        // resolveServiceClient throws when its env is unset — a 500 with the
+        // real reason beats a silent misconfiguration.
         const message = error instanceof Error ? error.message : String(error);
         response.status(500).json({ error: message });
       }

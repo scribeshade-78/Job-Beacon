@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { answerAgentChat, parseAgentChatRequest } from "./chat.js";
-import { AGENT_MAX_HISTORY_TURNS, AGENT_MAX_MESSAGE_CHARS } from "../../shared/agent.js";
+import {
+  AGENT_MAX_HISTORY_TURNS,
+  AGENT_MAX_MESSAGE_CHARS,
+  AGENT_MAX_TOOL_PROPOSALS,
+} from "../../shared/agent.js";
 
 function makeClient(tables: Record<string, unknown> = {}) {
   return {
@@ -118,7 +122,12 @@ describe("answerAgentChat", () => {
       messages: QUESTION,
     });
 
-    expect(result).toEqual({ kind: "success", message: "You have 2 plans.", model: "openai/gpt-4o-mini" });
+    expect(result).toEqual({
+      kind: "success",
+      message: "You have 2 plans.",
+      model: "openai/gpt-4o-mini",
+      proposals: [],
+    });
   });
 
   it("sends the candidate context and the transcript to the model", async () => {
@@ -205,5 +214,167 @@ describe("answerAgentChat", () => {
 
     expect(result).toEqual({ kind: "error", message: "PostgREST unreachable" });
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R4 — proposals from tool calls.
+// ---------------------------------------------------------------------------
+
+const VACANCY_ID = "11111111-1111-1111-1111-111111111111";
+
+/** A model that answers by calling a tool, optionally with prose alongside. */
+function makeToolCallingOpenAI(
+  calls: Array<{ id?: string; function: { name: string; arguments: string } }>,
+  content: string | null = null,
+) {
+  const create = vi.fn().mockResolvedValue({ choices: [{ message: { content, tool_calls: calls } }] });
+  return { client: { chat: { completions: { create } } } as never, create };
+}
+
+function toolCall(name: string, args: unknown, id = "call_1") {
+  return { id, function: { name, arguments: JSON.stringify(args) } };
+}
+
+const VACANCIES_TABLE = {
+  vacancies: [{ id: VACANCY_ID, raw_title: "Platform Engineer", companies: { displayed_name: "Acme" } }],
+};
+
+describe("answerAgentChat with tool calls", () => {
+  it("offers the implemented tools and lets the model choose", async () => {
+    const { client, create } = makeOpenAI();
+
+    await answerAgentChat(makeClient(), client, { candidateId: "user-123", messages: QUESTION });
+
+    const call = create.mock.calls[0][0] as { tools?: unknown[]; tool_choice?: string };
+
+    expect(Array.isArray(call.tools)).toBe(true);
+    expect(call.tools).toHaveLength(1);
+    expect(call.tool_choice).toBe("auto");
+  });
+
+  /**
+   * THE CENTRAL PROPERTY. A tool call produces a CARD, not an effect: the result
+   * carries a proposal and the queueing function is never invoked from here.
+   */
+  it("turns a tool call into an inert proposal built from the database", async () => {
+    const { client } = makeToolCallingOpenAI([
+      toolCall("queue_applications", { vacancyIds: [VACANCY_ID] }),
+    ]);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind).toBe("success");
+    expect(result.kind === "success" && result.proposals).toEqual([
+      {
+        tool: "queue_applications",
+        title: "Queue this application",
+        lines: ["Platform Engineer at Acme"],
+        confirmLabel: "Queue application",
+        arguments: { vacancyIds: [VACANCY_ID] },
+      },
+    ]);
+  });
+
+  it("returns cards with empty prose for a purely tool-calling turn", async () => {
+    const { client } = makeToolCallingOpenAI([
+      toolCall("queue_applications", { vacancyIds: [VACANCY_ID] }),
+    ]);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    // Empty is correct here, not a failure: the drawer renders the card.
+    expect(result.kind === "success" && result.message).toBe("");
+  });
+
+  it("keeps the model's prose alongside the card", async () => {
+    const { client } = makeToolCallingOpenAI(
+      [toolCall("queue_applications", { vacancyIds: [VACANCY_ID] })],
+      "Here is what I would queue.",
+    );
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.message).toBe("Here is what I would queue.");
+    expect(result.kind === "success" && result.proposals).toHaveLength(1);
+  });
+
+  /**
+   * The hallucination guard, at the chat layer: a proposal naming a vacancy that
+   * is not in JobBeacon must not become an Approve button.
+   */
+  it("drops a proposal naming a vacancy that does not exist", async () => {
+    const { client } = makeToolCallingOpenAI([
+      toolCall("queue_applications", { vacancyIds: ["99999999-9999-9999-9999-999999999999"] }),
+    ]);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.proposals).toEqual([]);
+    expect(result.kind === "success" && result.message).toContain("could not prepare that action");
+  });
+
+  it("drops a call to a tool that is not implemented", async () => {
+    const { client } = makeToolCallingOpenAI([
+      toolCall("send_follow_up_email", { draftId: "d1" }),
+    ]);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.proposals).toEqual([]);
+  });
+
+  it("drops a call whose arguments are not JSON", async () => {
+    const { client } = makeToolCallingOpenAI([
+      { id: "call_1", function: { name: "queue_applications", arguments: "not json at all" } },
+    ]);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.proposals).toEqual([]);
+  });
+
+  it("caps the cards returned in one reply", async () => {
+    const calls = Array.from({ length: AGENT_MAX_TOOL_PROPOSALS + 3 }, (_, index) => ({
+      id: "call_" + index,
+      function: { name: "queue_applications", arguments: JSON.stringify({ vacancyIds: [VACANCY_ID] }) },
+    }));
+    const { client } = makeToolCallingOpenAI(calls);
+
+    const result = await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.proposals).toHaveLength(AGENT_MAX_TOOL_PROPOSALS);
+  });
+
+  it("still reports an empty answer as empty_reply when there is no tool call", async () => {
+    const { client } = makeOpenAI("");
+
+    const result = await answerAgentChat(makeClient(), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind).toBe("empty_reply");
   });
 });

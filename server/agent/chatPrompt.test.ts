@@ -73,11 +73,12 @@ describe("buildAgentMessages", () => {
     const system = String(messages[0].content);
 
     expect(system).toContain("Never invent");
-    expect(system).toContain("You cannot take actions");
+    expect(system).toContain("You cannot take any action YOURSELF");
+    expect(system).toContain("never say or imply that something has been done");
   });
 
   it("carries a prompt version for later correlation", () => {
-    expect(AGENT_CHAT_PROMPT_VERSION).toBe("agent-chat-v1");
+    expect(AGENT_CHAT_PROMPT_VERSION).toBe("agent-chat-v2");
   });
 });
 
