@@ -144,13 +144,16 @@ function ProposalCard({
 
       {/* Server-built from the database, not from the model's words: these lines
           name the real destination and the information involved. */}
-      <ul className="mt-1.5 space-y-1">
+      {/* NO DECORATIVE GLYPH. A bullet at the content edge pushes its own text
+          ~14px right of every other line in the card (the eyebrow, the title and
+          the safety sentence all start at the card's content edge), which reads
+          as an accidental indent. As separate <li> lines with the card's own
+          spacing the jobs stay distinct AND align with the content above and
+          below. */}
+      <ul className="mt-1.5 space-y-1 text-sm text-slate-600">
         {item.proposal.lines.map((line, lineIndex) => (
-          <li key={lineIndex} className="flex gap-1.5 text-sm text-slate-600">
-            <span aria-hidden="true" className="text-blue-400">
-              •
-            </span>
-            <span className="min-w-0">{line}</span>
+          <li key={lineIndex} className="min-w-0">
+            {line}
           </li>
         ))}
       </ul>
@@ -495,8 +498,13 @@ export function CopilotDrawer() {
                   </div>
                 ) : (
                   <div key={entry.id} className="flex items-start gap-2">
+                    {/* OPTICAL, NOT BOX, ALIGNMENT. The bubble has 12px of top padding
+                        and a 20px line-height, so its first line of text is centred
+                        22px down; a 24px avatar flush with the bubble's top would sit
+                        ~10px high against the words it introduces. mt-2.5 is that
+                        10px, which puts the avatar's centre on the first line. */}
                     <span
-                      className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white"
+                      className="mt-2.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white"
                       aria-hidden="true"
                     >
                       <Sparkles className="h-3.5 w-3.5" />
@@ -595,7 +603,7 @@ export function CopilotDrawer() {
                   type="submit"
                   size="sm"
                   disabled={sending || input.trim() === ""}
-                  className="bg-blue-600 font-semibold text-white hover:bg-blue-700 active:bg-blue-800 disabled:bg-blue-300"
+                  className="bg-blue-600 font-semibold text-white hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-600"
                 >
                   <Send className="h-4 w-4" aria-hidden="true" />
                   Send
