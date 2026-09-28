@@ -168,7 +168,13 @@ export function AppShell({ email, onLogout, children, showModeratorLink, showAdm
           <span className="text-base font-semibold text-black lg:hidden">{APP_NAME}</span>
         </header>
 
-        <main className="mx-auto max-w-[1200px] p-6">{children}</main>
+        {/* pb-28 on mobile reserves room for the Copilot launcher, a fixed 56px
+            circle 24px off the bottom-right. Without it the launcher sits over
+            the last job card or application action on a short page, where there
+            is no further scroll to reveal what is underneath. At sm and up the
+            sidebar layout means it rarely overlaps content, so this returns to
+            the normal padding. */}
+        <main className="mx-auto max-w-[1200px] p-6 pb-28 sm:pb-6">{children}</main>
       </div>
 
       {/* AI Career Copilot. Rendered here rather than per page so the floating

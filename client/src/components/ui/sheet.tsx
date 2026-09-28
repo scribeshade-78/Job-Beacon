@@ -4,14 +4,20 @@ import { cn } from "../../lib/utils";
 
 /**
  * A right-hand slide-over, built on the same Radix Dialog primitive ui/dialog.tsx
- * uses so focus trapping, Escape-to-close, scroll locking and the aria-modal
- * wiring all come from one place rather than being re-implemented.
+ * uses so focus trapping, Escape-to-close, focus restoration to the trigger, and
+ * the aria-modal wiring all come from one place rather than being re-implemented.
+ *
+ * FULL WIDTH BELOW sm, A FIXED PANEL ABOVE IT. On a phone the drawer is the whole
+ * viewport, because a 440px panel on a 360px screen is a panel with a clipped
+ * composer; at sm and up it settles to 440px at the right edge.
+ *
+ * The bottom padding is the safe-area inset so the composer clears a home
+ * indicator rather than sitting under it.
  *
  * DELIBERATELY UNANIMATED. ui/dialog.tsx sets no enter/exit transition either,
  * and styles.css defines no keyframes to hang one on, so adding a slide
  * animation here would mean introducing an animation system for this one
- * surface. The panel appears at the edge it belongs to; that is the whole
- * difference from DialogContent.
+ * surface.
  */
 
 export const Sheet = DialogPrimitive.Root;
@@ -23,12 +29,13 @@ export const SheetContent = forwardRef<
   ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/40" />
+    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-slate-900/20 backdrop-blur-sm" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed inset-y-0 right-0 z-50 flex w-[calc(100%-2rem)] max-w-md flex-col",
-        "border-l border-ios-separator bg-ios-card shadow-card focus:outline-none",
+        "fixed inset-y-0 right-0 z-50 flex w-full flex-col sm:w-[440px]",
+        "border-l border-blue-100 bg-white text-slate-900 shadow-2xl focus:outline-none",
+        "pb-[env(safe-area-inset-bottom)]",
         className,
       )}
       {...props}
@@ -43,7 +50,11 @@ export const SheetTitle = forwardRef<
   ElementRef<typeof DialogPrimitive.Title>,
   ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
 >(({ className, ...props }, ref) => (
-  <DialogPrimitive.Title ref={ref} className={cn("text-base font-semibold text-black", className)} {...props} />
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn("text-base font-bold text-slate-900", className)}
+    {...props}
+  />
 ));
 SheetTitle.displayName = "SheetTitle";
 
@@ -53,7 +64,7 @@ export const SheetDescription = forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Description
     ref={ref}
-    className={cn("text-sm text-ios-text-secondary", className)}
+    className={cn("text-sm text-slate-500", className)}
     {...props}
   />
 ));

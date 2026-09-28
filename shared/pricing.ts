@@ -170,20 +170,3 @@ export const FEATURE_MATRIX: readonly FeatureRow[] = [
     values: { free: "—", starter: "—", pro: "—", power: "Owner only" },
   },
 ];
-
-/**
- * The checkout lock notice. Rendered verbatim on the Plans & Billing page, with
- * the plan name substituted for the candidate's actual plan — the sentence is
- * the same one at every tier, and checkout stays disabled regardless of which
- * plan is named.
- */
-export const CHECKOUT_LOCK_HEADLINE = "Checkout locked.";
-export const CHECKOUT_LOCK_PROVIDERS =
-  "Razorpay (IN) + Stripe (US/UK/EU) after certification only.";
-
-export function checkoutLockNotice(displayName: string = planByCode("power").displayName): string {
-  return CHECKOUT_LOCK_HEADLINE + " You are on " + displayName + ". " + CHECKOUT_LOCK_PROVIDERS;
-}
-
-/** The exact sentence from the specification, for copy that must not drift. */
-export const CHECKOUT_LOCK_NOTICE = checkoutLockNotice("Power");

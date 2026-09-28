@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { History, MessageCircle, Plus, Send, X } from "lucide-react";
+import { Link, useLocation } from "wouter";
+import { History, MessageCircle, Plus, Send, Sparkles, X } from "lucide-react";
 import {
   AGENT_MODEL_OPTIONS,
-  AGENT_QUICK_PROMPTS,
   DEFAULT_AGENT_MODEL,
   type AgentActionProposal,
   type AgentModelId,
@@ -19,6 +19,14 @@ import {
   subscribeAgentStore,
   toRequestMessages,
 } from "../lib/agentChat";
+import { listSelectedRoles } from "../lib/candidateSelectedRoles";
+import {
+  pageForPath,
+  suggestCopilotPrompts,
+  type CopilotSignals,
+  type CopilotSuggestion,
+} from "../lib/copilotPrompts";
+import { listExtractedFacts } from "../lib/resumeExtraction";
 import { cn } from "../lib/utils";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { Button } from "./ui/button";
@@ -29,28 +37,93 @@ import { Spinner } from "./ui/spinner";
  * AI Career Copilot — the candidate-facing drawer.
  *
  * MOUNTED IN AppShell, so the button is reachable from every candidate page and
- * the transcript survives navigation between them: the store is module-level
- * and the drawer only unmounts its sheet content, not its state. It is NOT
- * mounted on the moderator, admin or employer shells, which render bare and
- * belong to other personas.
+ * the transcript survives navigation between them: the store is module-level and
+ * the drawer only unmounts its sheet content, not its state. It is NOT mounted on
+ * the moderator, admin or employer shells, which render bare and belong to other
+ * personas.
  *
  * THE TRANSCRIPT IS CLIENT-HELD AND SESSION-ONLY. Nothing is written to the
- * database — the store in lib/agentChat.ts lives in memory and is gone on
- * reload — which matches the server's no-persistence stance: there is no stored
- * copy of what a candidate asked, on either side.
+ * database — the store in lib/agentChat.ts lives in memory and is gone on reload
+ * — which matches the server's no-persistence stance: there is no stored copy of
+ * what a candidate asked, on either side.
  *
  * HUMAN-IN-THE-LOOP IS STRUCTURAL HERE, NOT A CONVENTION. A model response can
  * only ever add cards to the transcript; the single call that changes anything
  * (requestAgentAction) appears in exactly one place in this file, inside an
- * onClick. There is no effect, no render path and no auto-run that reaches it,
- * so an action cannot happen because a card appeared — only because it was
- * pressed. A card that has been decided is rendered without buttons, so it
- * cannot be pressed twice.
+ * onClick. There is no effect, no render path and no auto-run that reaches it, so
+ * an action cannot happen because a card appeared — only because it was pressed.
+ * A card that has been decided is rendered without buttons, so it cannot be
+ * pressed twice.
  *
  * A FAILED SEND KEEPS THE QUESTION. Dropping the candidate's text on error would
  * make them retype it; instead the turn stays in the transcript and the error is
  * shown with the reason the server gave.
+ *
+ * SUGGESTED PROMPTS ARE CONDITIONAL AND HONEST. Which ones appear is decided by
+ * lib/copilotPrompts.ts from the current route and two readable facts — target
+ * roles and extracted resume facts — and a suggestion is either a question the
+ * assistant can actually answer from its injected context, or a prerequisite with
+ * a link to the page that resolves it. Nothing here fakes a working action.
  */
+
+function SuggestionPill({
+  label,
+  disabled,
+  onSend,
+}: {
+  label: string;
+  disabled: boolean;
+  onSend: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSend}
+      disabled={disabled}
+      className={cn(
+        "rounded-full border border-blue-200 bg-white px-3.5 py-1.5 text-xs font-medium text-blue-700",
+        "transition-colors hover:border-blue-600 hover:bg-blue-600 hover:text-white",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * A prompt the account cannot support yet, shown instead of a button that would
+ * fail. It states what is missing and links to where it is fixed; it is never
+ * sendable, so it can never produce an answer the assistant had no data for.
+ */
+function PrerequisitePill({
+  suggestion,
+  onNavigate,
+}: {
+  suggestion: CopilotSuggestion;
+  onNavigate: () => void;
+}) {
+  const prerequisite = suggestion.prerequisite;
+
+  if (!prerequisite) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-3">
+      <p className="text-xs font-semibold text-slate-700">{suggestion.label}</p>
+      <p className="mt-1 text-xs leading-relaxed text-slate-500">{prerequisite.message}</p>
+      <Link
+        href={prerequisite.href}
+        onClick={onNavigate}
+        className="mt-2 inline-block text-xs font-semibold text-blue-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+      >
+        {prerequisite.linkLabel}
+      </Link>
+    </div>
+  );
+}
 
 function ProposalCard({
   entryId,
@@ -64,27 +137,41 @@ function ProposalCard({
   onApprove: (entryId: string, index: number, proposal: AgentActionProposal) => void;
 }) {
   return (
-    <div className="mt-2 w-full rounded-card border border-ios-separator bg-ios-card p-3 text-left">
-      <p className="text-sm font-semibold text-black">{item.proposal.title}</p>
+    <div className="mt-2 w-full rounded-xl border border-blue-200 bg-blue-50/40 p-3.5 text-left">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-600">Proposed action</p>
 
-      <ul className="mt-1 list-disc pl-5 text-sm text-ios-text-secondary">
+      <p className="mt-1 text-sm font-semibold text-slate-900">{item.proposal.title}</p>
+
+      {/* Server-built from the database, not from the model's words: these lines
+          name the real destination and the information involved. */}
+      <ul className="mt-1.5 space-y-1">
         {item.proposal.lines.map((line, lineIndex) => (
-          <li key={lineIndex}>{line}</li>
+          <li key={lineIndex} className="flex gap-1.5 text-sm text-slate-600">
+            <span aria-hidden="true" className="text-blue-400">
+              •
+            </span>
+            <span className="min-w-0">{line}</span>
+          </li>
         ))}
       </ul>
 
       {item.state === "pending" && (
         <>
-          <p className="mt-2 text-xs text-ios-text-secondary">
+          <p className="mt-2.5 text-xs text-slate-500">
             Nothing has happened yet. This runs only if you approve it.
           </p>
-          <div className="mt-2 flex items-center gap-2">
-            <Button size="sm" onClick={() => onApprove(entryId, index, item.proposal)}>
+          <div className="mt-2.5 flex items-center gap-2">
+            <Button
+              size="sm"
+              className="bg-blue-600 font-semibold text-white hover:bg-blue-700 active:bg-blue-800"
+              onClick={() => onApprove(entryId, index, item.proposal)}
+            >
               {item.proposal.confirmLabel}
             </Button>
             <Button
               size="sm"
-              variant="secondary"
+              variant="ghost"
+              className="text-slate-500 hover:bg-slate-100 hover:text-slate-700"
               onClick={() => setProposalState(entryId, index, "dismissed")}
             >
               Dismiss
@@ -94,18 +181,20 @@ function ProposalCard({
       )}
 
       {item.state === "executing" && (
-        <p className="mt-2 flex items-center gap-2 text-sm text-ios-text-secondary">
+        <p className="mt-2.5 flex items-center gap-2 text-sm text-slate-500">
           <Spinner className="h-4 w-4" />
           Working…
         </p>
       )}
 
-      {item.state === "done" && <p className="mt-2 text-sm text-status-verified-fg">{item.message}</p>}
+      {item.state === "done" && (
+        <p className="mt-2.5 text-sm font-medium text-emerald-700">{item.message}</p>
+      )}
 
-      {item.state === "failed" && <p className="mt-2 text-sm text-status-blocked-fg">{item.message}</p>}
+      {item.state === "failed" && <p className="mt-2.5 text-sm text-red-600">{item.message}</p>}
 
       {item.state === "dismissed" && (
-        <p className="mt-2 text-sm text-ios-text-secondary">Dismissed. Nothing was run.</p>
+        <p className="mt-2.5 text-sm text-slate-500">Dismissed. Nothing was run.</p>
       )}
     </div>
   );
@@ -118,14 +207,22 @@ export function CopilotDrawer() {
   const [model, setModel] = useState<AgentModelId>(DEFAULT_AGENT_MODEL);
   const [sending, setSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [signals, setSignals] = useState<CopilotSignals | null>(null);
+  const [signalsAttempted, setSignalsAttempted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const [location] = useLocation();
 
   const snapshot = useSyncExternalStore(subscribeAgentStore, getAgentSnapshot);
   const active = snapshot.conversations.find((conversation) => conversation.id === snapshot.activeId) ?? null;
   const messageCount = active?.messages.length ?? 0;
 
-  // Keeps the newest turn in view. Keyed on the count and the pending flag, so
-  // it fires when a message arrives or the typing indicator appears.
+  const suggestions = suggestCopilotPrompts(pageForPath(location), signals);
+  const currentModelLabel =
+    AGENT_MODEL_OPTIONS.find((option) => option.id === model)?.label ?? DEFAULT_AGENT_MODEL;
+
+  // Keeps the newest turn in view. Keyed on the count and the pending flag, so it
+  // fires when a message arrives or the typing indicator appears.
   useEffect(() => {
     const element = scrollRef.current;
 
@@ -133,6 +230,44 @@ export function CopilotDrawer() {
       element.scrollTop = element.scrollHeight;
     }
   }, [messageCount, sending]);
+
+  /**
+   * Read the two facts the prompt selection depends on, ONCE, and only when the
+   * drawer is first opened.
+   *
+   * Not on mount: a candidate who never opens the Copilot should not pay for two
+   * queries on every page. Not on every open either, because neither fact changes
+   * while the page is loaded in a way the drawer needs to chase.
+   *
+   * A failure leaves `signals` null, which the prompt module reads as "unknown"
+   * and answers by claiming no prerequisite it cannot prove.
+   */
+  useEffect(() => {
+    if (!open || signalsAttempted) {
+      return;
+    }
+
+    setSignalsAttempted(true);
+
+    let cancelled = false;
+
+    void (async () => {
+      const client = getSupabaseBrowserClient();
+      const [roles, facts] = await Promise.all([listSelectedRoles(client), listExtractedFacts(client)]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (roles.kind === "success" && facts.kind === "success") {
+        setSignals({ targetRoleCount: roles.roles.length, extractedFactCount: facts.facts.length });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, signalsAttempted]);
 
   function openDrawer() {
     // A drawer with no conversation has nothing to type into, so the first open
@@ -181,8 +316,8 @@ export function CopilotDrawer() {
         return;
       }
 
-      // Read back through the store rather than closing over a stale copy, so
-      // the turn just appended is the one sent.
+      // Read back through the store rather than closing over a stale copy, so the
+      // turn just appended is the one sent.
       const result = await requestAgentChat(toRequestMessages(getActiveConversation()), token, { model });
 
       if (result.kind === "success") {
@@ -225,38 +360,63 @@ export function CopilotDrawer() {
         type="button"
         onClick={openDrawer}
         aria-label="Open Career Copilot"
-        className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-ios-blue-button text-white shadow-card transition-colors hover:bg-[#0055b0]"
+        className={cn(
+          "fixed right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full",
+          "bottom-[calc(1.5rem+env(safe-area-inset-bottom))]",
+          "bg-blue-600 text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2",
+        )}
       >
         <MessageCircle className="h-6 w-6" aria-hidden="true" />
       </button>
 
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetContent>
-          <div className="flex items-start justify-between gap-3 border-b border-ios-separator px-4 py-3">
-            <div className="min-w-0">
-              <SheetTitle>Career Copilot</SheetTitle>
-              <SheetDescription className="truncate">
-                Answers from your roles, confirmed facts, plans and fit scores.
-              </SheetDescription>
+          <div className="flex items-center justify-between gap-2 border-b border-blue-100 bg-white px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
+                <Sparkles className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div className="min-w-0">
+                <SheetTitle className="truncate">Career Copilot</SheetTitle>
+                <span className="mt-0.5 inline-block max-w-full truncate rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                  {currentModelLabel}
+                </span>
+                <SheetDescription className="sr-only">
+                  Ask about your job search. Answers use your target roles, confirmed facts, application plans
+                  and fit scores.
+                </SheetDescription>
+              </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
                 onClick={() => setShowHistory((current) => !current)}
                 aria-pressed={showHistory}
+                aria-label="History"
+                title="History"
+                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
               >
                 <History className="h-4 w-4" aria-hidden="true" />
-                History
-              </Button>
-              <Button variant="ghost" size="sm" onClick={beginNewChat}>
+                <span className="hidden sm:inline">History</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={beginNewChat}
+                aria-label="New Chat"
+                title="New Chat"
+                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              >
                 <Plus className="h-4 w-4" aria-hidden="true" />
-                New Chat
-              </Button>
+                <span className="hidden sm:inline">New Chat</span>
+              </button>
+
               <SheetClose
                 aria-label="Close"
-                className="flex h-9 w-9 items-center justify-center rounded-control text-ios-text-secondary hover:bg-ios-bg"
+                title="Close"
+                className="flex h-9 w-9 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
               >
                 <X className="h-5 w-5" aria-hidden="true" />
               </SheetClose>
@@ -264,12 +424,12 @@ export function CopilotDrawer() {
           </div>
 
           {showHistory && (
-            <div className="max-h-56 overflow-y-auto border-b border-ios-separator bg-ios-bg px-4 py-3">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ios-text-secondary">
+            <div className="max-h-56 overflow-y-auto border-b border-blue-100 bg-blue-50/40 px-4 py-3">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                 This session
               </p>
               {snapshot.conversations.length === 0 ? (
-                <p className="text-sm text-ios-text-secondary">No conversations yet.</p>
+                <p className="text-sm text-slate-500">No conversations yet.</p>
               ) : (
                 <ul className="space-y-1">
                   {snapshot.conversations.map((conversation) => (
@@ -282,10 +442,10 @@ export function CopilotDrawer() {
                         }}
                         aria-current={conversation.id === snapshot.activeId ? "true" : undefined}
                         className={cn(
-                          "w-full truncate rounded-control px-3 py-2 text-left text-sm",
+                          "w-full truncate rounded-control px-3 py-2 text-left text-sm transition-colors",
                           conversation.id === snapshot.activeId
-                            ? "bg-ios-blue/10 text-ios-blue"
-                            : "text-black hover:bg-ios-card",
+                            ? "bg-blue-600 text-white"
+                            : "text-slate-700 hover:bg-white",
                         )}
                       >
                         {conversation.title}
@@ -294,7 +454,7 @@ export function CopilotDrawer() {
                   ))}
                 </ul>
               )}
-              <p className="mt-2 text-xs text-ios-text-secondary">
+              <p className="mt-2 text-xs text-slate-500">
                 Conversations are kept for this page session only and are not saved.
               </p>
             </div>
@@ -302,59 +462,78 @@ export function CopilotDrawer() {
 
           {messageCount === 0 ? (
             <div className="flex-1 overflow-y-auto px-4 py-5">
-              <p className="text-sm text-ios-text-secondary">
+              <p className="text-sm text-slate-500">
                 Ask about your job search, or start with one of these.
               </p>
-              <div className="mt-4 flex flex-col gap-2">
-                {AGENT_QUICK_PROMPTS.map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    onClick={() => void send(prompt)}
-                    disabled={sending}
-                    className="rounded-control border border-ios-separator bg-ios-bg px-3 py-2.5 text-left text-sm text-black hover:bg-[#e8e8ed] disabled:opacity-50"
-                  >
-                    {prompt}
-                  </button>
-                ))}
+              <div className="mt-4 flex flex-wrap gap-2">
+                {suggestions.map((suggestion) =>
+                  suggestion.prompt === null ? (
+                    <PrerequisitePill
+                      key={suggestion.label}
+                      suggestion={suggestion}
+                      onNavigate={() => setOpen(false)}
+                    />
+                  ) : (
+                    <SuggestionPill
+                      key={suggestion.label}
+                      label={suggestion.label}
+                      disabled={sending}
+                      onSend={() => void send(suggestion.prompt ?? "")}
+                    />
+                  ),
+                )}
               </div>
             </div>
           ) : (
-            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-              {active?.messages.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={cn("flex flex-col", entry.role === "user" ? "items-end" : "items-start")}
-                >
-                  {entry.content.trim() !== "" && (
-                    <div
-                      className={cn(
-                        "max-w-[85%] whitespace-pre-wrap rounded-card px-3 py-2 text-sm",
-                        entry.role === "user" ? "bg-ios-blue-button text-white" : "bg-ios-bg text-black",
-                      )}
-                    >
+            <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+              {active?.messages.map((entry) =>
+                entry.role === "user" ? (
+                  <div key={entry.id} className="flex justify-end">
+                    <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-2.5 text-sm text-white shadow-sm">
                       {entry.content}
                     </div>
-                  )}
+                  </div>
+                ) : (
+                  <div key={entry.id} className="flex items-start gap-2">
+                    <span
+                      className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white"
+                      aria-hidden="true"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      {entry.content.trim() !== "" && (
+                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-slate-800">
+                          {entry.content}
+                        </div>
+                      )}
 
-                  {entry.proposals.map((item, index) => (
-                    <ProposalCard
-                      key={index}
-                      entryId={entry.id}
-                      index={index}
-                      item={item}
-                      onApprove={(proposalEntryId, proposalIndex, proposal) =>
-                        void approve(proposalEntryId, proposalIndex, proposal)
-                      }
-                    />
-                  ))}
-                </div>
-              ))}
+                      {entry.proposals.map((item, index) => (
+                        <ProposalCard
+                          key={index}
+                          entryId={entry.id}
+                          index={index}
+                          item={item}
+                          onApprove={(proposalEntryId, proposalIndex, proposal) =>
+                            void approve(proposalEntryId, proposalIndex, proposal)
+                          }
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ),
+              )}
 
               {sending && (
-                <div className="flex justify-start">
-                  <div className="rounded-card bg-ios-bg px-3 py-2">
-                    <Spinner className="h-4 w-4 text-ios-text-secondary" />
+                <div className="flex items-start gap-2">
+                  <span
+                    className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white"
+                    aria-hidden="true"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="rounded-2xl rounded-tl-sm border border-blue-100 bg-blue-50/60 px-4 py-3">
+                    <Spinner className="h-4 w-4 text-blue-600" />
                   </div>
                 </div>
               )}
@@ -362,7 +541,7 @@ export function CopilotDrawer() {
           )}
 
           {errorMessage && (
-            <p role="alert" className="border-t border-ios-separator bg-ios-bg px-4 py-2 text-sm text-status-blocked-fg">
+            <p role="alert" className="border-t border-blue-100 bg-red-50 px-4 py-2 text-sm text-red-600">
               {errorMessage}
             </p>
           )}
@@ -372,49 +551,56 @@ export function CopilotDrawer() {
               event.preventDefault();
               void send(input);
             }}
-            className="border-t border-ios-separator px-4 py-3"
+            className="border-t border-blue-100 bg-white px-4 py-3"
           >
-            <label htmlFor="copilot-input" className="sr-only">
-              Message the Career Copilot
-            </label>
-            <textarea
-              id="copilot-input"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                // Enter sends; Shift+Enter is a newline, the convention every
-                // chat composer uses.
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void send(input);
-                }
-              }}
-              rows={2}
-              placeholder="Ask about your job search…"
-              className="w-full resize-none rounded-control border border-ios-separator bg-ios-card px-3 py-2 text-sm text-black placeholder:text-ios-text-secondary focus:outline-none"
-            />
-
-            <div className="mt-2 flex items-center justify-between gap-2">
-              <label htmlFor="copilot-model" className="sr-only">
-                Model
+            <div className="rounded-2xl border border-blue-200 bg-white px-3 py-2 transition-colors focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-200">
+              <label htmlFor="copilot-input" className="sr-only">
+                Message the Career Copilot
               </label>
-              <select
-                id="copilot-model"
-                value={model}
-                onChange={(event) => setModel(event.target.value as AgentModelId)}
-                className="h-9 rounded-control border border-ios-separator bg-ios-card px-2 text-sm text-black"
-              >
-                {AGENT_MODEL_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              <textarea
+                id="copilot-input"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  // Enter sends; Shift+Enter is a newline, the convention every
+                  // chat composer uses.
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void send(input);
+                  }
+                }}
+                rows={2}
+                placeholder="Ask about your job search…"
+                className="w-full resize-none border-0 bg-transparent text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+              />
 
-              <Button type="submit" size="sm" disabled={sending || input.trim() === ""}>
-                <Send className="h-4 w-4" aria-hidden="true" />
-                Send
-              </Button>
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <label htmlFor="copilot-model" className="sr-only">
+                  Model
+                </label>
+                <select
+                  id="copilot-model"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value as AgentModelId)}
+                  className="h-7 rounded-full border border-blue-200 bg-white px-2 text-xs font-medium text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                >
+                  {AGENT_MODEL_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={sending || input.trim() === ""}
+                  className="bg-blue-600 font-semibold text-white hover:bg-blue-700 active:bg-blue-800 disabled:bg-blue-300"
+                >
+                  <Send className="h-4 w-4" aria-hidden="true" />
+                  Send
+                </Button>
+              </div>
             </div>
           </form>
         </SheetContent>
