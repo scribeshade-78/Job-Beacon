@@ -63,6 +63,15 @@ import {
   verifyStripeSignature,
 } from "./billing/stripe.js";
 import {
+  createRazorpayOrder,
+  fetchRazorpayOrder,
+  readRazorpayConfig,
+  verifyRazorpayCallbackSignature,
+  verifyRazorpayWebhookSignature,
+} from "./billing/razorpay.js";
+import { selectCandidatePlan } from "./billing/selectPlan.js";
+import { REGION_CURRENCY } from "../shared/pricing.js";
+import {
   applyCheckoutCompleted,
   applyProviderSubscriptionUpdate,
   cancelCandidateSubscription,
@@ -437,6 +446,106 @@ export function createApp(options: CreateAppOptions = {}) {
         const message = error instanceof Error ? error.message : String(error);
         console.error("[billing:webhook] handler failed", { error: message });
         // 500 so Stripe retries: this is our failure, not a bad event.
+        response.status(500).json({ error: "Failed to apply webhook event." });
+      }
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Razorpay webhook — SAME ORDERING CONSTRAINT AS THE STRIPE WEBHOOK ABOVE,
+  // AND FOR THE SAME REASON. Razorpay signs the raw bytes, so this must be
+  // registered with express.raw() before express.json() consumes the stream;
+  // after that the original bytes are gone and no signature can be checked.
+  //
+  // Unauthenticated by design: the signature IS the authentication, which is why
+  // an unconfigured webhook secret answers 503 rather than skipping the check.
+  //
+  // The handler resolves the candidate and plan from the ORDER'S OWN NOTES,
+  // which Razorpay copies onto the payment. Reconstructing them from the amount
+  // would mean inferring which of several same-priced plans was bought.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/billing/razorpay/webhook",
+    express.raw({ type: "application/json", limit: "1mb" }),
+    async (request, response) => {
+      const config = readRazorpayConfig();
+
+      if (!config || !config.webhookSecret) {
+        response.status(503).json({ error: "Razorpay webhook is not configured." });
+        return;
+      }
+
+      const raw = Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0);
+      const payload = raw.toString("utf8");
+
+      if (
+        !verifyRazorpayWebhookSignature(payload, request.header("x-razorpay-signature"), config.webhookSecret)
+      ) {
+        response.status(400).json({ error: "Invalid signature." });
+        return;
+      }
+
+      let event: { event?: unknown; payload?: { payment?: { entity?: Record<string, unknown> } } };
+
+      try {
+        event = JSON.parse(payload) as typeof event;
+      } catch {
+        response.status(400).json({ error: "Malformed event body." });
+        return;
+      }
+
+      // Razorpay's useful fields sit two levels down on the payment entity.
+      const payment = event.payload?.payment?.entity ?? {};
+      const notes = (payment.notes ?? {}) as Record<string, unknown>;
+
+      try {
+        if (event.event === "payment.captured" || event.event === "order.paid") {
+          const candidateId = typeof notes.candidate_id === "string" ? notes.candidate_id : null;
+          const planCode = typeof notes.plan_code === "string" ? notes.plan_code : null;
+          const region = typeof notes.region === "string" ? notes.region : null;
+          const currency = typeof notes.currency === "string" ? notes.currency : null;
+          const interval = notes.billing_interval === "year" ? "year" : "month";
+
+          if (!candidateId || !planCode || !region || !currency) {
+            // The order is ours, so a missing note is our gap rather than a
+            // hostile event. Acknowledged (200) so Razorpay stops retrying
+            // something this handler cannot ever apply.
+            console.error("[billing:razorpay-webhook] event carried no usable notes", { event: event.event });
+            response.status(200).json({ received: true, applied: false });
+            return;
+          }
+
+          const applied = await applyCheckoutCompleted(
+            options.serviceClient ?? createSupabaseServiceRoleClient(),
+            {
+              candidateId,
+              planCode,
+              provider: "razorpay",
+              providerCustomerId: typeof payment.customer_id === "string" ? payment.customer_id : null,
+              providerSubscriptionId: typeof payment.id === "string" ? payment.id : null,
+              region,
+              currency,
+              billingInterval: interval,
+              currentPeriodStart: new Date().toISOString(),
+              // No period end: Razorpay subscriptions are not modelled here yet,
+              // and a NULL end is the honest "unknown" rather than an invented
+              // renewal date that the cancellation path would then honour.
+              currentPeriodEnd: null,
+            },
+          );
+
+          response.status(200).json({ received: true, applied: applied.kind === "applied" });
+          return;
+        }
+
+        // Every other event is acknowledged and ignored. Razorpay retries on any
+        // non-2xx, so answering 400 for an event the product does not handle
+        // would produce a retry storm for correct behaviour.
+        response.status(200).json({ received: true, applied: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[billing:razorpay-webhook] handler failed", { error: message });
+        // 500 so Razorpay retries: this is our failure, not a bad event.
         response.status(500).json({ error: "Failed to apply webhook event." });
       }
     },
@@ -2180,7 +2289,20 @@ export function createApp(options: CreateAppOptions = {}) {
         evaluateEntitlements(client, request.user!.id),
       ]);
 
-      response.status(200).json({ subscription, entitlements });
+      // WHICH PROVIDERS ARE CONFIGURED rides along with the subscription, and it
+      // is deliberately a boolean rather than the key ids. The client needs to
+      // know whether to offer Checkout or the early-access fallback, and it must
+      // not be able to learn a secret from this response. The Razorpay key ID is
+      // returned by the order route instead, so rotating the key needs no
+      // rebuild and no redeploy of the client bundle.
+      response.status(200).json({
+        subscription,
+        entitlements,
+        providers: {
+          razorpayConfigured: readRazorpayConfig() !== null,
+          stripeConfigured: readStripeConfig() !== null,
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Billing subscription read failed:", message);
@@ -2327,6 +2449,319 @@ export function createApp(options: CreateAppOptions = {}) {
   // R8.1's "Users & Billing" section. Replaces a hardcoded mock; every figure
   // is computed from the tables above, and MRR is per currency because no
   // exchange-rate source exists to blend them.
+  // ---------------------------------------------------------------------------
+  // R5 — early-access plan selection.
+  //
+  // POST /api/billing/select-plan
+  //
+  // THE FALLBACK THAT CLOSES ITSELF. This grants a paid plan and takes no money.
+  // The guard below refuses whenever the region's real provider is configured —
+  // Razorpay for IN, Stripe for US/UK/EU — so the moment credentials are added
+  // this stops being an upgrade path and the UI sends the candidate to Checkout
+  // instead. The candidate id comes from the verified token, so it can only ever
+  // change the caller's own plan, and every activation is audited.
+  //
+  // See server/billing/selectPlan.ts for why this exists at all and what bounds
+  // it. It is a deliberate pre-launch decision, not an oversight.
+  // ---------------------------------------------------------------------------
+  app.post("/api/billing/select-plan", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
+    const region = body.region;
+
+    if (!planCode) {
+      response.status(400).json({ error: "planCode is required" });
+      return;
+    }
+
+    if (!isBillingRegion(region)) {
+      response.status(400).json({ error: "region must be one of " + BILLING_REGIONS.join(", ") });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+
+      // One provider per region: Razorpay is India-first, Stripe covers the rest.
+      const providerConfigured = region === "IN" ? readRazorpayConfig() !== null : readStripeConfig() !== null;
+
+      if (providerConfigured) {
+        response.status(409).json({
+          error: "Payments are configured for this region, so use checkout instead of selecting a plan directly.",
+        });
+        return;
+      }
+
+      const plans = await listPlans(client);
+      const plan = plans.find((entry) => entry.code === planCode && entry.isActive);
+
+      if (!plan) {
+        response.status(404).json({ error: "No such plan" });
+        return;
+      }
+
+      const result = await selectCandidatePlan(client, {
+        candidateId: request.user!.id,
+        planCode,
+        region,
+        currency: REGION_CURRENCY[region],
+      });
+
+      if (result.kind === "unknown_plan") {
+        response.status(404).json({ error: "No such plan" });
+        return;
+      }
+
+      if (result.kind === "failed") {
+        response.status(500).json({ error: result.message });
+        return;
+      }
+
+      await recordAuditEvent(client, {
+        actorId: request.user!.id,
+        actorRole: "candidate",
+        action: result.kind === "downgraded" ? "subscription.downgraded" : "subscription.activated_early_access",
+        entityType: "subscription",
+        entityId: result.kind === "activated" ? result.subscriptionId : null,
+        summary:
+          result.kind === "downgraded"
+            ? "Candidate moved themselves to the Free plan"
+            : "Candidate activated " + plan.displayName + " under early access with no charge taken",
+        newValues: { planCode, region, provider: result.kind === "downgraded" ? null : "manual" },
+      });
+
+      const [subscription, entitlements] = await Promise.all([
+        getCandidateSubscription(client, request.user!.id),
+        evaluateEntitlements(client, request.user!.id),
+      ]);
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({ subscription, entitlements });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Plan selection failed:", message);
+      response.status(500).json({ error: "Failed to select plan" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // R5 — Razorpay order creation (India / INR).
+  //
+  // POST /api/billing/razorpay/order
+  //
+  // THE ORDER CARRIES THE METADATA THE REST OF THE FLOW TRUSTS: the candidate id
+  // and the plan code go into the order's notes, and Razorpay copies notes onto
+  // the payment. Both the callback verifier and the webhook read the plan back
+  // out of the ORDER rather than from a request body, which is what stops a
+  // candidate paying for Starter and claiming Power.
+  //
+  // The key ID is returned HERE rather than baked into the client bundle as a
+  // VITE_ variable, so rotating the key needs no rebuild and no redeploy.
+  // ---------------------------------------------------------------------------
+  app.post("/api/billing/razorpay/order", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
+    const region = body.region;
+
+    if (!planCode) {
+      response.status(400).json({ error: "planCode is required" });
+      return;
+    }
+
+    if (!isBillingRegion(region)) {
+      response.status(400).json({ error: "region must be one of " + BILLING_REGIONS.join(", ") });
+      return;
+    }
+
+    if (region !== "IN") {
+      response.status(400).json({
+        error: "Razorpay handles India (INR) pricing. Use the checkout route for US, UK and EU.",
+      });
+      return;
+    }
+
+    const config = readRazorpayConfig();
+
+    if (!config) {
+      response.status(503).json({
+        error: "Razorpay is not configured yet. No Razorpay credentials are set on this deployment.",
+      });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      const plans = await listPlans(client);
+      const plan = plans.find((entry) => entry.code === planCode && entry.isActive);
+
+      if (!plan) {
+        response.status(404).json({ error: "No such plan" });
+        return;
+      }
+
+      const price = findActivePrice(plan, region, "month");
+
+      if (!price || price.amountMinor === null) {
+        response.status(409).json({ error: "This plan is not priced for that region yet." });
+        return;
+      }
+
+      // Checked on the AMOUNT rather than the plan code, so it holds for any
+      // future zero-priced plan: an order for 0 paise is either a broken checkout
+      // or a free upgrade that still takes a card.
+      if (price.amountMinor === 0) {
+        response.status(400).json({
+          error: "The Free plan costs nothing and needs no payment, so it cannot be ordered.",
+        });
+        return;
+      }
+
+      const result = await createRazorpayOrder(config, {
+        planCode: plan.code,
+        planDisplayName: plan.displayName,
+        amountMinor: price.amountMinor,
+        currency: price.currency,
+        region: price.region,
+        billingInterval: "month",
+        candidateId: request.user!.id,
+      });
+
+      if (result.kind === "not_configured") {
+        response.status(503).json({ error: "Razorpay is not configured yet." });
+        return;
+      }
+
+      if (result.kind === "error") {
+        response.status(502).json({ error: result.message });
+        return;
+      }
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({
+        orderId: result.orderId,
+        amountMinor: result.amountMinor,
+        currency: result.currency,
+        keyId: result.keyId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Razorpay order creation failed:", message);
+      response.status(500).json({ error: "Failed to start checkout" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // R5 — Razorpay checkout callback verification.
+  //
+  // POST /api/billing/razorpay/verify
+  //
+  // TWO CHECKS, AND BOTH MATTER:
+  //   1. The HMAC over "order_id|payment_id" proves the payment happened.
+  //   2. THE ORDER IS FETCHED BACK FROM RAZORPAY and the plan, region and
+  //      currency are read from ITS notes. The signature says nothing about
+  //      which plan was bought, so without this a candidate could pay for
+  //      Starter and then ask for Power with a perfectly valid signature. The
+  //      candidate id in those notes is compared to the verified caller, so one
+  //      account cannot claim another's paid order either.
+  //
+  // The request body therefore carries only the three Razorpay fields. Nothing
+  // the browser says about the plan is used.
+  // ---------------------------------------------------------------------------
+  app.post("/api/billing/razorpay/verify", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const orderId = typeof body.razorpay_order_id === "string" ? body.razorpay_order_id : "";
+    const paymentId = typeof body.razorpay_payment_id === "string" ? body.razorpay_payment_id : "";
+    const signature = typeof body.razorpay_signature === "string" ? body.razorpay_signature : "";
+
+    if (!orderId || !paymentId || !signature) {
+      response.status(400).json({
+        error: "razorpay_order_id, razorpay_payment_id and razorpay_signature are required",
+      });
+      return;
+    }
+
+    const config = readRazorpayConfig();
+
+    if (!config) {
+      response.status(503).json({ error: "Razorpay is not configured yet." });
+      return;
+    }
+
+    if (!verifyRazorpayCallbackSignature(orderId, paymentId, signature, config.keySecret)) {
+      response.status(400).json({ error: "Invalid payment signature." });
+      return;
+    }
+
+    try {
+      const client = resolveServiceClient();
+      const orderResult = await fetchRazorpayOrder(config, orderId);
+
+      if (orderResult.kind === "error") {
+        response.status(502).json({ error: orderResult.message });
+        return;
+      }
+
+      const notes = orderResult.order.notes;
+      const candidateId = notes.candidate_id ?? "";
+      const planCode = notes.plan_code ?? "";
+      const region = notes.region ?? "";
+      const currency = notes.currency ?? "";
+      const interval = notes.billing_interval === "year" ? "year" : "month";
+
+      if (candidateId !== request.user!.id) {
+        // 404, not 403: a 403 would confirm that the order id names a real order
+        // belonging to somebody else, turning this into an oracle for probing ids.
+        response.status(404).json({ error: "That order does not belong to this account." });
+        return;
+      }
+
+      if (!planCode || !isBillingRegion(region) || currency === "") {
+        response.status(409).json({ error: "That order is missing the details needed to activate a plan." });
+        return;
+      }
+
+      const applied = await applyCheckoutCompleted(client, {
+        candidateId,
+        planCode,
+        provider: "razorpay",
+        providerCustomerId: null,
+        providerSubscriptionId: paymentId,
+        region,
+        currency,
+        billingInterval: interval,
+        currentPeriodStart: new Date().toISOString(),
+        currentPeriodEnd: null,
+      });
+
+      if (applied.kind === "unknown_plan") {
+        response.status(404).json({ error: "No such plan" });
+        return;
+      }
+
+      await recordAuditEvent(client, {
+        actorId: request.user!.id,
+        actorRole: "candidate",
+        action: "subscription.activated",
+        entityType: "subscription",
+        entityId: applied.subscriptionId,
+        summary: "Activated " + planCode + " via Razorpay payment " + paymentId,
+        newValues: { planCode, region, currency, provider: "razorpay", orderId },
+      });
+
+      const [subscription, entitlements] = await Promise.all([
+        getCandidateSubscription(client, request.user!.id),
+        evaluateEntitlements(client, request.user!.id),
+      ]);
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({ subscription, entitlements });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Razorpay verification failed:", message);
+      response.status(500).json({ error: "Failed to verify payment" });
+    }
+  });
+
   app.get("/api/admin/billing", requireAuth, requireAdmin, async (_request, response) => {
     try {
       const billing = await getAdminBilling(resolveServiceClient());

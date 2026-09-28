@@ -1,56 +1,79 @@
 import { useEffect, useState } from "react";
-import { Lock } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { Check, ChevronDown, Minus, X } from "lucide-react";
 import { Button } from "../components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
+import {
+  createRazorpayOrder,
   getBillingSubscription,
-  type BillingRegion,
+  selectPlan,
+  startCheckout,
+  verifyRazorpayPayment,
+  type BillingProviders,
+  type EntitlementEvaluation,
   type EntitlementSummary,
 } from "../lib/billing";
+import {
+  REGION_SWITCHER_LABEL,
+  detectRegionFromBrowser,
+  regionalAutoApplyQuota,
+} from "../lib/region";
+import { openRazorpayCheckout } from "../lib/razorpayCheckout";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { cn } from "../lib/utils";
 import {
   BILLING_REGIONS,
   DEFAULT_PLAN_CODE,
   FEATURE_MATRIX,
   PLAN_CATALOGUE,
   REGION_CURRENCY,
-  REGION_OPTION_LABEL,
-  checkoutLockNotice,
   planByCode,
   planDisplayName,
+  type BillingRegion,
+  type FeatureCell,
   type PlanCode,
+  type PlanDefinition,
 } from "../../../shared/pricing";
 
 /**
- * Candidate-facing Plans & Billing.
+ * Candidate-facing Plans & Pricing.
  *
- * EVERY VALUE ON THIS PAGE COMES FROM shared/pricing.ts, which is the single
- * source of truth for the catalogue, and NOT from the API. That is deliberate:
- * a pricing page that renders "not priced yet" because a regional row is missing
- * is a pricing page nobody can sell from, and the catalogue cannot be missing a
- * row — every plan has a price in every region by construction, with 0 being a
- * real price for Free rather than an absence.
+ * EVERY NUMBER COMES FROM shared/pricing.ts, NOT FROM THE API. A pricing page
+ * that renders "not priced yet" because a regional row is missing cannot be sold
+ * from, and the catalogue has no such gap: every plan is priced in every region
+ * by construction, with 0 being a REAL price for Free rather than an absence.
+ * The server is asked only which plan the candidate is on.
  *
- * THE SERVER IS STILL ASKED ONE THING: /api/billing/subscription, so the page can
- * name the candidate's actual plan. It is asked only for that. Nothing here calls
- * the checkout route, because checkout is locked (see the notice) and a disabled
- * button that secretly fires a Stripe redirect would be worse than no button.
+ * THE REGION PILL CHANGES WHAT IS DISPLAYED, NEVER WHAT IS STORED. Switching it
+ * re-prices the cards and swaps which quota bullet is shown; it does not touch an
+ * existing subscription row. A candidate who bought Pro in India stays on Pro in
+ * India — re-pricing somebody because they switched a toggle would be a billing
+ * bug, and the region a subscription was bought in is a fact about that
+ * subscription, not a display preference.
  *
- * PER-DESTINATION USAGE IS NOT SHOWN, because it is not measured yet: the
- * entitlement RPC counts applications globally. The quotas are therefore rendered
- * as allowances, which is what the catalogue actually states, rather than as
- * "12 of 30 used" — a number the database cannot currently produce.
+ * TWO WAYS TO UPGRADE, CHOSEN BY THE SERVER'S CONFIGURATION:
+ *   1. The region's provider is configured — Razorpay for IN, Stripe for
+ *      US/UK/EU — so the CTA starts a real Checkout and the plan activates when
+ *      the payment is verified.
+ *   2. It is not, which is this deployment's state today, so the CTA activates
+ *      the plan directly under early access. The dialog says so in as many words:
+ *      it activates immediately and no charge is taken. That is a deliberate
+ *      pre-launch decision, and the copy is the honest part of it.
+ *
+ * The server decides which of the two applies by refusing select-plan with a 409
+ * once credentials exist, so this fallback closes itself.
  */
 
-async function getAccessToken(): Promise<string | null> {
-  const { data } = await getSupabaseBrowserClient().auth.getSession();
-  return data.session?.access_token ?? null;
-}
-
 /**
- * Prices are whole units by design, so the shared minor-units formatter's forced
- * two decimals ("₹499.00") is noise in a price table. maximumFractionDigits stays
- * at 2 so a future non-whole price still renders correctly.
+ * Prices are whole units by design, so forcing two decimals ("₹499.00") is noise
+ * in a price card. maximumFractionDigits stays at 2 so a future non-whole price
+ * still renders correctly.
  */
 function formatPrice(amountMinor: number, currency: string): string {
   return new Intl.NumberFormat(undefined, {
@@ -66,11 +89,199 @@ function planCodeOf(entitlements: EntitlementSummary | null): PlanCode | null {
   return code && PLAN_CATALOGUE.some((plan) => plan.code === code) ? (code as PlanCode) : null;
 }
 
+/** Which provider, if any, can take money in this region. Mirrors the server's own routing. */
+function providerForRegion(region: BillingRegion, providers: Partial<BillingProviders> | null): "razorpay" | "stripe" | null {
+  // One provider per region: Razorpay is India-first, Stripe covers the rest.
+  if (region === "IN") {
+    return providers?.razorpayConfigured ? "razorpay" : null;
+  }
+
+  return providers?.stripeConfigured ? "stripe" : null;
+}
+
+/**
+ * The card's selling points.
+ *
+ * ONE QUOTA BULLET, NOT TWO. The catalogue states the allowance per destination,
+ * so a reader is shown the number that applies where they are looking for work
+ * rather than a pair they have to compare. Capped at five: a pricing card is
+ * scanned, and the full grid lives in the comparison table.
+ */
+function highlightsFor(plan: PlanDefinition, region: BillingRegion): string[] {
+  const quota = regionalAutoApplyQuota(plan, region);
+  const verified = plan.verifiedApplicationsPerMonth;
+
+  switch (plan.code) {
+    case "free":
+      return [
+        "Search, tailor and track applications",
+        "Job feed and company dossiers",
+        "Reply drafts (limited)",
+        "No automated applying",
+      ];
+    case "starter":
+      return [
+        quota.amount + " " + quota.label,
+        verified + " verified applications / month",
+        "Gmail connect and reply drafts",
+        "Job feed and company dossiers",
+      ];
+    case "pro":
+      return [
+        quota.amount + " " + quota.label,
+        verified + " verified applications / month",
+        "Gmail connect and reply drafts",
+        "Auto-submit via Greenhouse",
+        "Job feed and company dossiers",
+      ];
+    case "power":
+      return [
+        quota.amount + " " + quota.label,
+        verified + " verified applications / month",
+        "Gmail connect and reply drafts",
+        "Auto-submit via Greenhouse",
+        "Owner Control",
+      ];
+  }
+}
+
+function findEvaluation(
+  entitlements: EntitlementSummary | null,
+  dimension: string,
+): EntitlementEvaluation | undefined {
+  return entitlements?.evaluations.find((entry) => entry.dimension === dimension);
+}
+
+/**
+ * "12 of 80 used" only when the database can actually produce the number.
+ *
+ * A count dimension with usage null is not zero — it is unmeasured, and a
+ * progress bar built on it would report a precise-looking lie. The allowance is
+ * still shown; the consumed figure is omitted.
+ */
+function usageLine(entitlements: EntitlementSummary | null, dimension: string, label: string): string | null {
+  const evaluation = findEvaluation(entitlements, dimension);
+
+  if (!evaluation || typeof evaluation.limit !== "number" || evaluation.limit <= 0) {
+    return null;
+  }
+
+  if (evaluation.usage === null || evaluation.remaining === null) {
+    return label + ": up to " + evaluation.limit + " / month";
+  }
+
+  return label + ": " + evaluation.usage + " of " + evaluation.limit + " used";
+}
+
+function FeatureCellView({ cell }: { cell: FeatureCell }) {
+  if (cell === "Yes") {
+    return <Check className="h-4 w-4 text-status-verified-fg" aria-label="Included" />;
+  }
+
+  if (cell === "No") {
+    return <X className="h-4 w-4 text-ios-text-secondary" aria-label="Not included" />;
+  }
+
+  if (cell === "—") {
+    return <Minus className="h-4 w-4 text-ios-text-secondary" aria-label="Not applicable" />;
+  }
+
+  // "Limited", "Quota" and "Owner only" carry meaning a tick cannot, so they stay
+  // words — but as a small label rather than a cell of prose.
+  return <span className="text-xs font-medium text-ios-text-secondary">{cell}</span>;
+}
+
+const UPGRADE_CTA_CLASSES =
+  "bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold cursor-pointer";
+
+function PlanCard({
+  plan,
+  region,
+  currency,
+  currentCode,
+  onSelect,
+}: {
+  plan: PlanDefinition;
+  region: BillingRegion;
+  currency: string;
+  currentCode: PlanCode;
+  onSelect: (plan: PlanDefinition) => void;
+}) {
+  const isCurrent = plan.code === currentCode;
+  const isPopular = plan.code === "pro";
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col rounded-card border bg-ios-card p-5 shadow-card",
+        isPopular ? "border-ios-blue ring-1 ring-ios-blue" : "border-ios-separator",
+      )}
+    >
+      {/* Fixed-height slot so plan names line up whether or not a card carries
+          the badge. */}
+      <div className="mb-3 flex h-6 items-center">
+        {isPopular && (
+          <span className="rounded-full bg-blue-600 px-2.5 py-0.5 text-xs font-semibold text-white">
+            Most Popular
+          </span>
+        )}
+      </div>
+
+      <h3 className="text-lg font-semibold text-black">{plan.displayName}</h3>
+      <p className="mt-1 min-h-[40px] text-sm text-ios-text-secondary">{plan.description}</p>
+
+      <p className="mt-4 flex items-baseline gap-1.5">
+        <span className="text-4xl font-bold tracking-tight text-black">
+          {formatPrice(plan.monthlyPriceMinor[region], currency)}
+        </span>
+        <span className="text-sm text-ios-text-secondary">/ month</span>
+      </p>
+
+      <ul className="mt-5 flex-1 space-y-2.5">
+        {highlightsFor(plan, region).map((highlight) => (
+          <li key={highlight} className="flex gap-2 text-sm text-black">
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-status-verified-fg" aria-hidden="true" />
+            <span>{highlight}</span>
+          </li>
+        ))}
+      </ul>
+
+      {isCurrent ? (
+        <Button className="mt-6 w-full" variant="secondary" disabled aria-label={plan.displayName + " is your current plan"}>
+          Current plan
+        </Button>
+      ) : (
+        <Button
+          className={cn("mt-6 w-full", UPGRADE_CTA_CLASSES)}
+          onClick={() => onSelect(plan)}
+          aria-label={
+            plan.code === "free" ? "Switch to the Free plan" : "Upgrade to " + plan.displayName
+          }
+        >
+          {plan.code === "free" ? "Get started" : "Upgrade to " + plan.displayName}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export function BillingPanel() {
-  const [region, setRegion] = useState<BillingRegion>("IN");
+  // Auto-detected on mount, then owned by the candidate. The pill is a display
+  // preference after that.
+  const [region, setRegion] = useState<BillingRegion>(() => detectRegionFromBrowser());
   const [entitlements, setEntitlements] = useState<EntitlementSummary | null>(null);
+  const [providers, setProviders] = useState<Partial<BillingProviders> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const [pendingPlan, setPendingPlan] = useState<PlanDefinition | null>(null);
+  const [working, setWorking] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  async function getAccessToken(): Promise<string | null> {
+    const { data } = await getSupabaseBrowserClient().auth.getSession();
+    return data.session?.access_token ?? null;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -91,9 +302,10 @@ export function BillingPanel() {
 
       if (result.kind === "success") {
         setEntitlements(result.data.entitlements);
+        setProviders(result.data.providers ?? null);
 
         // Open on the region this candidate is actually billed in, when they have
-        // a subscription. Default stays IN, matching the catalogue's own ordering.
+        // a subscription. Detection only decides the default.
         const subscription = result.data.subscription as { region?: unknown } | null;
         const billed = subscription?.region;
         if (typeof billed === "string" && (BILLING_REGIONS as readonly string[]).includes(billed)) {
@@ -113,196 +325,339 @@ export function BillingPanel() {
     };
   }, []);
 
-  const currentCode = planCodeOf(entitlements);
-  const currentPlan = planByCode(currentCode ?? DEFAULT_PLAN_CODE);
+  const currentCode = planCodeOf(entitlements) ?? DEFAULT_PLAN_CODE;
   const currentName = entitlements?.planDisplayName ?? planDisplayName(DEFAULT_PLAN_CODE);
   const currency = REGION_CURRENCY[region];
-  const lockNotice = checkoutLockNotice(currentName);
+
+  const activeProvider = providerForRegion(region, providers);
+  const pendingProvider = pendingPlan ? providerForRegion(region, providers) : null;
+
+  const verifiedLine = usageLine(entitlements, "verified_applications_per_month", "Verified applications");
+  const indiaLine = usageLine(entitlements, "auto_apply_india_per_month", "India auto-applies");
+  const usLine = usageLine(entitlements, "auto_apply_us_per_month", "US auto-applies");
+
+  function closeDialog() {
+    setPendingPlan(null);
+    setActionError(null);
+  }
+
+  async function applyEntitlements(payload: { entitlements: EntitlementSummary }) {
+    setEntitlements(payload.entitlements);
+  }
+
+  async function confirmSelection() {
+    if (!pendingPlan) return;
+
+    setWorking(true);
+    setActionError(null);
+
+    const accessToken = await getAccessToken();
+
+    if (!accessToken) {
+      setActionError("Your session has expired. Please sign in again.");
+      setWorking(false);
+      return;
+    }
+
+    const planCode = pendingPlan.code;
+
+    try {
+      // Free is a downgrade, not a purchase: it closes the live row.
+      if (planCode === "free") {
+        const result = await selectPlan({ planCode, region }, accessToken);
+
+        if (result.kind !== "success") {
+          setActionError(result.kind === "error" ? result.message : "Could not switch to Free.");
+          return;
+        }
+
+        await applyEntitlements(result.data);
+        closeDialog();
+        return;
+      }
+
+      if (activeProvider === "razorpay") {
+        const order = await createRazorpayOrder({ planCode, region }, accessToken);
+
+        if (order.kind !== "success") {
+          setActionError(order.kind === "error" ? order.message : "Could not start the payment.");
+          return;
+        }
+
+        const outcome = await openRazorpayCheckout({
+          keyId: order.data.keyId,
+          orderId: order.data.orderId,
+          amountMinor: order.data.amountMinor,
+          currency: order.data.currency,
+          planName: pendingPlan.displayName,
+        });
+
+        if (outcome.kind === "dismissed") {
+          // Cancelling is not an error, so nothing is shown.
+          return;
+        }
+
+        if (outcome.kind === "unavailable") {
+          setActionError(outcome.message);
+          return;
+        }
+
+        // The server verifies the signature AND reads the plan back out of the
+        // order, so nothing about the purchase is taken from this browser.
+        const verified = await verifyRazorpayPayment(
+          {
+            razorpay_order_id: outcome.orderId,
+            razorpay_payment_id: outcome.paymentId,
+            razorpay_signature: outcome.signature,
+          },
+          accessToken,
+        );
+
+        if (verified.kind !== "success") {
+          setActionError(
+            verified.kind === "error"
+              ? verified.message
+              : "The payment could not be verified. If you were charged, contact support.",
+          );
+          return;
+        }
+
+        await applyEntitlements(verified.data);
+        closeDialog();
+        return;
+      }
+
+      if (activeProvider === "stripe") {
+        const result = await startCheckout({ planCode, region, billingInterval: "month" }, accessToken);
+
+        if (result.kind !== "success") {
+          setActionError(result.kind === "error" ? result.message : "Could not start checkout.");
+          return;
+        }
+
+        // Stripe owns the payment page from here.
+        window.location.href = result.data.url;
+        return;
+      }
+
+      // No provider configured for this region: the early-access path.
+      const result = await selectPlan({ planCode, region }, accessToken);
+
+      if (result.kind !== "success") {
+        setActionError(result.kind === "error" ? result.message : "Could not activate that plan.");
+        return;
+      }
+
+      await applyEntitlements(result.data);
+      closeDialog();
+    } finally {
+      setWorking(false);
+    }
+  }
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Plans &amp; billing</CardTitle>
-          <CardDescription>
-            Four plans, priced per region. Every price below is the catalogue figure, and the
-            region switcher changes both the currency and the amount.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Verbatim: headline, the plan the candidate is on, then the provider policy. */}
-          <p
-            role="status"
-            className="flex items-start gap-2 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black"
-          >
-            <Lock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <span>{lockNotice}</span>
-          </p>
-
-          {error && (
-            <p role="alert" className="text-sm text-status-blocked-fg">
-              {error}
-            </p>
+    <div className="space-y-8">
+      {/* Compact status bar: the plan and its quotas, one line, no prose. */}
+      <section
+        aria-label="Your plan"
+        className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-card border border-ios-separator bg-ios-card px-4 py-3 text-sm shadow-card"
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-ios-text-secondary">Your plan</span>
+          <span className="rounded-full bg-ios-blue/10 px-2.5 py-0.5 text-xs font-semibold text-ios-blue">
+            {loading ? "…" : currentName}
+          </span>
+          {entitlements && !entitlements.hasLiveSubscription && (
+            <span className="text-xs text-ios-text-secondary">Free allowance</span>
           )}
-          {loading && !error && <p className="text-sm text-ios-text-secondary">Loading…</p>}
+        </span>
 
+        {!entitlements && error && <span className="text-xs text-status-blocked-fg">{error}</span>}
+
+        {entitlements && (
+          <>
+            {verifiedLine && <span className="text-ios-text-secondary">{verifiedLine}</span>}
+            {region === "IN"
+              ? indiaLine && <span className="text-ios-text-secondary">{indiaLine}</span>
+              : usLine && <span className="text-ios-text-secondary">{usLine}</span>}
+          </>
+        )}
+      </section>
+
+      {/* Heading and the region pill. */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="text-sm font-medium text-black">Your plan</p>
-            <p className="text-sm text-ios-text-secondary">
-              {currentName} — {currentPlan.autoApplyPerMonth.india} auto-applies a month for India
-              jobs and {currentPlan.autoApplyPerMonth.us} for US jobs.
-              {entitlements && !entitlements.hasLiveSubscription
-                ? " No paid subscription on file, so the Free allowance applies."
-                : ""}
+            <h2 className="text-2xl font-bold tracking-tight text-black">Plans &amp; pricing</h2>
+            <p className="mt-1 text-sm text-ios-text-secondary">
+              Simple monthly pricing. Change or cancel any time.
             </p>
           </div>
 
-          <div>
-            <p className="mb-2 text-sm font-medium text-black">Region</p>
-            <div role="group" aria-label="Billing region" className="flex flex-wrap gap-2">
-              {BILLING_REGIONS.map((candidate) => (
-                <Button
-                  key={candidate}
-                  size="sm"
-                  variant={candidate === region ? "primary" : "secondary"}
-                  aria-pressed={candidate === region}
-                  onClick={() => setRegion(candidate)}
-                >
-                  {REGION_OPTION_LABEL[candidate]}
-                </Button>
-              ))}
-            </div>
+          <div
+            role="group"
+            aria-label="Billing region"
+            className="inline-flex flex-wrap gap-1 rounded-full border border-ios-separator bg-ios-card p-1 shadow-card"
+          >
+            {BILLING_REGIONS.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                aria-pressed={candidate === region}
+                onClick={() => setRegion(candidate)}
+                className={cn(
+                  "cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
+                  candidate === region
+                    ? "bg-blue-600 text-white"
+                    : "text-ios-text-secondary hover:bg-ios-bg",
+                )}
+              >
+                {REGION_SWITCHER_LABEL[candidate]}
+              </button>
+            ))}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Monthly price</CardTitle>
-          <CardDescription>
-            Per month, in {currency}, for {REGION_OPTION_LABEL[region]}.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[460px] border-collapse text-left">
-              <thead>
-                <tr className="border-b border-ios-separator text-xs uppercase tracking-wide text-ios-text-secondary">
-                  <th className="py-2 pr-4 font-medium">Plan</th>
-                  <th className="py-2 pr-4 font-medium">Price / month</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 pr-4 font-medium" aria-label="Action" />
-                </tr>
-              </thead>
-              <tbody>
-                {PLAN_CATALOGUE.map((plan) => {
-                  const isCurrent = plan.code === currentPlan.code;
-                  return (
-                    <tr key={plan.code} className="border-b border-ios-separator">
-                      <td className="py-2 pr-4 text-sm text-black">
-                        {plan.displayName}
-                        <span className="block text-xs text-ios-text-secondary">{plan.description}</span>
-                      </td>
-                      <td className="py-2 pr-4 font-mono text-sm text-black">
-                        {formatPrice(plan.monthlyPriceMinor[region], currency)}
-                      </td>
-                      <td className="py-2 pr-4 text-xs text-ios-text-secondary">
-                        {isCurrent ? "Your plan" : "—"}
-                      </td>
-                      <td className="py-2 pr-4">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled
-                          title="Checkout is locked — see the notice above."
-                          aria-label={
-                            isCurrent ? plan.displayName + " is your current plan" : "Checkout locked"
-                          }
-                        >
-                          {isCurrent ? "Current plan" : plan.code === "free" ? "Free tier" : "Upgrade"}
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+      <section aria-label="Plans" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {PLAN_CATALOGUE.map((plan) => (
+          <PlanCard
+            key={plan.code}
+            plan={plan}
+            region={region}
+            currency={currency}
+            currentCode={currentCode}
+            onSelect={(selected) => {
+              setActionError(null);
+              setPendingPlan(selected);
+            }}
+          />
+        ))}
+      </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Auto-apply per month</CardTitle>
-          <CardDescription>
-            By where the job is, not where you are. An unused India allowance does not become US
-            allowance.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[420px] border-collapse text-left">
-              <thead>
-                <tr className="border-b border-ios-separator text-xs uppercase tracking-wide text-ios-text-secondary">
-                  <th className="py-2 pr-4 font-medium">Plan</th>
-                  <th className="py-2 pr-4 font-medium">India jobs</th>
-                  <th className="py-2 pr-4 font-medium">US jobs</th>
-                </tr>
-              </thead>
-              <tbody>
+      {/* The detail, folded away so it does not compete with the cards. */}
+      <details className="group rounded-card border border-ios-separator bg-ios-card shadow-card">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold text-black">
+          Compare all features
+          <ChevronDown
+            className="h-4 w-4 shrink-0 text-ios-text-secondary transition-transform group-open:rotate-180"
+            aria-hidden="true"
+          />
+        </summary>
+
+        <div className="overflow-x-auto border-t border-ios-separator px-5 py-4">
+          <table className="w-full min-w-[560px] border-collapse text-left">
+            <thead>
+              <tr className="text-xs uppercase tracking-wide text-ios-text-secondary">
+                <th scope="col" className="pb-3 pr-4 font-medium">
+                  Feature
+                </th>
                 {PLAN_CATALOGUE.map((plan) => (
-                  <tr key={plan.code} className="border-b border-ios-separator">
-                    <td className="py-2 pr-4 text-sm text-black">{plan.displayName}</td>
-                    <td className="py-2 pr-4 font-mono text-sm text-black">
-                      {plan.autoApplyPerMonth.india}
-                    </td>
-                    <td className="py-2 pr-4 font-mono text-sm text-black">
-                      {plan.autoApplyPerMonth.us}
-                    </td>
-                  </tr>
+                  <th key={plan.code} scope="col" className="pb-3 pr-4 font-medium">
+                    {plan.displayName}
+                  </th>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Features</CardTitle>
-          <CardDescription>
-            Rendered from the catalogue, so the table and the plans cannot disagree.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] border-collapse text-left">
-              <thead>
-                <tr className="border-b border-ios-separator text-xs uppercase tracking-wide text-ios-text-secondary">
-                  <th className="py-2 pr-4 font-medium">Feature</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FEATURE_MATRIX.map((row) => (
+                <tr key={row.feature} className="border-t border-ios-separator">
+                  <th scope="row" className="py-3 pr-4 text-sm font-normal text-black">
+                    {row.feature}
+                  </th>
                   {PLAN_CATALOGUE.map((plan) => (
-                    <th key={plan.code} className="py-2 pr-4 font-medium">
-                      {plan.displayName}
-                    </th>
+                    <td key={plan.code} className="py-3 pr-4">
+                      <FeatureCellView cell={row.values[plan.code]} />
+                    </td>
                   ))}
                 </tr>
-              </thead>
-              <tbody>
-                {FEATURE_MATRIX.map((row) => (
-                  <tr key={row.feature} className="border-b border-ios-separator">
-                    <td className="py-2 pr-4 text-sm text-black">{row.feature}</td>
-                    {PLAN_CATALOGUE.map((plan) => (
-                      <td key={plan.code} className="py-2 pr-4 text-sm text-ios-text-secondary">
-                        {row.values[plan.code]}
-                      </td>
-                    ))}
-                  </tr>
+              ))}
+              {/* The regional quota is the one row that differs by region, so it
+                  is shown here rather than in a second table. */}
+              <tr className="border-t border-ios-separator">
+                <th scope="row" className="py-3 pr-4 text-sm font-normal text-black">
+                  Auto-applies / month ({region})
+                </th>
+                {PLAN_CATALOGUE.map((plan) => (
+                  <td key={plan.code} className="py-3 pr-4 text-sm text-black">
+                    {regionalAutoApplyQuota(plan, region).amount}
+                  </td>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <Dialog
+        open={pendingPlan !== null}
+        onOpenChange={(next) => {
+          if (!next) closeDialog();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {pendingPlan?.code === "free"
+                ? "Switch to the Free plan?"
+                : "Upgrade to " + (pendingPlan?.displayName ?? "") + "?"}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingPlan && pendingPlan.code !== "free" ? (
+                <>
+                  {pendingPlan.displayName} · {REGION_SWITCHER_LABEL[region]} ·{" "}
+                  {formatPrice(pendingPlan.monthlyPriceMinor[region], currency)} / month
+                </>
+              ) : (
+                "You will keep read access to everything you have created."
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {pendingPlan && pendingPlan.code !== "free" && (
+            <p className="text-sm text-black">
+              {pendingProvider === "razorpay" || pendingProvider === "stripe" ? (
+                <>
+                  You will be taken to {pendingProvider === "razorpay" ? "Razorpay" : "Stripe"} to pay{" "}
+                  {formatPrice(pendingPlan.monthlyPriceMinor[region], currency)}. Your plan activates once
+                  the payment is verified.
+                </>
+              ) : (
+                <>
+                  <strong>Early access:</strong> card payments are not configured for this region yet, so
+                  this activates immediately and <strong>no charge is taken today</strong>. You can change
+                  or cancel it at any time.
+                </>
+              )}
+            </p>
+          )}
+
+          {actionError && (
+            <p role="alert" className="mt-3 text-sm text-status-blocked-fg">
+              {actionError}
+            </p>
+          )}
+
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeDialog} disabled={working}>
+              Cancel
+            </Button>
+            <Button
+              className={UPGRADE_CTA_CLASSES}
+              onClick={() => void confirmSelection()}
+              disabled={working}
+            >
+              {working
+                ? "Working…"
+                : pendingPlan?.code === "free"
+                  ? "Switch to Free"
+                  : pendingProvider === "razorpay" || pendingProvider === "stripe"
+                    ? "Continue to payment"
+                    : "Activate now — no charge"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

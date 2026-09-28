@@ -171,11 +171,86 @@ export function getBillingPlans(accessToken: string, fetchImpl: typeof fetch = f
   return request<{ plans: BillingPlan[] }>("/api/billing/plans", accessToken, { method: "GET" }, fetchImpl);
 }
 
+/**
+ * Whether the server holds credentials for a region's payment provider.
+ *
+ * Booleans, never key ids: the client only needs to choose between Checkout and
+ * the early-access fallback, and it must not be able to read a secret from this
+ * response. The Razorpay key ID arrives with the order instead.
+ *
+ * Both are optional in the type because a cached or older response may predate
+ * the field, and the UI must treat "unknown" as "not configured" rather than
+ * offering a Checkout that would 503.
+ */
+export interface BillingProviders {
+  razorpayConfigured: boolean;
+  stripeConfigured: boolean;
+}
+
+export interface BillingSubscriptionPayload {
+  subscription: unknown;
+  entitlements: EntitlementSummary;
+  providers?: Partial<BillingProviders>;
+}
+
 export function getBillingSubscription(accessToken: string, fetchImpl: typeof fetch = fetch) {
-  return request<{ subscription: unknown; entitlements: EntitlementSummary }>(
+  return request<BillingSubscriptionPayload>(
     "/api/billing/subscription",
     accessToken,
     { method: "GET" },
+    fetchImpl,
+  );
+}
+
+/**
+ * The early-access switch: activates a plan with no payment, or moves the
+ * candidate to Free. Only reachable while the region's provider is unconfigured —
+ * the server refuses with 409 once credentials exist.
+ */
+export function selectPlan(
+  input: { planCode: string; region: BillingRegion },
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  return request<{ subscription: unknown; entitlements: EntitlementSummary }>(
+    "/api/billing/select-plan",
+    accessToken,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
+    fetchImpl,
+  );
+}
+
+export interface RazorpayOrderPayload {
+  orderId: string;
+  amountMinor: number;
+  currency: string;
+  /** The PUBLISHABLE key id. Returned per order so a key rotation needs no rebuild. */
+  keyId: string;
+}
+
+export function createRazorpayOrder(
+  input: { planCode: string; region: BillingRegion },
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  return request<RazorpayOrderPayload>(
+    "/api/billing/razorpay/order",
+    accessToken,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
+    fetchImpl,
+  );
+}
+
+/** Sends the checkout callback for server-side signature verification. The plan is NOT sent — the server reads it from the order. */
+export function verifyRazorpayPayment(
+  input: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string },
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+) {
+  return request<{ subscription: unknown; entitlements: EntitlementSummary }>(
+    "/api/billing/razorpay/verify",
+    accessToken,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
     fetchImpl,
   );
 }
