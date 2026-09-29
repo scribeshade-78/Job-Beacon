@@ -22,7 +22,6 @@ import {
 import {
   REGION_SWITCHER_LABEL,
   detectRegionFromBrowser,
-  regionalAutoApplyQuota,
 } from "../lib/region";
 import { openRazorpayCheckout } from "../lib/razorpayCheckout";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
@@ -102,13 +101,20 @@ function providerForRegion(region: BillingRegion, providers: Partial<BillingProv
 /**
  * The card's selling points.
  *
- * ONE QUOTA BULLET, NOT TWO. The catalogue states the allowance per destination,
- * so a reader is shown the number that applies where they are looking for work
- * rather than a pair they have to compare. Capped at five: a pricing card is
- * scanned, and the full grid lives in the comparison table.
+ * NO AUTO-APPLY BULLET, AND NO "No automated applying" ON FREE EITHER.
+ *
+ * The monthly auto-apply figures were removed because no plan can consume them:
+ * submitting an application needs a source whose policy allows automated
+ * application AND an adapter registered for it, and no source holding vacancies
+ * has both. Showing "30 auto-applies / month" sold a capability that did not
+ * exist.
+ *
+ * Free's old bullet ("No automated applying") had the same defect from the other
+ * direction: listing it only on Free implies the paid tiers DO have automated
+ * applying. They do not. The truthful statement is the same at every tier, so it
+ * is made once, in the panel notice below, rather than as a per-plan contrast.
  */
-function highlightsFor(plan: PlanDefinition, region: BillingRegion): string[] {
-  const quota = regionalAutoApplyQuota(plan, region);
+function highlightsFor(plan: PlanDefinition): string[] {
   const verified = plan.verifiedApplicationsPerMonth;
 
   switch (plan.code) {
@@ -117,29 +123,23 @@ function highlightsFor(plan: PlanDefinition, region: BillingRegion): string[] {
         "Search, tailor and track applications",
         "Job feed and company dossiers",
         "Reply drafts (limited)",
-        "No automated applying",
       ];
     case "starter":
       return [
-        quota.amount + " " + quota.label,
         verified + " verified applications / month",
         "Gmail connect and reply drafts",
         "Job feed and company dossiers",
       ];
     case "pro":
       return [
-        quota.amount + " " + quota.label,
         verified + " verified applications / month",
         "Gmail connect and reply drafts",
-        "Auto-submit via Greenhouse",
         "Job feed and company dossiers",
       ];
     case "power":
       return [
-        quota.amount + " " + quota.label,
         verified + " verified applications / month",
         "Gmail connect and reply drafts",
-        "Auto-submit via Greenhouse",
         "Owner Control",
       ];
   }
@@ -238,7 +238,7 @@ function PlanCard({
       </p>
 
       <ul className="mt-5 flex-1 space-y-2.5">
-        {highlightsFor(plan, region).map((highlight) => (
+        {highlightsFor(plan).map((highlight) => (
           <li key={highlight} className="flex gap-2 text-sm text-black">
             <Check className="mt-0.5 h-4 w-4 shrink-0 text-status-verified-fg" aria-hidden="true" />
             <span>{highlight}</span>
@@ -333,8 +333,12 @@ export function BillingPanel() {
   const pendingProvider = pendingPlan ? providerForRegion(region, providers) : null;
 
   const verifiedLine = usageLine(entitlements, "verified_applications_per_month", "Verified applications");
-  const indiaLine = usageLine(entitlements, "auto_apply_india_per_month", "India auto-applies");
-  const usLine = usageLine(entitlements, "auto_apply_us_per_month", "US auto-applies");
+
+  // NO AUTO-APPLY USAGE LINE. This status bar used to report the candidate's
+  // monthly auto-apply allowance and how much of it was consumed, per region.
+  // Nothing can consume it — see highlightsFor above — so it was a live,
+  // per-account claim that the product would apply for jobs on their behalf.
+  // verifiedLine stays: verified applications is a separate dimension.
 
   function closeDialog() {
     setPendingPlan(null);
@@ -477,9 +481,6 @@ export function BillingPanel() {
         {entitlements && (
           <>
             {verifiedLine && <span className="text-ios-text-secondary">{verifiedLine}</span>}
-            {region === "IN"
-              ? indiaLine && <span className="text-ios-text-secondary">{indiaLine}</span>
-              : usLine && <span className="text-ios-text-secondary">{usLine}</span>}
           </>
         )}
       </section>
@@ -518,6 +519,22 @@ export function BillingPanel() {
           </div>
         </div>
       </section>
+
+      {/* STATED ONCE, FOR EVERY TIER, RATHER THAN AS A PER-PLAN CONTRAST.
+          Automated application is not available at any price yet — it needs a
+          job source that both permits automated application and has an adapter
+          for it, and no source with vacancies has both. Saying it here keeps the
+          pricing cards describing what a candidate can actually do today, and
+          removes the implication that a higher tier unlocks submission. */}
+      <p
+        role="note"
+        className="rounded-control border border-ios-separator bg-ios-bg px-4 py-3 text-sm text-ios-text-secondary"
+      >
+        <span className="font-medium text-black">Automatic application isn’t available yet.</span>{" "}
+        You can search, tailor and track applications on every plan, and open each job’s original
+        posting to apply. We’ll state the allowance clearly here once automatic submission is live
+        for a supported employer.
+      </p>
 
       <section aria-label="Plans" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {PLAN_CATALOGUE.map((plan) => (
@@ -572,18 +589,6 @@ export function BillingPanel() {
                   ))}
                 </tr>
               ))}
-              {/* The regional quota is the one row that differs by region, so it
-                  is shown here rather than in a second table. */}
-              <tr className="border-t border-ios-separator">
-                <th scope="row" className="py-3 pr-4 text-sm font-normal text-black">
-                  Auto-applies / month ({region})
-                </th>
-                {PLAN_CATALOGUE.map((plan) => (
-                  <td key={plan.code} className="py-3 pr-4 text-sm text-black">
-                    {regionalAutoApplyQuota(plan, region).amount}
-                  </td>
-                ))}
-              </tr>
             </tbody>
           </table>
         </div>

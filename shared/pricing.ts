@@ -93,7 +93,11 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
   {
     code: "pro",
     displayName: "Pro",
-    description: "Full autonomous discovery and application for an active search.",
+    // NOT "...and application". No plan can submit an application today: that
+    // needs a source whose policy allows automated application AND an adapter
+    // for it, and no source with vacancies has both. Advertising application as
+    // a paid feature was untrue at every tier.
+    description: "Full autonomous discovery for an active search.",
     tierRank: 3,
     monthlyPriceMinor: { IN: 99900, US: 3900, UK: 2500, EU: 3200 },
     autoApplyPerMonth: { india: 100, us: 300 },
@@ -103,7 +107,7 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
   {
     code: "power",
     displayName: "Power",
-    description: "Highest allowance, for a candidate applying at volume.",
+    description: "Highest allowance, for a candidate running a search at volume.",
     tierRank: 4,
     monthlyPriceMinor: { IN: 249900, US: 9900, UK: 6900, EU: 8500 },
     autoApplyPerMonth: { india: 750, us: 1000 },
@@ -132,10 +136,16 @@ export function planDisplayName(code: string): string {
 
 /**
  * Feature-matrix cells, rendered VERBATIM. These are marketing statements, not
- * enforcement gates: "Owner Control" is the existing user_roles concept and
- * "Auto-submit (Greenhouse)" is gated by an installed employer credential in
- * ats_credentials, not by a plan column. Nothing here is read by an
- * authorization decision, and the em dash for "not applicable" is deliberate.
+ * enforcement gates: "Owner Control" is the existing user_roles concept. Nothing
+ * here is read by an authorization decision, and the em dash for "not
+ * applicable" is deliberate.
+ *
+ * THE AUTO-SUBMIT ROW WAS REMOVED, and must not be reinstated without a real
+ * capability behind it. It was gated by an installed employer credential in
+ * ats_credentials — not by a plan column — so no purchase could ever have
+ * unlocked it, yet it was presented as a Pro/Power benefit. The monthly
+ * auto-apply quotas are likewise no longer shown to candidates, though the
+ * catalogue keeps the numbers because the seed and the parity test read them.
  */
 export type FeatureCell = "Yes" | "No" | "Limited" | "Quota" | "Owner only" | "—";
 
@@ -160,10 +170,6 @@ export const FEATURE_MATRIX: readonly FeatureRow[] = [
   {
     feature: "Gmail connect",
     values: { free: "No", starter: "Yes", pro: "Yes", power: "Yes" },
-  },
-  {
-    feature: "Auto-submit (Greenhouse)",
-    values: { free: "No", starter: "Quota", pro: "Quota", power: "Quota" },
   },
   {
     feature: "Owner Control",

@@ -1,7 +1,6 @@
 import {
   BILLING_REGIONS,
   type BillingRegion,
-  type PlanDefinition,
 } from "../../../shared/pricing";
 
 /**
@@ -103,24 +102,5 @@ export const REGION_SWITCHER_LABEL: Record<BillingRegion, string> = {
   UK: "UK (£ GBP)",
   EU: "EU (€ EUR)",
 };
-
-/**
- * The auto-apply allowance that applies to a region.
- *
- * THE CATALOGUE ONLY HAS TWO NUMBERS — india and us — because the product states
- * the quota per destination rather than per payer. So US, UK and EU readers all
- * see the "us" figure, which is the global allowance. This is a real limitation
- * of the catalogue rather than a presentation choice: there is no UK or EU
- * specific quota to show, and inventing one here would put a number in front of
- * a candidate that no gate enforces.
- */
-export function regionalAutoApplyQuota(
-  plan: PlanDefinition,
-  region: BillingRegion,
-): { amount: number; label: string } {
-  return region === "IN"
-    ? { amount: plan.autoApplyPerMonth.india, label: "auto-applies / month for India jobs" }
-    : { amount: plan.autoApplyPerMonth.us, label: "auto-applies / month for US and global jobs" };
-}
 
 export { BILLING_REGIONS };

@@ -18,6 +18,7 @@ import {
   fetchQueueCapability,
   type QueueCapabilityState,
 } from "../lib/queueCapability";
+import { describeJobLink, describeJobLinkAriaLabel } from "../lib/jobLink";
 import { describeDiscoveryResult, discoverLiveJobs } from "../lib/ingestion";
 import { matchesWorkplaceFilter, workplaceLabel, type WorkplaceValue } from "../lib/opportunityFilters";
 import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
@@ -857,23 +858,43 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                     <FitSection fit={opp.fitAnalysis} />
                   </div>
 
-                  {/* Offered only where the server will accept it. `unverified`
-                      is isUnverifiedSource(opp.trustStatus) — the exact inverse
-                      of the endpoint's VACANCY_TRUST_ELIGIBLE_STATUSES gate, so
-                      the two cannot drift apart. An UNDER_REVIEW row stays
-                      visible here (the view surfaces it deliberately) but gets
-                      no generate action, rather than a button whose only
-                      outcome is a refusal. */}
-                  {!unverified && (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() => setPrepVacancy(opp)}
+                  <div className="flex shrink-0 flex-col items-stretch gap-2">
+                    {/* THE MANUAL JOURNEY, AND THE ONLY APPLY-SHAPED ACTION.
+                        The label is decided by where the URL actually goes — an
+                        aggregator's own page is "open", and only an employer's
+                        hosted application form is "apply". It is a plain anchor:
+                        nothing is written, no status changes, and in particular
+                        this can never produce a "Submitted" state. The
+                        aria-label spells out the destination because "↗" alone
+                        does not say that a new tab opens. */}
+                    <a
+                      href={safeVacancyHref(opp.url)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={describeJobLinkAriaLabel(opp.sourceCode, opp.title)}
+                      className="rounded-control border border-ios-separator px-3 py-1.5 text-center text-sm font-medium text-ios-blue hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
                     >
-                      Prepare for interview
-                    </Button>
-                  )}
+                      {describeJobLink(opp.sourceCode).label}
+                    </a>
+
+                    {/* Offered only where the server will accept it. `unverified`
+                        is isUnverifiedSource(opp.trustStatus) — the exact inverse
+                        of the endpoint's VACANCY_TRUST_ELIGIBLE_STATUSES gate, so
+                        the two cannot drift apart. An UNDER_REVIEW row stays
+                        visible here (the view surfaces it deliberately) but gets
+                        no generate action, rather than a button whose only
+                        outcome is a refusal. This does NOT gate the link above:
+                        opening the original posting is allowed for every row. */}
+                    {!unverified && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setPrepVacancy(opp)}
+                      >
+                        Prepare for interview
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </li>
             );

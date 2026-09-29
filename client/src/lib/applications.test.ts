@@ -67,6 +67,7 @@ describe("listApplications", () => {
           vacancyId: "vac-1",
           vacancyTitle: "Backend Engineer",
           vacancyUrl: "https://example.com/jobs/1",
+          companyName: null,
           eligible: true,
           createdAt: "2026-08-18T00:00:00Z",
           // No messages embedded on this row, so no response stages — and,
@@ -83,6 +84,9 @@ describe("listApplications", () => {
               lastError: "no submission adapter for this source",
               createdAt: "2026-08-18T00:01:00Z",
               updatedAt: "2026-08-18T00:05:00Z",
+              // No evidence row on this attempt: a 'failed' status with nothing
+              // captured must render as no evidence, not as an absent field.
+              evidence: [],
             },
           ],
         },
@@ -104,6 +108,65 @@ describe("listApplications", () => {
     expect(columns).toContain("application_attempts");
     expect(columns).toContain("messages");
     expect(columns).toContain("response_classifications");
+    // Evidence and the employer name travel on the same read: the evidence view
+    // has nothing to show without the first, and the second is the destination
+    // the evidence refers to.
+    expect(columns).toContain("application_evidence");
+    expect(columns).toContain("companies");
+  });
+
+  it("reduces evidence rows to safe view models on the attempt", async () => {
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "plan-5",
+          vacancy_id: "vac-5",
+          gate_results: { eligible: true },
+          created_at: "2026-08-18T00:00:00Z",
+          vacancies: {
+            raw_title: "Platform Engineer",
+            authoritative_url: "https://example.com/jobs/5",
+            companies: { displayed_name: "Acme" },
+          },
+          application_attempts: [
+            {
+              id: "attempt-5",
+              status: "succeeded",
+              attempts: 1,
+              max_attempts: 5,
+              last_error: null,
+              created_at: "2026-08-18T00:01:00Z",
+              updated_at: "2026-08-18T00:05:00Z",
+              application_evidence: [
+                {
+                  id: "ev-1",
+                  evidence_type: "greenhouse_submission",
+                  payload: { applicationId: 99, endpoint: "https://internal.example.com/x" },
+                  captured_at: "2026-08-18T00:05:00Z",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    const result = await listApplications(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      const attempt = result.applications[0].attempts[0];
+
+      expect(result.applications[0].companyName).toBe("Acme");
+      expect(attempt.evidence).toHaveLength(1);
+      expect(attempt.evidence[0].kind).toBe("submission");
+      // The disclosure boundary holds all the way through the mapping.
+      expect(JSON.stringify(attempt.evidence)).not.toContain("internal.example.com");
+    }
   });
 
   it("derives response categories from the classifications reachable through its attempts", async () => {

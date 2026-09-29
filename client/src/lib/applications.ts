@@ -1,4 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  describeApplicationEvidence,
+  type ApplicationEvidenceRow,
+  type ApplicationEvidenceView,
+} from "./applicationEvidence";
 import { isResponseCategory, type ResponseCategory } from "../../../shared/priorityScore";
 
 /**
@@ -48,6 +53,12 @@ export interface ApplicationAttemptSummary {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * What actually happened to this attempt, already reduced to safe,
+   * candidate-facing copy. Empty until the worker has recorded something —
+   * which is the normal state before any submission has run.
+   */
+  evidence: ApplicationEvidenceView[];
 }
 
 export interface ApplicationSummary {
@@ -55,6 +66,8 @@ export interface ApplicationSummary {
   vacancyId: string;
   vacancyTitle: string;
   vacancyUrl: string;
+  /** The employer, when the vacancy carries a company. Null rather than guessed. */
+  companyName: string | null;
   eligible: boolean;
   createdAt: string;
   attempts: ApplicationAttemptSummary[];
@@ -71,7 +84,11 @@ interface ApplicationPlanRow {
   vacancy_id: string;
   gate_results: { eligible: boolean };
   created_at: string;
-  vacancies: { raw_title: string; authoritative_url: string } | null;
+  vacancies: {
+    raw_title: string;
+    authoritative_url: string;
+    companies: { displayed_name: string | null } | null;
+  } | null;
   application_attempts: Array<{
     id: string;
     status: ApplicationAttemptStatus;
@@ -80,6 +97,9 @@ interface ApplicationPlanRow {
     last_error: string | null;
     created_at: string;
     updated_at: string;
+    // Reverse FK onto the attempt. Readable by the owner under RLS
+    // (application_evidence_select_own); never written from the client.
+    application_evidence: ApplicationEvidenceRow[] | null;
     // messages.application_attempt_id is a nullable FK onto the attempt, so
     // this embeds as a reverse relationship. A message can be captured before
     // matching happens, hence the nulls.
@@ -150,7 +170,7 @@ export async function listApplications(
       // transitively through the same join), so this stays a direct
       // candidate-scoped read with no privileged route.
       .select(
-        "id, vacancy_id, gate_results, created_at, vacancies (raw_title, authoritative_url), application_attempts (id, status, attempts, max_attempts, last_error, created_at, updated_at, messages (id, response_classifications (category, classified_at)))",
+        "id, vacancy_id, gate_results, created_at, vacancies (raw_title, authoritative_url, companies (displayed_name)), application_attempts (id, status, attempts, max_attempts, last_error, created_at, updated_at, application_evidence (id, evidence_type, payload, captured_at), messages (id, response_classifications (category, classified_at)))",
       )
       .order("created_at", { ascending: false });
 
@@ -167,6 +187,7 @@ export async function listApplications(
         vacancyId: row.vacancy_id,
         vacancyTitle: row.vacancies?.raw_title ?? "",
         vacancyUrl: row.vacancies?.authoritative_url ?? "",
+        companyName: row.vacancies?.companies?.displayed_name ?? null,
         eligible: row.gate_results.eligible,
         createdAt: row.created_at,
         responseCategories: collectResponseCategories(row.application_attempts),
@@ -178,6 +199,7 @@ export async function listApplications(
           lastError: attempt.last_error,
           createdAt: attempt.created_at,
           updatedAt: attempt.updated_at,
+          evidence: describeApplicationEvidence(attempt.application_evidence),
         })),
       })),
     };

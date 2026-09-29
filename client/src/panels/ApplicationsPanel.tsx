@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { formatDistanceToNow } from "date-fns";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Spinner } from "../components/ui/spinner";
@@ -265,7 +266,10 @@ export function ApplicationsPanel() {
                   className="font-medium text-ios-blue hover:underline"
                 >
                   {application.vacancyTitle}
-                </a>{" "}
+                </a>
+                {application.companyName && (
+                  <span className="text-sm text-ios-text-secondary"> · {application.companyName}</span>
+                )}{" "}
                 <span className="text-sm text-ios-text-secondary">
                   — {application.eligible ? "eligible" : "not eligible"}
                 </span>
@@ -296,6 +300,35 @@ export function ApplicationsPanel() {
                           {ATTEMPT_STATUS_LABELS[attempt.status] ?? attempt.status}
                         </span>
                         {attempt.lastError && `: ${attempt.lastError}`}
+
+                        {/* WHAT ACTUALLY HAPPENED, where it happened. Only ever
+                            rendered from recorded evidence, so a status label can
+                            never be the sole claim that something was submitted.
+                            Everything here was whitelisted by
+                            applicationEvidence.ts — no raw payload reaches this
+                            point. */}
+                        {attempt.evidence.length > 0 && (
+                          <ul className="mt-1 space-y-1" aria-label="Submission evidence">
+                            {attempt.evidence.map((evidence) => (
+                              <li
+                                key={evidence.id}
+                                className="rounded border border-ios-separator bg-ios-bg px-2.5 py-1.5"
+                              >
+                                <span className="font-medium text-black">{evidence.title}</span>
+                                {evidence.details.map((detail) => (
+                                  <span key={detail} className="mt-0.5 block text-xs">
+                                    {detail}
+                                  </span>
+                                ))}
+                                <span className="mt-0.5 block text-xs opacity-70">
+                                  {formatDistanceToNow(new Date(evidence.capturedAt), {
+                                    addSuffix: true,
+                                  })}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
 
                         {attempt.status === "pending_review" && (
                           <AttemptReview

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BILLING_REGIONS } from "../../../shared/pricing";
-import { detectRegion, detectRegionFromBrowser, regionalAutoApplyQuota } from "./region";
-import { planByCode } from "../../../shared/pricing";
+import { detectRegion, detectRegionFromBrowser } from "./region";
 
 describe("detectRegion", () => {
   it("maps the Indian timezones to IN", () => {
@@ -62,32 +61,7 @@ describe("detectRegionFromBrowser", () => {
   });
 });
 
-describe("regionalAutoApplyQuota", () => {
-  it("shows the India figure to Indian readers", () => {
-    const starter = planByCode("starter");
-
-    expect(regionalAutoApplyQuota(starter, "IN")).toEqual({
-      amount: 30,
-      label: "auto-applies / month for India jobs",
-    });
-  });
-
-  it("shows the global figure to US, UK and EU readers", () => {
-    const starter = planByCode("starter");
-
-    for (const region of ["US", "UK", "EU"] as const) {
-      expect(regionalAutoApplyQuota(starter, region)).toEqual({
-        amount: 80,
-        label: "auto-applies / month for US and global jobs",
-      });
-    }
-  });
-
-  it("reads the quota from the catalogue rather than restating it", () => {
-    const pro = planByCode("pro");
-
-    // If the catalogue's pro quota ever changes, the card changes with it.
-    expect(regionalAutoApplyQuota(pro, "IN").amount).toBe(pro.autoApplyPerMonth.india);
-    expect(regionalAutoApplyQuota(pro, "US").amount).toBe(pro.autoApplyPerMonth.us);
-  });
-});
+// regionalAutoApplyQuota's tests were removed with the helper: the monthly
+// auto-apply figure is no longer shown to candidates, because no plan can
+// consume it. The catalogue still holds the numbers for the seed and the
+// parity test, which is why nothing here asserts their values.

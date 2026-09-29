@@ -21,6 +21,7 @@ function application(
     vacancyId: "vac-1",
     vacancyTitle: "Data Engineer",
     vacancyUrl: "https://example.test/job/1",
+    companyName: null,
     eligible: true,
     createdAt: "2026-09-17T00:00:00Z",
     responseCategories,
@@ -32,6 +33,7 @@ function application(
       lastError: null,
       createdAt: "2026-09-17T00:00:00Z",
       updatedAt: "2026-09-17T00:00:00Z",
+      evidence: [],
     })),
   };
 }
