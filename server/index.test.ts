@@ -12,6 +12,7 @@ import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
+import { loadQueueCapability } from "./applications/queueCapability.js";
 import { IntakePolicyError } from "./intake/intake.js";
 import {
   approveAttempt,
@@ -123,6 +124,11 @@ vi.mock("./applications/bulkApply.js", async () => {
 // Task V's two candidate-facing routes are mocked for the same reason: their
 // logic is covered by attemptReview.test.ts, and what these tests are about is
 // auth-gating, ownership status mapping and response wiring.
+// GET /api/opportunities/capability — the source-level queue capability is
+// covered by server/applications/queueCapability.test.ts; here only auth-gating
+// and response wiring.
+vi.mock("./applications/queueCapability.js", () => ({ loadQueueCapability: vi.fn() }));
+
 vi.mock("./applications/attemptReview.js", async () => {
   const actual = await vi.importActual<typeof import("./applications/attemptReview.js")>(
     "./applications/attemptReview.js",
@@ -481,6 +487,103 @@ describe("POST /api/opportunities/refresh", () => {
 
         expect(response.status).toBe(500);
         expect(await response.json()).toEqual({ error: "Failed to refresh opportunities" });
+      },
+    );
+  });
+});
+
+describe("GET /api/opportunities/capability", () => {
+  const mockedCapability = vi.mocked(loadQueueCapability);
+
+  beforeEach(() => {
+    mockedCapability.mockReset();
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/opportunities/capability`);
+
+      expect(response.status).toBe(401);
+      expect(mockedCapability).not.toHaveBeenCalled();
+    });
+  });
+
+  it("reports canQueue true when a source can carry an application", async () => {
+    mockedCapability.mockResolvedValue({ canQueue: true, queueableSources: ["greenhouse"] });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/capability`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+
+        const body = (await response.json()) as { canQueue: boolean; explanation: string };
+        expect(body.canQueue).toBe(true);
+        expect(typeof body.explanation).toBe("string");
+      },
+    );
+  });
+
+  it("reports canQueue false with an explanation when no source can", async () => {
+    mockedCapability.mockResolvedValue({ canQueue: false, queueableSources: [] });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/capability`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        const body = (await response.json()) as { canQueue: boolean; explanation: string };
+        expect(body.canQueue).toBe(false);
+        expect(body.explanation.length).toBeGreaterThan(0);
+      },
+    );
+  });
+
+  /**
+   * A FAILED READ IS A 500, NEVER A FALSE. The client must be able to tell
+   * "no source supports this" from "we could not check"; a false here would let
+   * a transient outage be displayed as a product limitation.
+   */
+  it("returns 500 rather than claiming sources are unavailable when the read fails", async () => {
+    mockedCapability.mockRejectedValue(new Error("PostgREST unreachable"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/capability`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+
+  /**
+   * THE CLIENT MUST NOT BE ABLE TO LEARN THE SOURCE POSTURE. The response
+   * carries a boolean and one sentence; source codes and policy flags are
+   * operator data.
+   */
+  it("does not leak source codes or policy flags to the client", async () => {
+    mockedCapability.mockResolvedValue({ canQueue: true, queueableSources: ["greenhouse", "lever"] });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/capability`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        const raw = await response.text();
+        expect(raw).not.toContain("greenhouse");
+        expect(raw).not.toContain("lever");
+        expect(raw).not.toContain("queueableSources");
       },
     );
   });

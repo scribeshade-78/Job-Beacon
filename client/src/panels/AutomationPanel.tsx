@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { StatusBadge, type StatusBadgeStatus } from "../components/ui/status-badge";
@@ -12,10 +12,25 @@ import {
   type Authorization,
 } from "../lib/automationAuthorization";
 import { listSelectedRoles, type SelectedRole } from "../lib/candidateSelectedRoles";
+import {
+  describeAutomationCapabilityNotice,
+  fetchQueueCapability,
+  type QueueCapabilityState,
+} from "../lib/queueCapability";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
+/**
+ * CONSENT STATE, AND NOTHING MORE.
+ *
+ * These map automation_authorizations.status — what the candidate agreed to —
+ * onto a badge. "authorized" deliberately reads "Authorized" rather than
+ * "Active": authorizing records consent, and consent alone does not mean
+ * automation is running. Whether work can actually run is a separate,
+ * source-level question answered by the capability notice below. Paused and
+ * Stopped are unchanged because they describe the consent record accurately.
+ */
 const AUTOMATION_STATUS_BADGE: Record<Authorization["status"], StatusBadgeStatus> = {
-  authorized: "automation_active",
+  authorized: "automation_authorized",
   paused: "automation_paused",
   stopped: "automation_stopped",
 };
@@ -30,6 +45,17 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
   const [error, setError] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
+  /** Whether any source can carry an application, read from the server. */
+  const [capability, setCapability] = useState<QueueCapabilityState>({ kind: "loading" });
+
+  const loadCapability = useCallback(async () => {
+    setCapability({ kind: "loading" });
+    setCapability(await fetchQueueCapability());
+  }, []);
+
+  useEffect(() => {
+    void loadCapability();
+  }, [loadCapability]);
 
   async function refresh() {
     const client = getSupabaseBrowserClient();
@@ -69,6 +95,8 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
     await refresh();
     setBusy(false);
   }
+
+  const automationCapabilityNotice = describeAutomationCapabilityNotice(capability);
 
   return (
     <Card>
@@ -118,6 +146,29 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
         {authorization && authorization !== "notYetAuthorized" && (
           <>
             <StatusBadge status={AUTOMATION_STATUS_BADGE[authorization.status]} />
+
+            {/* SEPARATE FROM THE BADGE, ON PURPOSE. The badge reports the
+                candidate's consent; this reports whether the product can act on
+                it. Showing "no source supports queueing" as a red/blocked state
+                would read as the candidate's own fault or as lost consent, so it
+                is neutral and says explicitly that the authorization is kept. */}
+            {automationCapabilityNotice && (
+              <p
+                role={capability.kind === "error" ? "alert" : "status"}
+                className="rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
+              >
+                {automationCapabilityNotice}{" "}
+                {capability.kind === "error" && (
+                  <button
+                    type="button"
+                    onClick={() => void loadCapability()}
+                    className="font-medium text-ios-blue hover:underline"
+                  >
+                    Retry
+                  </button>
+                )}
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               {/* Pause is offered only while it is actually running. The old
                   condition (status === "paused") left it clickable on a STOPPED

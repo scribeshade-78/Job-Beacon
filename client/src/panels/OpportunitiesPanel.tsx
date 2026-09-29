@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -12,6 +12,12 @@ import {
   type OpportunityTrustStatus,
 } from "../lib/opportunities";
 import { describeBulkApplyResult, submitBulkApply } from "../lib/bulkApply";
+import {
+  describeBulkApplyButton,
+  describeLoadedCount,
+  fetchQueueCapability,
+  type QueueCapabilityState,
+} from "../lib/queueCapability";
 import { describeDiscoveryResult, discoverLiveJobs } from "../lib/ingestion";
 import { matchesWorkplaceFilter, workplaceLabel, type WorkplaceValue } from "../lib/opportunityFilters";
 import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
@@ -287,6 +293,22 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    */
   const [prepVacancy, setPrepVacancy] = useState<OpportunitySummary | null>(null);
   const [bulkApplying, setBulkApplying] = useState(false);
+  /**
+   * Whether ANY source can carry an application, read from the server because
+   * source_policies is not readable by a signed-in client. The bulk action is
+   * unavailable without it, and the panel must be able to say whether that is
+   * because the product cannot do it or because the check itself failed.
+   */
+  const [capability, setCapability] = useState<QueueCapabilityState>({ kind: "loading" });
+
+  const loadCapability = useCallback(async () => {
+    setCapability({ kind: "loading" });
+    setCapability(await fetchQueueCapability());
+  }, []);
+
+  useEffect(() => {
+    void loadCapability();
+  }, [loadCapability]);
 
   useEffect(() => {
     if (!candidateId) {
@@ -547,6 +569,15 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       return;
     }
 
+    // NO SECOND FETCH, AND NO POINTLESS POST. The capability is already known,
+    // so a click that cannot succeed must not reach the network — the server
+    // would only re-derive the same refusal. If capability CHANGED since the
+    // read (a policy was revoked moments ago), the server's own per-vacancy
+    // gates are authoritative and the POST below still reports the truth.
+    if (bulkApplyButton.blocked) {
+      return;
+    }
+
     setBulkApplying(true);
     const outcome = await submitBulkApply(vacancyIds);
 
@@ -566,6 +597,17 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     setFilters({ ...EMPTY_FILTERS });
     setBulkApplying(false);
   }
+
+  /**
+   * Derived once, used by the handler (to refuse the click) and by the button
+   * (for its label, availability and explanation), so the two cannot disagree
+   * about whether the action is available.
+   */
+  const bulkApplyButton = describeBulkApplyButton({
+    capability,
+    visibleCount: visibleOpportunities.length,
+    busy: bulkApplying,
+  });
 
   const unverifiedCount = visibleOpportunities.filter((opp) => isUnverifiedSource(opp.trustStatus)).length;
   const partiallyVerifiedCount = visibleOpportunities.filter((opp) =>
@@ -637,18 +679,48 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             preferences={preferences}
           />
 
+          {/* The count describes the LOADED LIST; the button describes the
+              ACTION. Keeping them apart is what stops the label reading as a
+              promise about how many applications will be sent — source
+              capability never guaranteed that, and each job still has to pass
+              its own gates. */}
+          <span className="ml-auto self-center text-xs text-ios-text-secondary">
+            {describeLoadedCount(visibleOpportunities.length)}
+          </span>
+
           <Button
             size="sm"
-            className="ml-auto"
             onClick={() => void handleBulkApply()}
-            disabled={visibleOpportunities.length === 0 || bulkApplying}
+            disabled={bulkApplyButton.disabled}
             aria-busy={bulkApplying}
+            aria-describedby={bulkApplyButton.notice ? "bulk-apply-notice" : undefined}
           >
-            {bulkApplying
-              ? "Applying…"
-              : `Apply to ${visibleOpportunities.length} loaded ${visibleOpportunities.length === 1 ? "match" : "matches"}`}
+            {bulkApplyButton.label}
           </Button>
         </div>
+
+        {/* The reason the action is unavailable, stated where the action is.
+            role=status (not alert) for a capability limitation: it is a standing
+            condition rather than something that just went wrong. The failed-read
+            case is the one that needs interrupting, and it carries its own retry. */}
+        {bulkApplyButton.notice && (
+          <p
+            id="bulk-apply-notice"
+            role={capability.kind === "error" ? "alert" : "status"}
+            className="mb-4 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
+          >
+            {bulkApplyButton.notice}{" "}
+            {capability.kind === "error" && (
+              <button
+                type="button"
+                onClick={() => void loadCapability()}
+                className="font-medium text-ios-blue hover:underline"
+              >
+                Retry
+              </button>
+            )}
+          </p>
+        )}
 
         {opportunities?.length === 0 && activeFilterCount === 0 && (
           <p className="text-sm text-ios-text-secondary">

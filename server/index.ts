@@ -130,6 +130,7 @@ const MAX_FIT_ANALYSES_PER_DISCOVERY = 5;
 const FIT_ANALYSIS_BUDGET_MS = 45_000;
 import { runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
+import { loadQueueCapability } from "./applications/queueCapability.js";
 import {
   approveAttempt,
   approveOwnedAttempt,
@@ -879,6 +880,47 @@ export function createApp(options: CreateAppOptions = {}) {
     legacyHeaders: false,
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many bulk apply requests. Please try again later." },
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/opportunities/capability
+  //
+  // WHETHER AUTOMATIC APPLICATION CAN RUN AT ALL, for the Opportunities page and
+  // the Home automation card. Both used to imply it could: the bulk button said
+  // "Apply to N loaded matches" and the automation badge said "Active", while no
+  // source can carry an application. A candidate cannot discover this on their
+  // own — source_policies is internal governance data with no grants to
+  // authenticated (20260813205320_source_policies.sql) — so it has to be served.
+  //
+  // A BOOLEAN AND ONE SENTENCE, NOT THE DATA BEHIND IT. The source codes, the
+  // policy flags and the adapter registry are operator concerns; a candidate
+  // needs to know whether the action is available and, if not, why in plain
+  // language. Returning the list would leak the commercial/legal posture of each
+  // source to any signed-in account and would invite the client to re-derive a
+  // decision the server already owns.
+  //
+  // NOT CACHED, because a policy or adapter can change between requests and a
+  // cached "yes" would re-enable a button that no longer works.
+  // ---------------------------------------------------------------------------
+  app.get("/api/opportunities/capability", requireAuth, async (_request, response) => {
+    try {
+      const capability = await loadQueueCapability(resolveServiceClient());
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({
+        canQueue: capability.canQueue,
+        explanation: capability.canQueue
+          ? "Automatic applications are available."
+          : "No available job source supports automatic applications yet.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Queue capability read failed:", message);
+      // 500 rather than a "false": the client must be able to tell "sources are
+      // unavailable" from "we could not check", and a false would collapse the
+      // two into the same misleading claim.
+      response.status(500).json({ error: "Could not check application availability" });
+    }
   });
 
   app.post(

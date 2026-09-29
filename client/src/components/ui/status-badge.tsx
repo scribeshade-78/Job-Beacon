@@ -35,6 +35,7 @@ export type StatusBadgeStatus =
   | "under_review"
   | "blocked"
   | "action_required"
+  | "automation_authorized"
   | "automation_active"
   | "automation_paused"
   | "automation_stopped"
@@ -195,6 +196,22 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     bg: "bg-status-action-required/8",
     fg: "text-status-action-required-fg",
     Icon: PauseIcon,
+  },
+  /**
+   * LABELLED "Authorized", NOT "Active", AND STYLED NEUTRALLY.
+   *
+   * The row it renders is automation_authorizations.status — a record of CONSENT,
+   * which the candidate granted, not evidence that anything is running. The old
+   * label said "Active" in the verified-green treatment while no source could
+   * carry an application, so the card claimed a capability the product did not
+   * have. Green-verified styling is reserved for facts the system has confirmed;
+   * consent is not one of them.
+   */
+  automation_authorized: {
+    label: "Authorized",
+    bg: "bg-ios-separator/50",
+    fg: "text-ios-text-secondary",
+    Icon: CheckIcon,
   },
   automation_active: {
     label: "Active",
