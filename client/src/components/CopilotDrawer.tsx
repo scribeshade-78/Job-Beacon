@@ -30,7 +30,7 @@ import { listExtractedFacts } from "../lib/resumeExtraction";
 import { cn } from "../lib/utils";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { Button } from "./ui/button";
-import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "./ui/sheet";
+import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "./ui/sheet";
 import { Spinner } from "./ui/spinner";
 
 /**
@@ -359,21 +359,30 @@ export function CopilotDrawer() {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={openDrawer}
-        aria-label="Open Career Copilot"
-        className={cn(
-          "fixed right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full",
-          "bottom-[calc(1.5rem+env(safe-area-inset-bottom))]",
-          "bg-blue-600 text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2",
-        )}
-      >
-        <MessageCircle className="h-6 w-6" aria-hidden="true" />
-      </button>
-
       <Sheet open={open} onOpenChange={setOpen}>
+        {/* SheetTrigger AS CHILD, AND IT IS THE FOCUS FIX. Radix restores focus on
+            close to the element it was opened from — but only to its own Trigger.
+            While the launcher was a plain button outside the Root, Radix had no
+            trigger to return to and focus fell to <body>, so a keyboard user lost
+            their place after every Escape. asChild merges Radix's props onto this
+            same button, so the launcher IS the trigger and keeps its styling,
+            aria-label and its own onClick. */}
+        <SheetTrigger asChild>
+          <button
+            type="button"
+            onClick={openDrawer}
+            aria-label="Open Career Copilot"
+            className={cn(
+              "fixed right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full",
+              "bottom-[calc(1.5rem+env(safe-area-inset-bottom))]",
+              "bg-blue-600 text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2",
+            )}
+          >
+            <MessageCircle className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </SheetTrigger>
+
         <SheetContent>
           <div className="flex items-center justify-between gap-2 border-b border-blue-100 bg-white px-4 py-3">
             <div className="flex min-w-0 items-center gap-2.5">
@@ -492,7 +501,15 @@ export function CopilotDrawer() {
               {active?.messages.map((entry) =>
                 entry.role === "user" ? (
                   <div key={entry.id} className="flex justify-end">
-                    <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-2.5 text-sm text-white shadow-sm">
+                    {/* wrap-anywhere = overflow-wrap: anywhere. A pasted URL, a long
+                        id or an unbroken token has no break opportunity at all, so
+                        without this it renders thousands of pixels wide and is
+                        clipped at the panel edge with no way to read it. Deliberately
+                        NOT break-words: that is overflow-wrap: break-word, which
+                        wraps the token for display but does not let the browser count
+                        the break toward min-content sizing. anywhere does, so the box
+                        can shrink below the token's intrinsic width. */}
+                    <div className="max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-2.5 text-sm text-white shadow-sm">
                       {entry.content}
                     </div>
                   </div>
@@ -511,7 +528,7 @@ export function CopilotDrawer() {
                     </span>
                     <div className="min-w-0 flex-1">
                       {entry.content.trim() !== "" && (
-                        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-slate-800">
+                        <div className="max-w-[85%] whitespace-pre-wrap wrap-anywhere rounded-2xl rounded-tl-sm border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-slate-800">
                           {entry.content}
                         </div>
                       )}
