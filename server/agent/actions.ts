@@ -35,6 +35,12 @@ import { getAgentTool } from "./tools.js";
 
 export type AgentActionExecutionResult =
   | { kind: "executed"; tool: AgentToolName; summary: string; detail: unknown }
+  /**
+   * The tool ran and every job was refused by an eligibility gate. Returned as
+   * its own kind so the client cannot render it as a completed action: nothing
+   * was written, and the summary explains why.
+   */
+  | { kind: "blocked"; tool: AgentToolName; summary: string; detail: unknown }
   /** The request itself was malformed, or named a tool that exists but rejected these arguments. */
   | { kind: "invalid_request"; message: string }
   /** A tool name outside AGENT_TOOL_NAMES — a tampered or stale client. */
@@ -85,28 +91,42 @@ export async function executeAgentAction(
 
   const outcome = await tool.execute(client, parsed.args, params.candidateId);
 
+  // A gate refusal is its own audit action. Collapsing it into either
+  // "executed" or "failed" would make the trail lie in one direction or the
+  // other: nothing was written, but nothing broke either.
+  const auditAction =
+    outcome.kind === "executed"
+      ? "agent.action.executed"
+      : outcome.kind === "blocked"
+        ? "agent.action.blocked"
+        : "agent.action.failed";
+
   await recordAuditEvent(client, {
     actorId: params.candidateId,
     actorRole: "candidate",
-    action: outcome.kind === "executed" ? "agent.action.executed" : "agent.action.failed",
+    action: auditAction,
     entityType: "agent_action",
     entityId: null,
     summary:
-      outcome.kind === "executed"
-        ? tool.name + ": " + outcome.summary
-        : tool.name + ": " + outcome.message,
+      outcome.kind === "failed"
+        ? tool.name + ": " + outcome.message
+        : tool.name + ": " + outcome.summary,
     previousValues: null,
     // The REQUESTED arguments are recorded alongside the result, so the trail
     // shows what was asked for and not only what came back.
     newValues:
-      outcome.kind === "executed"
-        ? { arguments: parsed.args, result: outcome.detail }
-        : { arguments: parsed.args },
+      outcome.kind === "failed"
+        ? { arguments: parsed.args }
+        : { arguments: parsed.args, result: outcome.detail },
     reason: outcome.kind === "failed" ? outcome.message : null,
   });
 
   if (outcome.kind === "executed") {
     return { kind: "executed", tool: tool.name, summary: outcome.summary, detail: outcome.detail };
+  }
+
+  if (outcome.kind === "blocked") {
+    return { kind: "blocked", tool: tool.name, summary: outcome.summary, detail: outcome.detail };
   }
 
   return { kind: "failed", message: outcome.message };

@@ -20,6 +20,7 @@ import {
   readDefaultAgentModel,
 } from "./chatPrompt.js";
 import { agentToolDescriptors, buildAgentProposal } from "./tools.js";
+import { loadQueueCapability } from "../applications/queueCapability.js";
 
 /**
  * AI Career Copilot — the endpoint's application logic.
@@ -154,12 +155,22 @@ export async function answerAgentChat(
 
   try {
     const context = await loadCandidateContext(client, params.candidateId);
+
+    // RESOLVED ONCE PER REQUEST, THEN USED FOR BOTH THE OFFER AND THE REFUSAL.
+    // Two queries here (one for the capability, one for the proposal check)
+    // would be wasted work on the hot path, and the two could disagree if a
+    // policy changed between them — a tool offered but then refused, or worse
+    // the reverse. One value, one decision.
+    const capability = await loadQueueCapability(client);
+
     const completion = await openaiClient.chat.completions.create({
       model,
       messages: buildAgentMessages(context, history),
-      // Derived from the registry, so the model can only ever be offered tools
-      // the server can actually carry out.
-      tools: agentToolDescriptors(),
+      // Derived from the registry AND the live capability, so the model is only
+      // ever offered an action the server can actually carry out. With no
+      // queueable source this is an empty array: the Copilot stays useful as a
+      // chat assistant rather than promising work it cannot do.
+      tools: agentToolDescriptors(capability),
       tool_choice: "auto",
     });
 
@@ -191,6 +202,7 @@ export async function answerAgentChat(
         call.name,
         parsedArguments.value,
         params.candidateId,
+        capability,
       );
 
       if (built.ok) {

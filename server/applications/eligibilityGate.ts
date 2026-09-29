@@ -22,11 +22,15 @@ export interface GateResult {
  * `application_support` as an 8th: it now checks whether
  * resolveApplicationAdapter (PRD §23.2's runtime capability check) has a
  * real adapter for the vacancy's source_code, rather than unconditionally
- * failing. It still always fails today, honestly — every source_code
- * currently resolves to unsupportedAdapter, matching
- * source_policies.automated_application_allowed being false everywhere —
- * but this gate will start passing on its own, with no further gate
- * changes, once a real per-source adapter is registered.
+ * failing. It still fails for every vacancy in production today, but NOT
+ * because no adapter exists: greenhouse, lever and local_fixture all have
+ * real adapters (see adapters/registry.ts). It fails because no source that
+ * holds vacancies has BOTH an adapter AND a source_policies row with
+ * automated_application_allowed = true — the two halves this gate and
+ * evaluateSourcePolicy check independently. It will start passing, with no
+ * further gate changes, once one source satisfies both. See
+ * queueCapability.ts, which answers that same question once for the whole
+ * system so the Copilot does not offer an action that cannot succeed.
  * `rate_and_abuse_controls` was a permanent hard-block placeholder until
  * R7-M9, which wired it as a pure mirror of the `automation_authorization`
  * gate — PRD §31 had left candidate application-limit policy as an

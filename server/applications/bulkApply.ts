@@ -17,11 +17,16 @@ import type { EligibilityGateOutcome } from "./eligibilityGate.js";
  * one click. The gates are the product's abuse and consent boundary, so the
  * bulk path goes through them like everything else.
  *
- * The honest consequence: with no adapter registered for any source
- * (adapters/registry.ts resolves every source_code to unsupportedAdapter),
- * application_support fails for every vacancy and this correctly enqueues
- * nothing. The result carries the per-vacancy gate outcomes so the UI can say
- * exactly why instead of looking broken.
+ * The honest consequence: application_support needs BOTH a registered adapter
+ * for the vacancy's source_code AND, separately, a source_policies row with
+ * automated_application_allowed = true (see registry.ts's own note on why the
+ * two halves are independent). Where either is missing this correctly enqueues
+ * nothing. As of this writing no source holding vacancies satisfies both, so
+ * every call blocks — the result carries the per-vacancy gate outcomes so the
+ * UI can say exactly why instead of looking broken. Note that this is NOT
+ * "every source_code resolves to unsupportedAdapter": greenhouse, lever and
+ * local_fixture all have real adapters (registry.ts); they simply hold no
+ * vacancies and/or are not authorized.
  */
 
 /** Upper bound on one request. The route rejects anything larger. */

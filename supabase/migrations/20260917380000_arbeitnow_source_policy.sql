@@ -22,6 +22,31 @@
 -- the second by issuing exactly one request per click and never paginating. The
 -- row records the review as outstanding anyway, so the position is visible in
 -- the data rather than implicit.
+-- ---------------------------------------------------------------------------
+-- KNOWN PRODUCTION/REPOSITORY DIVERGENCE — RECORDED, NOT RESOLVED.
+--
+-- This migration writes automated_application_allowed = false below. The
+-- production database was OBSERVED (read-only, 2026-09-29) holding TRUE for
+-- arbeitnow, with updated_at = 2026-09-27T00:33:45.946+00:00.
+--
+-- WHAT IS KNOWN: the observed value and its timestamp; that no migration in
+-- this repository sets arbeitnow to true (the only statement that sets the flag
+-- true is refresh_source_application_policy(), and its loop covers greenhouse
+-- and lever only); and that audit_events contains no row mentioning arbeitnow,
+-- so the change left no audit record.
+--
+-- WHAT IS NOT KNOWN: the cause and the actor. The database does not record who
+-- ran a bare UPDATE, and there is no other evidence trail. This is stated
+-- plainly rather than guessed at.
+--
+-- WHY IT IS NOT "FIXED" HERE. Re-running this migration would not correct the
+-- row anyway — it ends with ON CONFLICT DO NOTHING — and deciding the intended
+-- policy is a product/compliance question (this file's own comment says the
+-- aggregator has no submission channel), not a migration detail. The value is
+-- left exactly as found, and no migration was written, pending that decision.
+--
+-- FALSE remains the only state this repository has ever asserted for arbeitnow.
+-- ---------------------------------------------------------------------------
 insert into public.source_policies (
   source_code,
   discovery_allowed,

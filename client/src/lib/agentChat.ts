@@ -133,6 +133,12 @@ export async function requestAgentChat(
 
 export type AgentActionRequestResult =
   | { kind: "executed"; tool: string; summary: string; detail: unknown }
+  /**
+   * The server ran the action and the eligibility gates refused every job.
+   * Separated from "executed" so the drawer cannot show a completed card for
+   * work that did not happen, and from "error" so a retry is not implied.
+   */
+  | { kind: "blocked"; tool: string; summary: string; detail: unknown }
   /** The server refused on the merits — a stale card, a tool that no longer exists, arguments it rejected. */
   | { kind: "unavailable"; message: string }
   | { kind: "error"; message: string };
@@ -187,15 +193,29 @@ export async function requestAgentAction(
   }
 
   try {
-    const body = (await response.json()) as { tool?: unknown; summary?: unknown; detail?: unknown };
+    const body = (await response.json()) as {
+      status?: unknown;
+      tool?: unknown;
+      summary?: unknown;
+      detail?: unknown;
+    };
 
     if (typeof body.summary !== "string" || body.summary.trim() === "") {
       return { kind: "error", message: GENERIC_ACTION_MESSAGE };
     }
 
+    const resolvedTool = typeof body.tool === "string" ? body.tool : tool;
+
+    // The server's explicit status decides which state the card lands in. An
+    // older server that omits it yields "executed", which is the previous
+    // behaviour rather than a regression.
+    if (body.status === "blocked") {
+      return { kind: "blocked", tool: resolvedTool, summary: body.summary, detail: body.detail };
+    }
+
     return {
       kind: "executed",
-      tool: typeof body.tool === "string" ? body.tool : tool,
+      tool: resolvedTool,
       summary: body.summary,
       detail: body.detail,
     };

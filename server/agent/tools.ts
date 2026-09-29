@@ -71,7 +71,14 @@ export interface AgentToolPreview {
 
 export type AgentToolOutcome =
   | { kind: "executed"; summary: string; detail: unknown }
-  /** Infrastructure failure only — a gate refusing is a successful run that queued nothing. */
+  /**
+   * The run reached the gates and every job was refused by one. NOT a failure —
+   * the system did its job — but not a success either, and the distinction is
+   * the whole point of this variant: the tool ran and queued nothing, so no
+   * write happened and the UI must not report completion.
+   */
+  | { kind: "blocked"; summary: string; detail: unknown }
+  /** Infrastructure failure only — nothing ran. */
   | { kind: "failed"; message: string };
 
 export type AgentArgsParseResult<Args> = { ok: true; args: Args } | { ok: false; message: string };
@@ -172,7 +179,65 @@ function parseQueueApplicationsArgs(raw: unknown): AgentArgsParseResult<QueueApp
   return { ok: true, args: { vacancyIds: [...new Set(vacancyIds as string[])] } };
 }
 
-function summarizeBulkApply(result: BulkApplyResult): string {
+/**
+ * Plain-language wording for a gate reason code.
+ *
+ * WHY NOT THE RAW CODE. "NO_ADAPTER_REGISTERED_FOR_SOURCE" is accurate and
+ * useless to the person reading it — the Copilot's audience is a job seeker, not
+ * an operator. The codes still travel in the structured detail for logs and
+ * support; only the primary copy is translated. An unrecognised code falls back
+ * to the generic eligibility sentence rather than leaking the identifier.
+ */
+const GATE_REASON_COPY: Record<string, string> = {
+  NO_ADAPTER_REGISTERED_FOR_SOURCE: "automatic applications aren't available for this job's site yet",
+  SOURCE_APPLICATION_NOT_AUTHORIZED: "this job's site isn't authorized for automatic applications",
+  AUTOMATION_NOT_AUTHORIZED: "automatic applications are paused on your account",
+  VACANCY_TRUST_STATUS_INELIGIBLE: "we haven't finished checking this job posting",
+  ROLE_NOT_MATCHED: "this job doesn't match the roles you selected",
+  NO_ROLES_SELECTED: "you haven't selected any target roles yet",
+  NO_FACTS_EXTRACTED: "you haven't confirmed any profile facts yet",
+  NO_FACTS_CONFIRMED: "you haven't confirmed any profile facts yet",
+  DAILY_APPLICATION_LIMIT_EXCEEDED: "you've hit today's application limit",
+  DUPLICATE_APPLICATION_EXISTS: "you've already applied to this job",
+};
+
+const GENERIC_BLOCKED_REASON = "it didn't pass our eligibility checks";
+
+/** Distinct plain-language reasons across every blocked outcome, in first-seen order. */
+export function describeBlockingGates(result: BulkApplyResult): string[] {
+  const seen = new Set<string>();
+
+  for (const outcome of result.outcomes) {
+    if (outcome.status !== "blocked") {
+      continue;
+    }
+
+    for (const gate of outcome.blockingGates) {
+      seen.add(
+        (gate.reasonCode !== null && GATE_REASON_COPY[gate.reasonCode]) || GENERIC_BLOCKED_REASON,
+      );
+    }
+  }
+
+  return [...seen];
+}
+
+/**
+ * The sentence a candidate reads after approving.
+ *
+ * WHY THIS IS NOT JUST A COUNT. "Queued 0 of 3" reads like a transient failure,
+ * so a candidate retries an action that cannot work. Naming the reason replaces
+ * that dead end with an explanation. Genuine partial success keeps both numbers,
+ * because there the distinction between queued and blocked is the useful part.
+ */
+export function summarizeBulkApply(result: BulkApplyResult): string {
+  if (result.queued === 0 && result.blocked > 0) {
+    const reasons = describeBlockingGates(result);
+    const detail = reasons.length > 0 ? " (" + reasons.join("; ") + ")" : "";
+
+    return "No applications queued. Automatic applications aren't available for these jobs yet." + detail;
+  }
+
   const parts = ["Queued " + result.queued + " of " + result.requested + "."];
 
   if (result.blocked > 0) {
@@ -225,10 +290,29 @@ const QUEUE_APPLICATIONS: AgentToolDefinition<QueueApplicationsArgs> = {
 
   async execute(client, args, candidateId) {
     try {
+      // THE STALE CASE IS HANDLED BY CLASSIFYING THE RESULT, NOT BY PRE-EMPTING
+      // THE RUN. An earlier draft called loadQueueCapability here first and
+      // returned "blocked" when it was false. That was wrong twice over: it
+      // short-circuited past bulkApplyToVacancies, so genuine infrastructure
+      // failures were reported as "no source supports this" instead of failing
+      // loudly; and it made the honest outcome depend on a second read of data
+      // the eligibility gates already read authoritatively.
+      //
+      // A stale card needs no special path. The gates are evaluated per vacancy
+      // at execution time regardless, so a policy that disappeared is caught by
+      // evaluateSourcePolicy/evaluateApplicationSupport and comes back as
+      // blocked outcomes — which the classification below turns into an honest
+      // "blocked", with the real per-vacancy reasons attached.
       const result = await bulkApplyToVacancies(client, {
         candidateId,
         vacancyIds: args.vacancyIds,
       });
+
+      // ZERO QUEUED IS NOT COMPLETION. Reporting it as "executed" is what made
+      // the card render as done after queueing nothing.
+      if (result.queued === 0 && result.blocked > 0) {
+        return { kind: "blocked", summary: summarizeBulkApply(result), detail: result };
+      }
 
       return { kind: "executed", summary: summarizeBulkApply(result), detail: result };
     } catch (error) {
@@ -256,7 +340,17 @@ export interface AgentModelTool {
  * is offerable and a tool that does not cannot be offered — the two cannot drift
  * into the state where the model proposes something with no implementation.
  */
-export function agentToolDescriptors(): AgentModelTool[] {
+export function agentToolDescriptors(capability?: { canQueue: boolean }): AgentModelTool[] {
+  // WITHHELD WHEN IT CANNOT SUCCEED. Offering queue_applications while no source
+  // can queue produces an Approve button that always ends at "0 queued" — the
+  // model cannot know that, so the server must not put the option in front of
+  // it. An omitted capability keeps the old behaviour of advertising everything,
+  // which is what the descriptor tests assert; callers that have resolved the
+  // capability pass it.
+  if (capability !== undefined && !capability.canQueue) {
+    return [];
+  }
+
   return [...AGENT_TOOLS.values()].map((tool) => ({
     type: "function",
     function: {
@@ -289,11 +383,22 @@ export async function buildAgentProposal(
   name: string,
   rawArguments: unknown,
   candidateId: string,
+  capability?: { canQueue: boolean },
 ): Promise<AgentProposalBuildResult> {
   const tool = getAgentTool(name);
 
   if (!tool) {
     return { ok: false, reason: "unknown tool" };
+  }
+
+  // THE STALE-PROPOSAL GUARD. The capability is computed once per chat request
+  // and passed in, so this costs no extra query. It matters even though the tool
+  // is withheld when it is false: a model can still emit a call for a tool it
+  // was not offered, and a transcript opened before a policy changed can carry
+  // an old card. Refusing here means no Approve button is ever rendered for an
+  // action that is known to queue nothing.
+  if (tool.name === "queue_applications" && capability !== undefined && !capability.canQueue) {
+    return { ok: false, reason: "no source supports automated application" };
   }
 
   const parsed = tool.parse(rawArguments);

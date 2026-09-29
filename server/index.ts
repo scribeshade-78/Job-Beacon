@@ -1180,6 +1180,20 @@ export function createApp(options: CreateAppOptions = {}) {
               detail: result.detail,
             });
             return;
+          case "blocked":
+            // 200 ON PURPOSE. The action ran correctly and the gates refused
+            // every job: that is a legitimate outcome for this request, not an
+            // error, and a 4xx would tell the client to offer a retry that
+            // cannot change the answer. The explicit status field is what stops
+            // the drawer rendering it as a completed action.
+            response.set("Cache-Control", "no-store");
+            response.status(200).json({
+              status: "blocked",
+              tool: result.tool,
+              summary: result.summary,
+              detail: result.detail,
+            });
+            return;
           case "invalid_request":
           case "unknown_tool":
             response.status(400).json({ error: result.message });

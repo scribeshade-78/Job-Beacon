@@ -236,15 +236,52 @@ function toolCall(name: string, args: unknown, id = "call_1") {
   return { id, function: { name, arguments: JSON.stringify(args) } };
 }
 
+/**
+ * A QUEUEABLE SYSTEM, BECAUSE THAT IS NOW REQUIRED FOR A CARD TO EXIST.
+ * The Copilot withholds queue_applications unless some source with vacancies has
+ * both a submission adapter and an authorizing policy row, so a fixture with
+ * vacancies alone would (correctly) produce no proposals at all. greenhouse has
+ * a registered adapter and is used here as the authorized source.
+ */
 const VACANCIES_TABLE = {
-  vacancies: [{ id: VACANCY_ID, raw_title: "Platform Engineer", companies: { displayed_name: "Acme" } }],
+  vacancies: [
+    {
+      id: VACANCY_ID,
+      raw_title: "Platform Engineer",
+      source_code: "greenhouse",
+      companies: { displayed_name: "Acme" },
+    },
+  ],
+  source_policies: [
+    { source_code: "greenhouse", discovery_allowed: true, automated_application_allowed: true },
+  ],
+};
+
+/** The same vacancies, but no source is authorized to apply automatically. */
+const UNQUEUEABLE_TABLE = {
+  vacancies: [
+    {
+      id: VACANCY_ID,
+      raw_title: "Platform Engineer",
+      source_code: "arbeitnow",
+      companies: { displayed_name: "Acme" },
+    },
+  ],
+  source_policies: [
+    { source_code: "arbeitnow", discovery_allowed: true, automated_application_allowed: true },
+  ],
 };
 
 describe("answerAgentChat with tool calls", () => {
   it("offers the implemented tools and lets the model choose", async () => {
     const { client, create } = makeOpenAI();
 
-    await answerAgentChat(makeClient(), client, { candidateId: "user-123", messages: QUESTION });
+    // The queueable fixture, because the tool is now offered only when a source
+    // can actually carry it out.
+    await answerAgentChat(makeClient(VACANCIES_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
 
     const call = create.mock.calls[0][0] as { tools?: unknown[]; tool_choice?: string };
 
@@ -365,6 +402,37 @@ describe("answerAgentChat with tool calls", () => {
     });
 
     expect(result.kind === "success" && result.proposals).toHaveLength(AGENT_MAX_TOOL_PROPOSALS);
+  });
+
+  /**
+   * THE HONESTY FIX, at the chat layer. When nothing can queue, the tool is not
+   * offered and a model that calls it anyway gets no card — so no Approve button
+   * can ever be rendered for work that would queue zero jobs.
+   */
+  it("withholds the queue tool when no source can queue", async () => {
+    const { client, create } = makeOpenAI();
+
+    await answerAgentChat(makeClient(UNQUEUEABLE_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    const call = create.mock.calls[0][0] as { tools?: unknown[] };
+
+    expect(call.tools).toEqual([]);
+  });
+
+  it("produces no card for a queue call when no source can queue", async () => {
+    const { client } = makeToolCallingOpenAI([
+      toolCall("queue_applications", { vacancyIds: [VACANCY_ID] }),
+    ]);
+
+    const result = await answerAgentChat(makeClient(UNQUEUEABLE_TABLE), client, {
+      candidateId: "user-123",
+      messages: QUESTION,
+    });
+
+    expect(result.kind === "success" && result.proposals).toEqual([]);
   });
 
   it("still reports an empty answer as empty_reply when there is no tool call", async () => {

@@ -352,9 +352,20 @@ export function CopilotDrawer() {
 
     if (result.kind === "executed") {
       setProposalState(entryId, index, "done", result.summary);
-    } else {
-      setProposalState(entryId, index, "failed", result.message);
+      return;
     }
+
+    // BLOCKED USES THE EXISTING "failed" STATE, DELIBERATELY. No new state and
+    // no new rendering path: the requirement is that the card must not read as
+    // completed, and "failed" already means exactly that — the action did not
+    // happen. It carries the server's explanation, which names the reason in
+    // plain language rather than showing a gate code.
+    if (result.kind === "blocked") {
+      setProposalState(entryId, index, "failed", result.summary);
+      return;
+    }
+
+    setProposalState(entryId, index, "failed", result.message);
   }
 
   return (
