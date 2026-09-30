@@ -88,14 +88,14 @@ export const VACANCY_FILTERS: readonly FilterFieldSpec[] = [
     unavailableReason: null,
     inheritsFrom: "remotePreference",
     caveat:
-      "Only 47 of 217 vacancies carry a remote_type at all. Selecting a work mode therefore hides every listing whose source did not state one, which is deliberate — a listing that never said 'remote' is not evidence that it is.",
+      "Only 47 of 217 listings state a work mode at all. Selecting one therefore hides every listing that stayed silent, which is deliberate — a listing that never said 'remote' is not evidence that it is.",
   },
   {
     id: "employment_type",
     label: "Employment type",
     columns: [],
     unavailableReason:
-      "public.vacancies has no employment_type column, so there is nothing to match a full-time or contract choice against. The preference is recorded on the candidate profile; it is not applied here.",
+      "We can't filter by employment type yet: too few listings say whether they are full-time or contract. Your preference is saved to your profile but is not applied to searches.",
     inheritsFrom: "employmentTypes",
     caveat: null,
   },
@@ -106,14 +106,14 @@ export const VACANCY_FILTERS: readonly FilterFieldSpec[] = [
     unavailableReason: null,
     inheritsFrom: "minSalary",
     caveat:
-      "salary_interval is NULL on every vacancy in the corpus, so a stored figure cannot be confirmed as annual and no annualisation is performed. The comparison is between raw numbers in the same currency.",
+      "Listings don't say whether a pay figure is per year, per day or per hour, so we can't confirm a salary is annual. We compare the advertised figures directly, and only within the same currency.",
   },
   {
     id: "seniority",
     label: "Seniority",
     columns: [],
     unavailableReason:
-      "There is no seniority column. vacancies.raw_title is free text from the source, and inferring 'senior' or 'junior' from it would be a guess presented as a filter.",
+      "We can't filter by seniority yet. Job titles come straight from the original listing as free text, so reading 'senior' or 'junior' into them would be a guess presented as a filter.",
     inheritsFrom: null,
     caveat: null,
   },
@@ -188,7 +188,7 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
       { column: "last_seen_at", ascending: false, nullsFirst: false },
     ],
     unavailableReason: null,
-    caveat: "Unscored vacancies sort last rather than being hidden: no fit analysis has run for them yet.",
+    caveat: "Listings we haven't scored yet sort last rather than being hidden: fit analysis hasn't run for them.",
   },
   {
     id: "newest",
@@ -209,14 +209,14 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
     ],
     unavailableReason: null,
     caveat:
-      "Sorts raw numbers. Every vacancy in the corpus is USD today, so the comparison is meaningful now — it would not be if a second currency appeared, and no conversion is applied.",
+      "Sorts the advertised figure. Every listing is in US dollars today, so the comparison is meaningful; a second currency would not be comparable because we don't convert between them.",
   },
   {
     id: "company_rating",
     label: "Company rating",
     orderBy: [],
     unavailableReason:
-      "No company rating exists. PRD 21.1 names a company_rating_snapshots table and it has never been created, and PRD 14.4 forbids publishing a rating below a minimum sample — so there is no number to sort by.",
+      "We don't show company ratings yet, so there is no rating to sort by.",
     caveat: null,
   },
   {
@@ -224,7 +224,7 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
     label: "Work-life balance",
     orderBy: [],
     unavailableReason:
-      "company_reviews stores a work_life_balance score per review, but there is no aggregate per company and PRD 14.4 requires one before a score is shown. Sorting by a per-review value would order companies by whichever single review happened to load.",
+      "We don't have an overall company rating yet — individual reviews aren't combined into a single score. Sorting by review scores would rank a company on whichever single review happened to load.",
     caveat: null,
   },
   {
@@ -232,7 +232,7 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
     label: "Recently verified",
     orderBy: [],
     unavailableReason:
-      "The only verification timestamp is vacancy_trust_scores.scored_at, and that table is readable by moderators only under RLS. Exposing it to candidates through the view would be an access-policy change, not a query change, so it is not made here.",
+      "We can't sort by verification time yet — that information isn't available to your account.",
     caveat: null,
   },
 ];
