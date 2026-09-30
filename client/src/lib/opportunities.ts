@@ -154,12 +154,12 @@ interface OpportunityRow {
 }
 
 import type { SortId } from "../../../shared/opportunityQuery";
-import type { CandidatePreferences } from "./candidatePreferences";
+import type { SearchPreferences } from "../../../shared/searchPreferences";
 import {
   EMPTY_FILTERS,
   applyOpportunityFilters,
   applyOpportunitySort,
-  applyPreferenceExclusions,
+  applySearchPreferenceConstraints,
   type FilterableQuery,
   type OpportunityFilters,
 } from "./opportunityQuery";
@@ -181,12 +181,12 @@ export interface ListOpportunitiesOptions {
    */
   filters?: OpportunityFilters;
   /**
-   * Task I — the candidate's durable preferences, used ONLY for the standing
-   * exclusions. They are deliberately not filter seeds here: seeding is a UI
-   * starting value and happens in the panel, while an exclusion is a query
-   * constraint that applies to every request.
+   * The unified SearchPreferences object (Phase 1 Task 5) — the single source
+   * of truth for the feed's standing constraints: work mode, salary floor and
+   * name exclusions. Deliberately not the filter seeds: seeding is a UI starting
+   * value and happens in the panel, while these apply to every request.
    */
-  preferences?: CandidatePreferences | null;
+  searchPreferences?: SearchPreferences | null;
   /** Task I — which of the 6 sorts to apply. An unavailable sort falls back to best match. */
   sort?: SortId;
 }
@@ -346,14 +346,14 @@ export async function listOpportunities(
       options.filters ?? EMPTY_FILTERS,
     );
 
-    const { query: excluded } = applyPreferenceExclusions(
+    const { query: excluded } = applySearchPreferenceConstraints(
       // The [MOCK] local-fixture postings are real rows in this view, so they
       // are excluded here rather than deleted — the application-engine fixtures
       // depend on them, and removing production rows is a separate decision.
       // Applied BEFORE paging on purpose: filtering after range() would make a
       // page silently return fewer than OPPORTUNITIES_PAGE_SIZE rows.
       filtered.not("source_code", "eq", FIXTURE_SOURCE_CODE) as FilterableQuery,
-      options.preferences ?? null,
+      options.searchPreferences ?? null,
     );
 
     const { query: sorted, applied: appliedSort } = applyOpportunitySort(excluded, options.sort);

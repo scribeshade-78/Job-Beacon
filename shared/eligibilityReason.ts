@@ -25,6 +25,13 @@ export const GATE_REASON_CLAUSES: Record<string, string> = {
   NO_FACTS_CONFIRMED: "you haven't confirmed any profile facts yet",
   DAILY_APPLICATION_LIMIT_EXCEEDED: "you've hit today's application limit",
   DUPLICATE_APPLICATION_EXISTS: "you've already applied to this job",
+
+  // Phase 1 Task 5 — the feed's SearchPreferences ledger. Same vocabulary as the
+  // application gates so one ineligibilityReasonOf renders both.
+  role_mismatch: "this job doesn't match the roles you selected",
+  excluded_company: "you've excluded this company",
+  work_mode_mismatch: "this job's work mode doesn't match what you're looking for",
+  below_min_salary: "the advertised salary is below your minimum",
 };
 
 export const GENERIC_INELIGIBLE_REASON = "it didn't pass our eligibility checks";
@@ -38,8 +45,9 @@ export interface StoredGateResult {
 export type StoredGates = Record<string, StoredGateResult | null | undefined>;
 
 /**
- * The order a reason is drawn from when several gates fail. Mirrors
- * EligibilityGates' declaration order: the most fundamental, candidate-fixable
+ * The order a reason is drawn from when several gates fail. The first nine
+ * mirror EligibilityGates' declaration order; the last three are the feed
+ * ledger's own gates (Phase 1 Task 5). Most fundamental, candidate-fixable
  * checks first, so the sentence points at the first thing worth doing.
  */
 export const GATE_PRECEDENCE = [
@@ -52,6 +60,12 @@ export const GATE_PRECEDENCE = [
   "verified_facts",
   "application_support",
   "rate_and_abuse_controls",
+  // The feed ledger's own gates (Phase 1 Task 5). "role_match" is shared with
+  // the application gate above; these three exist only in the feed ledger, and
+  // are listed so ineligibilityReasonOf can render it.
+  "excluded_company",
+  "work_mode",
+  "salary",
 ] as const;
 
 /**

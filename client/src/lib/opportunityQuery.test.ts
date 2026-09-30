@@ -10,14 +10,19 @@ import {
   applyOpportunityFilters,
   applyOpportunitySort,
   applyPreferenceExclusions,
+  applySearchPreferenceConstraints,
   countActiveFilters,
   deriveFiltersFromPreferences,
+  evaluateSearchPreferenceEligibility,
   filterOpportunitiesByRoleRelevance,
   freshnessCutoff,
   inheritedFilterLabels,
   type FilterableQuery,
   type OpportunityFilters,
+  type SearchPreferenceJob,
 } from "./opportunityQuery";
+import { buildSearchPreferences, type SearchPreferences } from "../../../shared/searchPreferences";
+import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 import { EMPTY_PREFERENCES, type CandidatePreferences } from "./candidatePreferences";
 
 /**
@@ -315,6 +320,23 @@ describe("countActiveFilters", () => {
 describe("filterOpportunitiesByRoleRelevance", () => {
   const job = (title: string) => ({ title });
 
+  /** Built by the real builder, so the filter is handed a genuine SearchPreferences. */
+  const preferencesWithRoles = (targetRoles: string[]) =>
+    buildSearchPreferences(
+      {
+        preferredCountries: [],
+        preferredCities: [],
+        remotePreference: null,
+        employmentTypes: [],
+        minSalary: null,
+        minSalaryCurrency: null,
+        openToAnyLocation: true,
+        excludedCompanies: [],
+        excludedIndustries: [],
+      },
+      targetRoles,
+    );
+
   it("keeps only Data Engineering jobs for a candidate who selected Data Engineer", () => {
     const kept = filterOpportunitiesByRoleRelevance(
       [
@@ -324,7 +346,7 @@ describe("filterOpportunitiesByRoleRelevance", () => {
         job("Marketing Manager"),
         job("Sales Executive"),
       ],
-      ["Data Engineer"],
+      preferencesWithRoles(["Data Engineer"]),
     ).map((entry) => entry.title);
 
     // "Data Analyst" shares the word "data" and is still not the role; one
@@ -336,7 +358,7 @@ describe("filterOpportunitiesByRoleRelevance", () => {
     const kept = filterOpportunitiesByRoleRelevance(
       [job("Frontend Engineer"), job("React Developer"), job("Data Engineer"), job("Backend Engineer")],
       // The alias form of the taxonomy title "Frontend Engineer".
-      ["Frontend Developer"],
+      preferencesWithRoles(["Frontend Developer"]),
     ).map((entry) => entry.title);
 
     expect(kept).toEqual(["Frontend Engineer", "React Developer"]);
@@ -345,15 +367,17 @@ describe("filterOpportunitiesByRoleRelevance", () => {
   it("returns every job when no target roles are selected", () => {
     const rows = [job("Data Engineer"), job("Marketing Manager")];
 
-    expect(filterOpportunitiesByRoleRelevance(rows, [])).toEqual(rows);
+    expect(filterOpportunitiesByRoleRelevance(rows, preferencesWithRoles([]))).toEqual(rows);
     // A blank role is "not selected", not a role that matches everything.
-    expect(filterOpportunitiesByRoleRelevance(rows, ["   "])).toEqual(rows);
+    expect(filterOpportunitiesByRoleRelevance(rows, preferencesWithRoles(["   "]))).toEqual(rows);
+    // No object at all means the feed has not resolved its preferences yet.
+    expect(filterOpportunitiesByRoleRelevance(rows, null)).toEqual(rows);
   });
 
   it("includes a job that matches an alias or a taxonomy skill", () => {
     const kept = filterOpportunitiesByRoleRelevance(
       [job("ETL Developer"), job("Spark Engineer"), job("Graphic Designer")],
-      ["Data Engineer"],
+      preferencesWithRoles(["Data Engineer"]),
     ).map((entry) => entry.title);
 
     expect(kept).toEqual(["ETL Developer", "Spark Engineer"]);
@@ -362,9 +386,119 @@ describe("filterOpportunitiesByRoleRelevance", () => {
   it("matches a custom role outside the taxonomy by its own words", () => {
     const kept = filterOpportunitiesByRoleRelevance(
       [job("Senior Blockchain Wizard"), job("Data Engineer")],
-      ["Blockchain Wizard"],
+      preferencesWithRoles(["Blockchain Wizard"]),
     ).map((entry) => entry.title);
 
     expect(kept).toEqual(["Senior Blockchain Wizard"]);
+  });
+});
+
+describe("applySearchPreferenceConstraints", () => {
+  const preferences = (overrides: Partial<SearchPreferences> = {}): SearchPreferences => ({
+    ...buildSearchPreferences(null, []),
+    ...overrides,
+  });
+
+  it("emits work mode, salary and company-exclusion clauses", () => {
+    const { query, calls } = recorder();
+    const { unapplied } = applySearchPreferenceConstraints(
+      query,
+      preferences({
+        workMode: "remote",
+        salary: { min: 80000, currency: "USD" },
+        exclusions: { companies: ["Acme, Inc"], industries: [] },
+      }),
+    );
+
+    expect(calls).toEqual([
+      "in:remote_type=remote",
+      "gte:salary_max=80000",
+      "eq:currency=USD",
+      'not:company_name.in.("Acme, Inc")',
+    ]);
+    expect(unapplied).toEqual([]);
+  });
+
+  it("constrains nothing for an empty object or no object", () => {
+    const empty = recorder();
+    applySearchPreferenceConstraints(empty.query, preferences());
+    expect(empty.calls).toEqual([]);
+
+    const absent = recorder();
+    expect(applySearchPreferenceConstraints(absent.query, null)).toEqual({ query: absent.query, unapplied: [] });
+  });
+
+  it("reports excluded industries as unapplied rather than silent", () => {
+    const { query } = recorder();
+    const result = applySearchPreferenceConstraints(
+      query,
+      preferences({ exclusions: { companies: [], industries: ["Gambling"] } }),
+    );
+
+    expect(result.unapplied).toEqual(["Excluded industries"]);
+  });
+});
+
+describe("evaluateSearchPreferenceEligibility", () => {
+  const preferences = (overrides: Partial<SearchPreferences> = {}): SearchPreferences => ({
+    ...buildSearchPreferences(null, []),
+    targetRoles: ["Data Engineer"],
+    workMode: "remote",
+    salary: { min: 60000, currency: "USD" },
+    exclusions: { companies: ["Acme Corp"], industries: [] },
+    isComplete: true,
+    ...overrides,
+  });
+
+  const job = (overrides: Partial<SearchPreferenceJob> = {}): SearchPreferenceJob => ({
+    title: "Senior Data Engineer",
+    companyName: "Globex",
+    remoteType: "remote",
+    salary: { max: 90000, currency: "USD" },
+    ...overrides,
+  });
+
+  it("passes a job that satisfies every search preference", () => {
+    const ledger = evaluateSearchPreferenceEligibility(preferences(), job());
+
+    expect(ledger.eligible).toBe(true);
+    expect(Object.values(ledger.gates).every((gate) => gate.status === "pass")).toBe(true);
+  });
+
+  it("maps each failed gate to its reasonCode and its human sentence", () => {
+    const role = evaluateSearchPreferenceEligibility(preferences(), job({ title: "Marketing Manager" }));
+    expect(role.gates.role_match.reasonCode).toBe("role_mismatch");
+    expect(ineligibilityReasonOf(role.gates)).toBe("this job doesn't match the roles you selected");
+
+    const company = evaluateSearchPreferenceEligibility(preferences(), job({ companyName: "acme corp" }));
+    expect(company.gates.excluded_company.reasonCode).toBe("excluded_company");
+    expect(ineligibilityReasonOf(company.gates)).toBe("you've excluded this company");
+
+    const mode = evaluateSearchPreferenceEligibility(preferences(), job({ remoteType: "on_site" }));
+    expect(mode.gates.work_mode.reasonCode).toBe("work_mode_mismatch");
+    expect(ineligibilityReasonOf(mode.gates)).toBe("this job's work mode doesn't match what you're looking for");
+
+    const salary = evaluateSearchPreferenceEligibility(
+      preferences(),
+      job({ salary: { max: 50000, currency: "USD" } }),
+    );
+    expect(salary.gates.salary.reasonCode).toBe("below_min_salary");
+    expect(ineligibilityReasonOf(salary.gates)).toBe("the advertised salary is below your minimum");
+  });
+
+  it("treats unstated roles, work mode and salary as no constraint", () => {
+    const unconstrained = preferences({
+      targetRoles: [],
+      workMode: null,
+      salary: { min: null, currency: null },
+      exclusions: { companies: [], industries: [] },
+    });
+
+    const ledger = evaluateSearchPreferenceEligibility(
+      unconstrained,
+      job({ title: "Marketing Manager", companyName: null, remoteType: null, salary: { max: null, currency: null } }),
+    );
+
+    expect(ledger.eligible).toBe(true);
   });
 });

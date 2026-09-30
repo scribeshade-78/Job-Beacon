@@ -9,7 +9,8 @@ import {
   type SortId,
 } from "../../../shared/opportunityQuery";
 import { matchesAnyTargetRole } from "./roleTaxonomy";
-import type { CandidatePreferences } from "./candidatePreferences";
+import { EMPTY_PREFERENCES, type CandidatePreferences } from "./candidatePreferences";
+import type { SearchPreferences } from "../../../shared/searchPreferences";
 
 /**
  * Task I — turning the shared spec plus a filter state into a PostgREST query,
@@ -342,7 +343,6 @@ export function applyOpportunitySort<Q extends FilterableQuery>(
   return { query: next, applied: effective.id };
 }
 
-
 /**
  * The feed's target-role relevance filter.
  *
@@ -356,7 +356,6 @@ export function applyOpportunitySort<Q extends FilterableQuery>(
  * IT FILTERS THE FETCHED PAGE, SO CALLERS MUST PAGE ON RAW ROWS. Callers keep
  * the unfiltered page in state and filter only what they render; the offset then
  * still counts database rows, and a filtered page cannot re-read or skip rows.
- * Filtering inside the query would make the offset a count of filtered rows.
  *
  * NO TARGET ROLES MEANS NO FILTER — the existing product behaviour, where a
  * candidate who has not chosen roles sees the whole verified feed. The readiness
@@ -364,13 +363,137 @@ export function applyOpportunitySort<Q extends FilterableQuery>(
  */
 export function filterOpportunitiesByRoleRelevance<T extends { title: string }>(
   opportunities: readonly T[],
-  targetRoles: readonly string[],
+  preferences: SearchPreferences | null,
 ): T[] {
-  const roles = targetRoles.map((role) => role.trim()).filter((role) => role !== "");
-
-  if (roles.length === 0) {
+  if (!preferences || preferences.targetRoles.length === 0) {
     return [...opportunities];
   }
 
-  return opportunities.filter((opportunity) => matchesAnyTargetRole(opportunity.title, roles));
+  return opportunities.filter((opportunity) => matchesAnyTargetRole(opportunity.title, preferences.targetRoles));
+}
+
+/**
+ * The standing constraints SearchPreferences puts on every feed query, as
+ * PostgREST clauses: work mode, salary floor and name exclusions.
+ *
+ * THIS IS THE OPTIMISATION HALF OF THE SAME RULE. Everything applied here is
+ * also checkable by the ledger below, which is what keeps the by-id path (a
+ * freshly discovered vacancy is fetched with .in("id", ...), not through these
+ * clauses) consistent with the paged one. The clauses exist so the database
+ * does not send rows we already know we do not want.
+ *
+ * Returns the constraints that could NOT be expressed, so the caller can report
+ * them rather than implying they took effect — excluded industries still have no
+ * column on the view.
+ */
+export function applySearchPreferenceConstraints<Q extends FilterableQuery>(
+  query: Q,
+  preferences: SearchPreferences | null,
+): { query: Q; unapplied: string[] } {
+  if (!preferences) {
+    return { query, unapplied: [] };
+  }
+
+  let next = query;
+
+  // A concrete work mode is a hard constraint; null ("not stated") and "any"
+  // constrain nothing. A listing whose remote_type is NULL is excluded by the
+  // in-list, which is the documented consequence of choosing a mode.
+  if (preferences.workMode === "remote" || preferences.workMode === "hybrid" || preferences.workMode === "on_site") {
+    next = next.in("remote_type", [preferences.workMode]) as Q;
+  }
+
+  // salary_max, not salary_min, so a range reaching the floor qualifies. The
+  // currency equality stops two currencies being compared as one unit; the
+  // builder guarantees a currency whenever a floor survives sanitisation.
+  if (preferences.salary.min !== null && preferences.salary.currency !== null) {
+    next = next.gte("salary_max", preferences.salary.min) as Q;
+    next = next.eq("currency", preferences.salary.currency) as Q;
+  }
+
+  // Name exclusions reuse the existing standing-exclusion builder, so the
+  // quoting and the "no industry column on the view" reporting stay in one place.
+  const exclusions = applyPreferenceExclusions(next, {
+    ...EMPTY_PREFERENCES,
+    excludedCompanies: preferences.exclusions.companies,
+    excludedIndustries: preferences.exclusions.industries,
+  });
+
+  return { query: exclusions.query, unapplied: exclusions.unapplied };
+}
+
+/** The job attributes the feed ledger judges. OpportunitySummary satisfies it. */
+export interface SearchPreferenceJob {
+  title: string;
+  companyName: string | null;
+  remoteType: string | null;
+  salary: { max: number | null; currency: string | null };
+}
+
+/** The ledger is deliberately in the same gates shape as application_plans.gate_results. */
+export type SearchPreferenceGates = Record<
+  "role_match" | "excluded_company" | "work_mode" | "salary",
+  { status: "pass" | "fail"; reasonCode?: string; detail?: Record<string, unknown> }
+>;
+
+export interface SearchPreferenceLedger {
+  eligible: boolean;
+  gates: SearchPreferenceGates;
+}
+
+/**
+ * The structured, human-readable reason a job is filtered out — the feed's
+ * eligibility ledger.
+ *
+ * WHY IT IS NOT JUST A DROP. The feed hides rows the candidate never sees, so a
+ * silent exclusion is indistinguishable from a broken filter. Each check mirrors
+ * one clause above one-for-one, so the profile the server filtered on and the
+ * sentence the candidate reads come from the same object, and
+ * ineligibilityReasonOf renders the first failing gate exactly as it does for an
+ * application plan.
+ */
+export function evaluateSearchPreferenceEligibility(
+  preferences: SearchPreferences,
+  job: SearchPreferenceJob,
+): SearchPreferenceLedger {
+  const roleConstrained = preferences.targetRoles.length > 0;
+  const rolePasses = !roleConstrained || matchesAnyTargetRole(job.title, preferences.targetRoles);
+
+  const company = job.companyName === null ? null : job.companyName.trim().toLowerCase();
+  const excludedCompany =
+    company !== null &&
+    company !== "" &&
+    preferences.exclusions.companies.some((name) => name.toLowerCase() === company);
+
+  const mode = preferences.workMode;
+  const modeConstrained = mode === "remote" || mode === "hybrid" || mode === "on_site";
+  const modePasses = !modeConstrained || job.remoteType === mode;
+
+  const min = preferences.salary.min;
+  const currency = preferences.salary.currency;
+  const jobCurrency = job.salary.currency === null ? null : job.salary.currency.trim().toUpperCase();
+  const salaryPasses =
+    min === null ||
+    (job.salary.max !== null && job.salary.max >= min && (currency === null || jobCurrency === currency));
+
+  const gates: SearchPreferenceGates = {
+    role_match: rolePasses
+      ? { status: "pass" }
+      : { status: "fail", reasonCode: "role_mismatch", detail: { targetRoles: preferences.targetRoles } },
+    excluded_company: excludedCompany
+      ? { status: "fail", reasonCode: "excluded_company", detail: { companyName: job.companyName } }
+      : { status: "pass" },
+    work_mode: modePasses
+      ? { status: "pass" }
+      : { status: "fail", reasonCode: "work_mode_mismatch", detail: { workMode: mode, jobWorkMode: job.remoteType } },
+    salary: salaryPasses
+      ? { status: "pass" }
+      : {
+          status: "fail",
+          reasonCode: "below_min_salary",
+          detail: { min, currency, salaryMax: job.salary.max, jobCurrency },
+        },
+  };
+
+  return { eligible: Object.values(gates).every((gate) => gate.status === "pass"), gates };
 }

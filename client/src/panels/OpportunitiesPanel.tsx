@@ -35,11 +35,14 @@ import {
   EMPTY_FILTERS,
   countActiveFilters,
   deriveFiltersFromPreferences,
+  evaluateSearchPreferenceEligibility,
   filterOpportunitiesByRoleRelevance,
   type OpportunityFilters,
 } from "../lib/opportunityQuery";
 import { loadCandidatePreferences, type CandidatePreferences } from "../lib/candidatePreferences";
-import { listSelectedRoles } from "../lib/candidateSelectedRoles";
+import { loadSearchPreferences } from "../lib/searchPreferences";
+import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
+import type { SearchPreferences } from "../../../shared/searchPreferences";
 import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
@@ -130,11 +133,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const [sort, setSort] = useState<SortId>(DEFAULT_SORT);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   /**
-   * The selected target roles. EMPTY MEANS NO FILTER — the existing behaviour
-   * for a candidate who has not chosen any, who keeps seeing the whole verified
-   * feed. A non-empty list makes the feed strict (see visibleOpportunities).
+   * The unified SearchPreferences object — the feed's single source of truth.
+   *
+   * Null until both tables have been read, so the first query does not fire
+   * against a half-known profile. Empty target roles inside a built object still
+   * means "no role filter" — the existing behaviour for a candidate who has not
+   * chosen any.
    */
-  const [targetRoles, setTargetRoles] = useState<string[]>([]);
+  const [searchPreferences, setSearchPreferences] = useState<SearchPreferences | null>(null);
 
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
@@ -197,24 +203,26 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   }, [candidateId]);
 
   /**
-   * The candidate's target roles — the feed's relevance input.
+   * The unified SearchPreferences object — the feed's relevance input.
    *
-   * Read here rather than inside listOpportunities because the filter is applied
-   * to the RENDERED rows while the query keeps paging on the raw rows. Filtering
-   * inside the query would make the offset a count of returned (filtered) rows,
-   * so the next page would re-read or skip database rows.
+   * Read here rather than inside listOpportunities because the ROLE filter is
+   * applied to the RENDERED rows while the query keeps paging on the raw rows.
+   * Filtering that inside the query would make the offset a count of returned
+   * (filtered) rows, so the next page would re-read or skip database rows. The
+   * work-mode, salary and exclusion halves of the same object ARE applied to the
+   * query, as clauses (see applySearchPreferenceConstraints).
    */
   useEffect(() => {
     if (!candidateId) {
-      setTargetRoles([]);
+      setSearchPreferences(null);
       return;
     }
 
     let cancelled = false;
 
-    listSelectedRoles(getSupabaseBrowserClient()).then((result) => {
+    loadSearchPreferences(getSupabaseBrowserClient(), candidateId).then((result) => {
       if (cancelled) return;
-      setTargetRoles(result.kind === "success" ? result.roles.map((role) => role.roleName) : []);
+      setSearchPreferences(result.kind === "success" ? result.searchPreferences : null);
     });
 
     return () => {
@@ -243,7 +251,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     let cancelled = false;
     setQuerying(true);
 
-    listOpportunities(getSupabaseBrowserClient(), { filters, preferences, sort }).then((result) => {
+    listOpportunities(getSupabaseBrowserClient(), { filters, searchPreferences, sort }).then((result) => {
       if (cancelled) return;
 
       setQuerying(false);
@@ -261,7 +269,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [filters, preferences, sort]);
+  }, [filters, searchPreferences, sort]);
 
   // Phase 2.3c: paging is offset-based off the current row count. The view
   // orders by the stored priority_score, so an urgency refresh can shuffle a
@@ -275,7 +283,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       // under different clauses would be a second, silently different result set
       // appended to the first.
       filters: filters ?? EMPTY_FILTERS,
-      preferences,
+      searchPreferences,
       sort,
     });
     setLoadingMore(false);
@@ -331,14 +339,23 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         // The SAME filters, exclusions and sort the list is currently showing.
         // Re-reading page 1 unfiltered here would silently replace a filtered list
         // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
-        listOpportunities(client, { filters: filters ?? EMPTY_FILTERS, preferences, sort }),
+        listOpportunities(client, { filters: filters ?? EMPTY_FILTERS, searchPreferences, sort }),
         listOpportunitiesByIds(client, unscoredIds),
       ]);
 
       setNewVacancyIds(outcome.result.newVacancyIds);
 
       if (discovered.kind === "success") {
-        setNewlyDiscovered(narrowToWorkMode(discovered.opportunities));
+        // The by-id read does not go through the standing clauses, so the same
+        // ledger the client filter uses decides these too — otherwise a fetched
+        // job could appear here that the paged query would have excluded.
+        const eligibleDiscovered = searchPreferences
+          ? discovered.opportunities.filter(
+              (opportunity) => evaluateSearchPreferenceEligibility(searchPreferences, opportunity).eligible,
+            )
+          : discovered.opportunities;
+
+        setNewlyDiscovered(narrowToWorkMode(eligibleDiscovered));
       }
 
       const text = describeDiscoveryResult(outcome.result);
@@ -437,8 +454,33 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     }
 
     // The one thing that narrows the fetched rows: target-role relevance.
-    return filterOpportunitiesByRoleRelevance(merged, targetRoles);
-  }, [opportunities, newlyDiscovered, targetRoles]);
+    return filterOpportunitiesByRoleRelevance(merged, searchPreferences);
+  }, [opportunities, newlyDiscovered, searchPreferences]);
+
+  /**
+   * What the feed's own constraints are hiding from the loaded page, so an
+   * exclusion is visible rather than silent. The server already applied work
+   * mode, salary and exclusions to this page, so on the main list this reports
+   * the role mismatches the client filter removed; the same ledger decides the
+   * by-id path in handleRefresh.
+   */
+  const hiddenByPreferences = useMemo(() => {
+    if (!searchPreferences) {
+      return [] as string[];
+    }
+
+    const reasons = new Set<string>();
+
+    for (const opportunity of opportunities ?? []) {
+      const ledger = evaluateSearchPreferenceEligibility(searchPreferences, opportunity);
+
+      if (!ledger.eligible) {
+        reasons.add(ineligibilityReasonOf(ledger.gates));
+      }
+    }
+
+    return [...reasons];
+  }, [opportunities, searchPreferences]);
 
   const activeFilterCount = filters === null ? 0 : countActiveFilters(filters);
 
@@ -630,13 +672,19 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         {/* The role filter can empty a non-empty page. That is a different fact
             from "no jobs" and from "your filters match none", and it is the one
             the candidate can act on by editing their target roles. */}
-        {(opportunities?.length ?? 0) > 0 && visibleOpportunities.length === 0 && targetRoles.length > 0 && (
+        {(opportunities?.length ?? 0) > 0 && visibleOpportunities.length === 0 && (searchPreferences?.targetRoles.length ?? 0) > 0 && (
           <p className="text-sm text-ios-text-secondary">
             No jobs match your target roles.{" "}
             <Link href="/target-roles" className="text-ios-blue hover:underline">
               Update your target roles
             </Link>{" "}
             to widen the feed.
+          </p>
+        )}
+
+        {hiddenByPreferences.length > 0 && (
+          <p role="status" className="text-xs text-ios-text-secondary mb-3">
+            Some loaded jobs were set aside by your search preferences: {hiddenByPreferences.join("; ")}.
           </p>
         )}
 
