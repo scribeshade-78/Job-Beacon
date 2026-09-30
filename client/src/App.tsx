@@ -5,6 +5,8 @@ import { AppShell } from "./components/AppShell";
 import { AuthCard } from "./components/AuthCard";
 import { ConfirmationPendingScreen } from "./components/ConfirmationPendingScreen";
 import { LoadingScreen } from "./components/LoadingScreen";
+import { RequireCapability } from "./components/RequireCapability";
+import { capabilitiesFromIdentity, protectedRouteFor, type Capabilities } from "./lib/capabilities";
 import { fetchVerifiedIdentity, useAuth, type VerifiedIdentity } from "./lib/auth";
 import { ensureCandidateProfile } from "./lib/profile";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
@@ -13,6 +15,7 @@ import { AdminPage } from "./pages/AdminPage";
 import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { BillingPage } from "./pages/BillingPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
+import { EmployerAccessPage } from "./pages/EmployerAccessPage";
 import { EmployerPage } from "./pages/EmployerPage";
 import { ModeratorPage } from "./pages/ModeratorPage";
 import { OpportunitiesPage } from "./pages/OpportunitiesPage";
@@ -23,60 +26,74 @@ import { ResumesPage } from "./pages/ResumesPage";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TargetRolesPage } from "./pages/TargetRolesPage";
 
-interface SignedInRoutesProps {
+export interface SignedInRoutesProps {
   candidateId: string | undefined;
   ready: boolean;
   email: string | null;
-  isModerator: boolean;
-  isAdmin: boolean;
+  /**
+   * Server-verified capabilities. Replaces the previous isModerator/isAdmin
+   * booleans so that routing and navigation cannot each re-derive access from a
+   * different signal — see lib/capabilities.ts.
+   */
+  capabilities: Capabilities;
+  /** True while /api/me has not answered yet. Denies by default; see RequireCapability. */
+  capabilitiesPending: boolean;
   identityError: string | null;
   profileError: string | null;
   onLogout: () => void;
 }
 
 /**
- * R3.1: /moderator renders bare (no AppShell) — the candidate sidebar
- * (Resumes, Target Roles, Opportunities, ...) doesn't fit the moderator
- * persona at all. useLocation() must run inside <Router>, which is why this
- * is a separate component rather than a branch inside App itself.
+ * R3.1: the privileged routes render bare (no AppShell) — the candidate sidebar
+ * (Resumes, Target Roles, Opportunities, ...) doesn't fit those personas at all.
+ * useLocation() must run inside <Router>, which is why this is a separate
+ * component rather than a branch inside App itself.
+ *
+ * EVERY PRIVILEGED ROUTE GOES THROUGH RequireCapability. Before this, all three
+ * were rendered on the strength of the URL alone — any signed-in user who typed
+ * #/admin got the admin shell. The capability rule and the route component are
+ * now decided by the same table (lib/capabilities.ts PROTECTED_ROUTES), so a
+ * privileged path cannot be added here without naming the capability that opens
+ * it.
+ *
+ * CLAIMING A COMPANY IS NOT HERE ANY MORE. It moved to /account/employer-access
+ * (a normal candidate account page), which is what allows /employer to require an
+ * approved employer without orphaning the claim flow.
  */
-function SignedInRoutes({
+export function SignedInRoutes({
   candidateId,
   ready,
   email,
-  isModerator,
-  isAdmin,
+  capabilities,
+  capabilitiesPending,
   identityError,
   profileError,
   onLogout,
 }: SignedInRoutesProps) {
   const [location] = useLocation();
 
-  if (location === "/moderator") {
-    return <ModeratorPage onLogout={onLogout} />;
-  }
+  const privilegedRoute = protectedRouteFor(location);
 
-  // R8.1: renders bare, no candidate AppShell — same reasoning /moderator
-  // uses, and rendered unconditionally at the path the same way: the real
-  // authorization boundary is requireAdmin on every /api/admin/* route, so
-  // a non-admin who reaches this URL just sees forbidden states from the
-  // API, never candidate data. isAdmin (server-verified via /api/me) only
-  // drives whether the nav link is shown, like showModeratorLink.
-  if (location === "/admin") {
-    return <AdminPage onLogout={onLogout} />;
-  }
-
-  // R5.4a: renders bare, no candidate AppShell — same reasoning /moderator
-  // already uses (the candidate sidebar doesn't fit this persona either).
-  // Reachable by any signed-in user regardless of isEmployer: submitting a
-  // claim is how a candidate becomes one, so this can't be gated on
-  // already being verified.
-  if (location === "/employer") {
-    return <EmployerPage onLogout={onLogout} />;
+  if (privilegedRoute) {
+    return (
+      <RequireCapability
+        capability={privilegedRoute.capability}
+        capabilities={capabilities}
+        pending={capabilitiesPending}
+      >
+        {location === "/moderator" ? (
+          <ModeratorPage onLogout={onLogout} />
+        ) : location === "/admin" ? (
+          <AdminPage onLogout={onLogout} />
+        ) : (
+          <EmployerPage onLogout={onLogout} />
+        )}
+      </RequireCapability>
+    );
   }
 
   return (
-    <AppShell email={email} onLogout={onLogout} showModeratorLink={isModerator || isAdmin} showAdminLink={isAdmin}>
+    <AppShell email={email} onLogout={onLogout} capabilities={capabilities}>
       {identityError && (
         <p role="alert" className="mb-4 text-sm text-status-blocked-fg">
           {identityError}
@@ -118,6 +135,12 @@ function SignedInRoutes({
         </Route>
         <Route path="/security">
           <SecurityPage />
+        </Route>
+        {/* The candidate-accessible employer claim flow, split out of the
+            employer portal so that /employer can require an approved employer
+            without taking the ability to claim a company away from candidates. */}
+        <Route path="/account/employer-access">
+          <EmployerAccessPage capabilities={capabilities} />
         </Route>
         <Route path="/billing">
           <BillingPage />
@@ -216,14 +239,21 @@ export function App() {
   if (auth.status === "signedIn") {
     const ready = Boolean(auth.user) && profileReady;
 
+    // DENY BY DEFAULT WHILE UNKNOWN. capabilitiesFromIdentity(null) grants
+    // nothing, and capabilitiesPending is what tells a protected route the
+    // difference between "not allowed" and "not answered yet" — the first
+    // redirects, the second must render neither the page nor a refusal.
+    const capabilities = capabilitiesFromIdentity(identity);
+    const capabilitiesPending = identity === null && identityError === null;
+
     return (
       <Router hook={useHashLocation}>
         <SignedInRoutes
           candidateId={auth.user?.id}
           ready={ready}
           email={identity?.email ?? null}
-          isModerator={identity?.isModerator ?? false}
-          isAdmin={identity?.isAdmin ?? false}
+          capabilities={capabilities}
+          capabilitiesPending={capabilitiesPending}
           identityError={identityError}
           profileError={profileError}
           onLogout={() => void auth.signOut()}

@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Briefcase,
   Building2,
+  Building as BuildingIcon,
   CreditCard,
   FileText,
   Inbox,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import { APP_NAME } from "../../../shared/app";
 import { cn } from "../lib/utils";
+import type { Capabilities } from "../lib/capabilities";
 import { CopilotDrawer } from "./CopilotDrawer";
 
 interface NavItem {
@@ -40,10 +42,11 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/responses", label: "Responses", Icon: Inbox },
   { href: "/action-required", label: "Action Required", Icon: AlertCircle },
   { href: "/companies", label: "Company Intelligence", Icon: Building2 },
-  // R5.4a: unconditional (unlike the moderator link below) — submitting a
-  // claim is how a candidate becomes an employer, so this can't be gated
-  // on already being one.
-  { href: "/employer", label: "Employer", Icon: Landmark },
+  // CLAIMING A COMPANY, NOT ENTERING THE EMPLOYER PORTAL. This replaced an
+  // unconditional "Employer" link to /employer: the claim flow is a candidate
+  // action, so it belongs under the account, while the portal itself requires an
+  // approved employer and is listed conditionally below.
+  { href: "/account/employer-access", label: "Employer access", Icon: Landmark },
   { href: "/security", label: "Security", Icon: ShieldCheck },
   { href: "/billing", label: "Plans & Billing", Icon: CreditCard },
 ];
@@ -52,10 +55,18 @@ interface AppShellProps {
   email: string | null;
   onLogout: () => void;
   children: ReactNode;
-  /** R3.1: shown only for moderators (server-verified via /api/me's isModerator) — a UX convenience, not the authorization boundary (requireModerator on the backend is). */
-  showModeratorLink?: boolean;
-  /** R8.1: shown only for admins (server-verified via /api/me's isAdmin) — same UX-convenience-only caveat as showModeratorLink; requireAdmin on the backend is the boundary. */
-  showAdminLink?: boolean;
+  /**
+   * Server-verified capabilities, shared with the router.
+   *
+   * THE SAME OBJECT DRIVES BOTH, which is the point: the nav cannot offer a
+   * destination the router would refuse, and a route cannot be protected
+   * without the nav knowing. Each link below is justified by the identical
+   * capability RequireCapability checks.
+   *
+   * A UX CONVENIENCE ONLY. Every matching API has its own middleware and every
+   * privileged table has RLS; hiding a link is not what stops a caller.
+   */
+  capabilities: Capabilities;
 }
 
 function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => void }) {
@@ -102,12 +113,15 @@ function SidebarFooter({ email, onLogout }: { email: string | null; onLogout: ()
   );
 }
 
-export function AppShell({ email, onLogout, children, showModeratorLink, showAdminLink }: AppShellProps) {
+export function AppShell({ email, onLogout, children, capabilities }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Each conditional entry is the navigation twin of one PROTECTED_ROUTES entry,
+  // keyed on the same capability rather than on a separately-derived boolean.
   const navItems = [
     ...NAV_ITEMS,
-    ...(showModeratorLink ? [{ href: "/moderator", label: "Moderation", Icon: ShieldAlert }] : []),
-    ...(showAdminLink ? [{ href: "/admin", label: "Admin", Icon: SlidersHorizontal }] : []),
+    ...(capabilities.canAccessEmployerPortal ? [{ href: "/employer", label: "Employer portal", Icon: BuildingIcon }] : []),
+    ...(capabilities.canAccessModeration ? [{ href: "/moderator", label: "Moderation", Icon: ShieldAlert }] : []),
+    ...(capabilities.canAccessAdmin ? [{ href: "/admin", label: "Admin", Icon: SlidersHorizontal }] : []),
   ];
 
   return (

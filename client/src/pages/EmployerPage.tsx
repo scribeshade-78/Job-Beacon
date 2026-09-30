@@ -7,7 +7,8 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { StatusBadge, type StatusBadgeStatus } from "../components/ui/status-badge";
-import { listMyEmployerClaims, submitEmployerClaim, type EmployerClaim } from "../lib/employer";
+import { type EmployerClaim } from "../lib/employer";
+import { EmployerClaimSection } from "../components/EmployerClaimSection";
 import { listCompaniesForReview, type ReviewableCompany } from "../lib/companyReviews";
 import {
   listMyCompanyFactCorrections,
@@ -24,12 +25,6 @@ interface EmployerPageProps {
   onLogout: () => void;
 }
 
-const CLAIM_STATUS_BADGE: Record<EmployerClaim["status"], StatusBadgeStatus> = {
-  pending: "under_review",
-  verified: "verified",
-  rejected: "fact_rejected",
-};
-
 const CORRECTION_STATUS_BADGE: Record<CompanyFactCorrection["status"], StatusBadgeStatus> = {
   pending: "under_review",
   approved: "verified",
@@ -44,13 +39,8 @@ async function getAccessToken(): Promise<string | null> {
 export function EmployerPage({ onLogout }: EmployerPageProps) {
   const [claims, setClaims] = useState<EmployerClaim[] | null>(null);
   const [companies, setCompanies] = useState<ReviewableCompany[] | null>(null);
-  const [companyId, setCompanyId] = useState("");
-  const [representativeName, setRepresentativeName] = useState("");
-  const [representativeRole, setRepresentativeRole] = useState("");
-  const [evidence, setEvidence] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const [corrections, setCorrections] = useState<CompanyFactCorrection[] | null>(null);
   const [correctionCompanyId, setCorrectionCompanyId] = useState("");
@@ -64,16 +54,6 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
   const [appealRationale, setAppealRationale] = useState("");
   const [appealEvidence, setAppealEvidence] = useState("");
   const [appealBusy, setAppealBusy] = useState(false);
-
-  async function refreshClaims() {
-    const result = await listMyEmployerClaims(getSupabaseBrowserClient());
-
-    if (result.kind === "success") {
-      setClaims(result.claims);
-    } else {
-      setError(result.message);
-    }
-  }
 
   async function refreshCorrections() {
     const result = await listMyCompanyFactCorrections(getSupabaseBrowserClient());
@@ -117,7 +97,6 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
   }
 
   useEffect(() => {
-    void refreshClaims();
     void refreshCorrections();
 
     listCompaniesForReview(getSupabaseBrowserClient()).then((result) => {
@@ -174,42 +153,6 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
     setAppealBusy(false);
   }
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setNotice(null);
-
-    if (companyId === "" || representativeName.trim() === "" || representativeRole.trim() === "") {
-      setError("Company, your name, and your role are required.");
-      return;
-    }
-
-    setBusy(true);
-
-    const accessToken = await getAccessToken();
-
-    if (!accessToken) {
-      setError("You must be signed in to submit a claim.");
-      setBusy(false);
-      return;
-    }
-
-    const result = await submitEmployerClaim(companyId, representativeName.trim(), representativeRole.trim(), evidence, accessToken);
-
-    if (result.kind === "error") {
-      setError(result.message);
-    } else {
-      setNotice("Claim submitted. A moderator will review it — you'll see the outcome here.");
-      setCompanyId("");
-      setRepresentativeName("");
-      setRepresentativeRole("");
-      setEvidence("");
-      await refreshClaims();
-    }
-
-    setBusy(false);
-  }
-
   async function handleSubmitCorrection(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
@@ -254,9 +197,6 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
   // A claim can be resubmitted after rejection (unique(user_id, company_id)
   // upserts the same row) but not while already pending/verified — no
   // point offering the form for a company already in flight.
-  const claimedCompanyIds = new Set((claims ?? []).filter((claim) => claim.status !== "rejected").map((claim) => claim.companyId));
-  const claimableCompanies = (companies ?? []).filter((company) => !claimedCompanyIds.has(company.id));
-
   // Corrections require §20.2's "verified employer" gate — a pending or
   // rejected claim doesn't authorize correcting a company's facts, only a
   // successful moderator decision on the claim itself does.
@@ -265,15 +205,19 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
 
   return (
     <div className="min-h-screen bg-ios-bg">
-      {/* This page renders bare — App.tsx mounts /employer outside AppShell,
-          so unlike every other candidate screen there is no sidebar and
-          therefore no navigation at all. Without this link the only ways out
-          were the browser's back button or logging out, which is a dead end
-          for a route the sidebar links to unconditionally (R5.4a: it can't
-          be gated on already being a verified employer, so any candidate can
-          land here by mistake). A real Link to "/" rather than
-          history.back() — back() is undefined behaviour when this is the
-          first entry in the history stack, e.g. a bookmarked or pasted URL. */}
+      {/* This page renders bare — App.tsx mounts /employer outside AppShell, so
+          unlike every other candidate screen there is no sidebar and therefore
+          no navigation at all. Without this link the only ways out were the
+          browser's back button or logging out.
+
+          Reachability changed with the route guard: /employer now requires an
+          approved employer (RequireCapability), so a candidate no longer lands
+          here by mistake, and the sidebar offers it only to someone who holds
+          the capability. The escape hatch stays anyway, because "only the right
+          people can arrive" is not the same as "they cannot get stuck" — a
+          bookmarked URL, a revoked claim, or a stale tab all still land here.
+          A real Link to "/" rather than history.back() — back() is undefined
+          behaviour when this is the first entry in the history stack. */}
       <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-ios-separator bg-ios-card/80 px-6 backdrop-blur-md">
         <div className="flex min-w-0 items-center gap-2 sm:gap-4">
           <Link
@@ -314,100 +258,11 @@ export function EmployerPage({ onLogout }: EmployerPageProps) {
           </p>
         )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle id="claims-title">Your claims</CardTitle>
-          </CardHeader>
-          <CardContent aria-labelledby="claims-title">
-            {claims?.length === 0 && (
-              <p className="text-sm text-ios-text-secondary">
-                You haven't claimed a company profile yet. Submit a claim below.
-              </p>
-            )}
-            <ul className="space-y-2">
-              {claims?.map((claim) => {
-                const company = companies?.find((c) => c.id === claim.companyId);
-                return (
-                  <li
-                    key={claim.id}
-                    className="flex items-center justify-between gap-2 rounded-control border border-ios-separator p-3 text-sm text-black"
-                  >
-                    <span>{company?.displayedName ?? claim.companyId}</span>
-                    <StatusBadge status={CLAIM_STATUS_BADGE[claim.status]} />
-                  </li>
-                );
-              })}
-            </ul>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle id="claim-form-title">Claim a company profile</CardTitle>
-          </CardHeader>
-          <CardContent aria-labelledby="claim-form-title">
-            {claimableCompanies.length === 0 && companies !== null ? (
-              <p className="text-sm text-ios-text-secondary">No unclaimed companies available to claim right now.</p>
-            ) : (
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="company">Company</Label>
-                  <select
-                    id="company"
-                    value={companyId}
-                    onChange={(event) => setCompanyId(event.target.value)}
-                    disabled={busy}
-                    className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <option value="">Select a company…</option>
-                    {claimableCompanies.map((company) => (
-                      <option key={company.id} value={company.id}>
-                        {company.displayedName}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="representativeName">Your name</Label>
-                  <Input
-                    id="representativeName"
-                    value={representativeName}
-                    onChange={(event) => setRepresentativeName(event.target.value)}
-                    disabled={busy}
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="representativeRole">Your role at the company</Label>
-                  <Input
-                    id="representativeRole"
-                    value={representativeRole}
-                    onChange={(event) => setRepresentativeRole(event.target.value)}
-                    disabled={busy}
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="evidence">Evidence of authority (optional)</Label>
-                  <textarea
-                    id="evidence"
-                    value={evidence}
-                    onChange={(event) => setEvidence(event.target.value)}
-                    disabled={busy}
-                    rows={3}
-                    placeholder="A link to your profile on the company's careers page, an offer letter reference, etc. — a moderator reviews every claim, this helps them confirm it."
-                    className="w-full rounded-control border border-ios-separator bg-ios-card px-3.5 py-2.5 text-[15px] text-black placeholder:text-ios-text-secondary focus-visible:border-ios-blue disabled:cursor-not-allowed disabled:opacity-50"
-                  />
-                </div>
-
-                <Button type="submit" disabled={busy}>
-                  {busy ? "Submitting…" : "Submit claim"}
-                </Button>
-              </form>
-            )}
-          </CardContent>
-        </Card>
+        {/* Shared with /account/employer-access rather than duplicated here, so
+            the claim form and its validation exist once. onClaimsChange keeps this
+            page's own view of the claims (which decides the employer-only
+            sections below) in step with what the section just did. */}
+        <EmployerClaimSection onClaimsChange={setClaims} />
 
         {verifiedCompanies.length > 0 && (
           <>

@@ -894,6 +894,60 @@ describe("GET /api/admin/overview", () => {
     );
   });
 
+  /**
+   * CROSS-ROLE DENIAL, WITH EXPLICIT FIXTURES.
+   *
+   * The pre-existing 403 test above leaves checkIsModerator at its real default,
+   * so it proves "not an admin is refused" without pinning which kind of
+   * non-admin. These state the fixture outright, because the production report
+   * raised the possibility that the tested account held a capability nobody
+   * expected — a role must therefore be denied by the SAME test that names it.
+   *
+   * A moderator is not an admin: requireAdmin consults only the admin checker,
+   * so holding moderation must not leak the admin console. An employer is a
+   * third, unrelated axis — a verified claim on a company.
+   */
+  it("returns 403 for a moderator, who is not an admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsModerator: async () => true, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/overview`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 403 for a verified employer, who is neither admin nor moderator", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        checkIsModerator: async () => false,
+        checkIsAdmin: async () => false,
+        checkHasVerifiedEmployerClaim: async () => true,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/overview`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("refuses a moderator on a second admin-only route, so the denial is not route-specific", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsModerator: async () => true, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/roles`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
   it("returns 200 with the aggregate counts for an admin", async () => {
     await withTestServer(
       { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: makeOverviewClient() },
