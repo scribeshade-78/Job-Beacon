@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "wouter";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { StatusBadge, type StatusBadgeStatus } from "../components/ui/status-badge";
+import { StatusBadge } from "../components/ui/status-badge";
+import {
+  FitSection,
+  TrustWarnings,
+  autoApplyStatusBadge,
+  formatSourceName,
+  isPartiallyVerified,
+  isUnverifiedSource,
+  trustStatusToBadge,
+} from "../components/OpportunitySignals";
 import {
   listOpportunities,
   listOpportunitiesByIds,
@@ -18,7 +28,6 @@ import {
   fetchQueueCapability,
   type QueueCapabilityState,
 } from "../lib/queueCapability";
-import { describeJobLink, describeJobLinkAriaLabel } from "../lib/jobLink";
 import { describeDiscoveryResult, discoverLiveJobs } from "../lib/ingestion";
 import { matchesWorkplaceFilter, workplaceLabel, type WorkplaceValue } from "../lib/opportunityFilters";
 import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
@@ -33,7 +42,6 @@ import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
-import { safeVacancyHref } from "./shared";
 import { formatSalary } from "../lib/opportunities";
 import { formatDistanceToNow } from "date-fns";
 
@@ -62,174 +70,9 @@ function workplaceValuesFor(workModes: readonly string[]): WorkplaceValue[] {
   return values;
 }
 
-const MAX_MISSING_SKILLS_SHOWN = 5;
-const MAX_TOP_REASONS_SHOWN = 3;
-
 interface RefreshNotice {
   tone: "info" | "error";
   text: string;
-}
-
-function priorityBadge(fit: OpportunityFitAnalysis): { label: string; className: string } {
-  if (fit.eligibilityCapped) {
-    return { label: "Not eligible", className: "bg-red-100 text-red-800" };
-  }
-  const score = fit.priority.score;
-  if (score === null) {
-    return { label: "Priority —", className: "bg-ios-separator text-ios-text-secondary" };
-  }
-  if (score >= 70) {
-    return { label: `Priority ${score}`, className: "bg-green-100 text-green-800" };
-  }
-  if (score >= 40) {
-    return { label: `Priority ${score}`, className: "bg-amber-100 text-amber-800" };
-  }
-  return { label: `Priority ${score}`, className: "bg-ios-separator text-ios-text-secondary" };
-}
-
-function FitSection({ fit }: { fit: OpportunityFitAnalysis | null }) {
-  if (fit === null) {
-    return <p className="mt-2 text-xs text-ios-text-secondary italic">Fit analysis pending</p>;
-  }
-
-  const badge = priorityBadge(fit);
-  const shownSkills = fit.missingEvidence.slice(0, MAX_MISSING_SKILLS_SHOWN);
-  const extraSkills = fit.missingEvidence.length - shownSkills.length;
-
-  return (
-    <div className="mt-3 space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={`px-2 py-0.5 rounded text-xs font-medium ${badge.className}`}>{badge.label}</span>
-        <span className="text-xs text-ios-text-secondary">
-          Technical fit {fit.technicalFitScore ?? "—"}
-          {fit.technicalFitScore === null && !fit.jdTextAvailable ? " (no job description text)" : ""}
-        </span>
-        <span className="text-xs text-ios-text-secondary">
-          Eligibility {fit.practicalEligibilityScore ?? "—"}
-        </span>
-        {fit.eligibilityCapped && fit.priority.uncappedScore !== null && (
-          <span className="text-xs text-ios-text-secondary">
-            (would rank {fit.priority.uncappedScore} if eligible)
-          </span>
-        )}
-      </div>
-
-      {fit.hardBlockers.length > 0 && (
-        <div role="alert" className="rounded bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">
-          <span className="font-medium">Not eligible.</span>{" "}
-          {fit.hardBlockers.map((b) => b.detail).join(" ")}
-        </div>
-      )}
-
-      {shownSkills.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-ios-text-secondary">Missing:</span>
-          {shownSkills.map((skill, i) => (
-            <span key={`${skill}-${i}`} className="px-2 py-0.5 bg-ios-separator rounded text-xs">
-              {skill}
-            </span>
-          ))}
-          {extraSkills > 0 && (
-            <span className="text-xs text-ios-text-secondary">+{extraSkills} more</span>
-          )}
-        </div>
-      )}
-
-      {fit.topReasons.length > 0 && (
-        <ul className="list-disc list-inside text-xs text-ios-text-secondary space-y-0.5">
-          {fit.topReasons.slice(0, MAX_TOP_REASONS_SHOWN).map((reason, i) => (
-            <li key={`${reason}-${i}`}>{reason}</li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-/**
- * An opportunity whose source could not be established as the employer's own
- * system of record (trust_status UNDER_REVIEW — every aggregator-tier source
- * lands here, see 20260917120000). Treated as "show, but never silently":
- * the card is rendered with a warning badge and an explicit explanation
- * rather than being hidden, because a relevant job the candidate cannot see
- * is its own failure mode.
- */
-/**
- * The source's name as a candidate should read it.
- *
- * A lookup rather than a title-case helper, because source_code is an internal
- * identifier: "usajobs" title-cased is "Usajobs", and this repository's own
- * product naming for that source is USAJOBS. Unknown sources fall back to the
- * raw code, which is at least true.
- */
-const SOURCE_DISPLAY_NAMES: Record<string, string> = {
-  remotive: "Remotive",
-  jooble: "Jooble",
-  usajobs: "USAJOBS",
-  adzuna: "Adzuna",
-  greenhouse: "Greenhouse",
-  lever: "Lever",
-  local_fixture: "the local fixture",
-};
-
-function formatSourceName(sourceCode: string): string {
-  return SOURCE_DISPLAY_NAMES[sourceCode] ?? sourceCode;
-}
-
-/**
- * UNDER_REVIEW — the source could not be established as the employer's own
- * system of record. Distinct from VERIFIED_INCOMPLETE, which is "we have the
- * listing but not every detail": the two get different badges and different
- * explanatory copy below the card, because they are different claims.
- */
-function isUnverifiedSource(status: OpportunityTrustStatus): boolean {
-  return status !== "VERIFIED" && status !== "VERIFIED_INCOMPLETE";
-}
-
-/** VERIFIED_INCOMPLETE — a real listing with unconfirmed non-critical details. */
-function isPartiallyVerified(status: OpportunityTrustStatus): boolean {
-  return status === "VERIFIED_INCOMPLETE";
-}
-
-function trustStatusToBadge(status: OpportunityTrustStatus): StatusBadgeStatus {
-  switch (status) {
-    case "VERIFIED":
-      return "verified";
-    case "VERIFIED_INCOMPLETE":
-      // Task Y: no longer shares the green "Verified" badge. These listings are
-      // real and linkable but their non-critical details were never confirmed,
-      // and showing them as fully verified told the candidate otherwise.
-      return "partially_verified";
-    case "UNDER_REVIEW":
-      // "Unverified source", not the generic "Under review": this label is
-      // candidate-facing copy about the listing's provenance, and "under
-      // review" reads as an internal moderation state.
-      return "unverified_source";
-    case "FLAGGED":
-      return "under_review";
-    case "BLOCKED":
-    case "EXPIRED_REMOVED":
-      return "blocked";
-    case "ACTION_REQUIRED":
-      return "action_required";
-  }
-}
-
-function autoApplyStatusBadge(status: OpportunitySummary["autoApplyStatus"]): StatusBadgeStatus {
-  switch (status) {
-    case "not_started":
-      return "apply_not_started";
-    case "queued":
-      return "apply_queued";
-    case "in_progress":
-      return "apply_in_progress";
-    case "action_required":
-      return "apply_action_required";
-    case "completed":
-      return "apply_completed";
-    case "failed":
-      return "apply_failed";
-  }
 }
 
 interface OpportunitiesPanelProps {
@@ -768,7 +611,6 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         <ul className="space-y-4" role="list" aria-label="Job opportunities">
           {visibleOpportunities.map((opp) => {
             const unverified = isUnverifiedSource(opp.trustStatus);
-                  const partiallyVerified = isPartiallyVerified(opp.trustStatus);
 
             return (
               <li
@@ -779,14 +621,16 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
               >
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="flex-1 min-w-0">
-                    <a
-                      href={safeVacancyHref(opp.url)}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    {/* THE INTERNAL DETAIL ROUTE. The title used to be an
+                        outbound link straight to the job board; the full listing
+                        is now read inside JobBeacon, and the outbound link lives
+                        on that page so the candidate can decide after reading. */}
+                    <Link
+                      href={"/jobs/" + opp.id}
                       className="font-medium text-ios-blue hover:underline truncate block"
                     >
                       {opp.title}
-                    </a>
+                    </Link>
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-ios-text-secondary">
                       {opp.companyName && (
                         <span className="font-medium text-black">{opp.companyName}</span>
@@ -803,8 +647,8 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                       {/* Source attribution. Not decoration: some sources grant
                           API access only on condition of being named as the
                           source alongside a link back to their own URL (Remotive's
-                          terms say so explicitly), and the title above already
-                          links to the source's page. A listing whose origin is
+                          terms say so explicitly), and the job detail page links
+                          back to the source's page. A listing whose origin is
                           invisible is also just less useful — "who is telling me
                           about this job" is a fair question to answer in place. */}
                       <span className="text-xs text-ios-text-secondary">
@@ -827,55 +671,16 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                       <StatusBadge status={autoApplyStatusBadge(opp.autoApplyStatus)} className="text-xs" />
                     </div>
 
-                    {unverified && (
-                      <p
-                        role="note"
-                        className="mt-3 rounded border border-status-under-review/40 bg-status-under-review/8 px-3 py-2 text-xs text-status-under-review-fg"
-                      >
-                        <span className="font-semibold">We haven’t verified this employer or listing.</span>{" "}
-                        It came from a third-party job board we can’t confirm against the employer’s own
-                        site, so the details and the salary shown may be out of date. Confirm everything on
-                        the source site before you apply or share any personal information.
-                      </p>
-                    )}
-
-                    {/* A different claim from the one above, so it gets different
-                        copy rather than sharing the "unverified employer"
-                        wording: the listing itself is legitimate, it is the
-                        supporting detail that is missing. */}
-                    {partiallyVerified && (
-                      <p
-                        role="note"
-                        className="mt-3 rounded border border-status-under-review/40 bg-status-under-review/8 px-3 py-2 text-xs text-status-under-review-fg"
-                      >
-                        <span className="font-semibold">Some details aren’t confirmed.</span>{" "}
-                        This listing is real, but its source doesn’t publish the employer’s own website,
-                        a location or a salary we can check, so those fields may be absent rather than
-                        wrong. Open the original posting to confirm anything you’re relying on.
-                      </p>
-                    )}
+                    <TrustWarnings trustStatus={opp.trustStatus} />
 
                     <FitSection fit={opp.fitAnalysis} />
                   </div>
 
                   <div className="flex shrink-0 flex-col items-stretch gap-2">
-                    {/* THE MANUAL JOURNEY, AND THE ONLY APPLY-SHAPED ACTION.
-                        The label is decided by where the URL actually goes — an
-                        aggregator's own page is "open", and only an employer's
-                        hosted application form is "apply". It is a plain anchor:
-                        nothing is written, no status changes, and in particular
-                        this can never produce a "Submitted" state. The
-                        aria-label spells out the destination because "↗" alone
-                        does not say that a new tab opens. */}
-                    <a
-                      href={safeVacancyHref(opp.url)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label={describeJobLinkAriaLabel(opp.sourceCode, opp.title)}
-                      className="rounded-control border border-ios-separator px-3 py-1.5 text-center text-sm font-medium text-ios-blue hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
-                    >
-                      {describeJobLink(opp.sourceCode).label}
-                    </a>
+                    {/* THE EXTERNAL LINK MOVED TO THE DETAIL PAGE. It used to sit here as a
+                        second outbound anchor beside the title; the labelled
+                        outbound link ("Open original job posting" /
+                        "Apply on employer site") is rendered on /jobs/:id now. */}
 
                     {/* Offered only where the server will accept it. `unverified`
                         is isUnverifiedSource(opp.trustStatus) — the exact inverse
@@ -883,8 +688,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                         the two cannot drift apart. An UNDER_REVIEW row stays
                         visible here (the view surfaces it deliberately) but gets
                         no generate action, rather than a button whose only
-                        outcome is a refusal. This does NOT gate the link above:
-                        opening the original posting is allowed for every row. */}
+                        outcome is a refusal. */}
                     {!unverified && (
                       <Button
                         variant="secondary"

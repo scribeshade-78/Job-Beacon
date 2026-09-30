@@ -17,6 +17,7 @@ import { BillingPage } from "./pages/BillingPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
 import { EmployerAccessPage } from "./pages/EmployerAccessPage";
 import { EmployerPage } from "./pages/EmployerPage";
+import { JobDetailPage } from "./pages/JobDetailPage";
 import { ModeratorPage } from "./pages/ModeratorPage";
 import { OpportunitiesPage } from "./pages/OpportunitiesPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -120,6 +121,12 @@ export function SignedInRoutes({
         </Route>
         <Route path="/opportunities">
           <OpportunitiesPage candidateId={candidateId} />
+        </Route>
+        {/* The internal listing view. Wouter's Route hands the matched param
+            straight to the render prop, so the page receives jobId as a prop
+            instead of re-parsing the hash. */}
+        <Route path="/jobs/:jobId">
+          {(params) => <JobDetailPage jobId={params.jobId} />}
         </Route>
         <Route path="/applications">
           <ApplicationsPage ready={ready} />
