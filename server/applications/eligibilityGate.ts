@@ -1,5 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveApplicationAdapter } from "./adapters/registry.js";
+import {
+  evaluateSearchPreferenceEligibility,
+  type SearchPreferences,
+} from "../../shared/searchPreferences.js";
+import { isTitleRelevantToRole } from "../../shared/roleTaxonomy.js";
+import { loadSearchPreferencesForCandidate } from "./searchPreferences.js";
 
 export type GateStatus = "pass" | "fail";
 
@@ -55,6 +61,16 @@ export interface EligibilityGates {
   verified_facts: GateResult;
   application_support: GateResult;
   rate_and_abuse_controls: GateResult;
+  /**
+   * SearchPreferences gates (Phase 1 Task 6). OPTIONAL because application_plans
+   * rows written before this shipped have no such keys; the gate always writes
+   * them going forward, and ineligibilityReasonOf already ignores absent gates.
+   */
+  excluded_company?: GateResult;
+  excluded_industry?: GateResult;
+  work_mode?: GateResult;
+  salary?: GateResult;
+  location?: GateResult;
 }
 
 export interface EligibilityGateOutcome {
@@ -98,7 +114,7 @@ export async function evaluateEligibilityGates(
 
   const { data: vacancyRow, error: vacancyError } = await client
     .from("vacancies")
-    .select("source_code, trust_status, raw_title")
+    .select("source_code, trust_status, raw_title, company_id, country, city, remote_type, salary_max, currency")
     .eq("id", vacancyId)
     .maybeSingle();
 
@@ -109,25 +125,69 @@ export async function evaluateEligibilityGates(
     throw new Error(`vacancies row not found for id ${vacancyId}`);
   }
 
-  const vacancy = vacancyRow as { source_code: string; trust_status: string | null; raw_title: string };
+  const vacancy = vacancyRow as {
+    source_code: string;
+    trust_status: string | null;
+    raw_title: string;
+    company_id: string | null;
+    country: string | null;
+    city: string | null;
+    remote_type: string | null;
+    salary_max: number | null;
+    currency: string | null;
+  };
 
   const [
     sourcePolicyGate,
     automationAuthorizationGate,
     candidateExclusionsGate,
     idempotencyGate,
-    roleMatchGate,
     verifiedFactsGate,
     rateAndAbuseControlsGate,
+    searchPreferences,
+    companyResult,
+    companyProfileResult,
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
     evaluateCandidateExclusions(client, candidateId),
     evaluateIdempotency(client, candidateId, vacancyId),
-    evaluateRoleMatch(client, candidateId, vacancy.raw_title),
     evaluateVerifiedFacts(client, candidateId),
     evaluateRateAndAbuseControls(client, candidateId),
+    // THE SERVER LOADS THE PREFERENCES ITSELF, from the authenticated candidate
+    // id. Nothing in the request body can influence them.
+    loadSearchPreferencesForCandidate(client, candidateId),
+    vacancy.company_id === null
+      ? Promise.resolve({ data: null, error: null })
+      : client.from("companies").select("displayed_name").eq("id", vacancy.company_id).maybeSingle(),
+    vacancy.company_id === null
+      ? Promise.resolve({ data: null, error: null })
+      : client
+          .from("company_profiles")
+          .select("industry")
+          .eq("company_id", vacancy.company_id)
+          .maybeSingle(),
   ]);
+
+  if (companyResult.error) {
+    throw companyResult.error;
+  }
+  if (companyProfileResult.error) {
+    throw companyProfileResult.error;
+  }
+
+  const companyName = (companyResult.data as { displayed_name: string } | null)?.displayed_name ?? null;
+  const industry = (companyProfileResult.data as { industry: string | null } | null)?.industry ?? null;
+
+  const preferenceLedger = evaluateSearchPreferenceEligibility(searchPreferences, {
+    title: vacancy.raw_title,
+    companyName,
+    industry,
+    remoteType: vacancy.remote_type,
+    country: vacancy.country,
+    city: vacancy.city,
+    salary: { max: vacancy.salary_max, currency: vacancy.currency },
+  });
 
   const gates: EligibilityGates = {
     source_policy: sourcePolicyGate,
@@ -135,10 +195,17 @@ export async function evaluateEligibilityGates(
     automation_authorization: automationAuthorizationGate,
     candidate_exclusions: candidateExclusionsGate,
     idempotency: idempotencyGate,
-    role_match: roleMatchGate,
+    // role_match keeps its own codes and matchedRole detail (Phase 0 decision),
+    // but now matches with the shared tokenized matcher rather than a substring.
+    role_match: evaluateRoleMatch(searchPreferences, vacancy.raw_title),
     verified_facts: verifiedFactsGate,
     application_support: evaluateApplicationSupport(vacancy, candidateId),
     rate_and_abuse_controls: rateAndAbuseControlsGate,
+    excluded_company: preferenceLedger.gates.excluded_company,
+    excluded_industry: preferenceLedger.gates.excluded_industry,
+    work_mode: preferenceLedger.gates.work_mode,
+    salary: preferenceLedger.gates.salary,
+    location: preferenceLedger.gates.location,
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");
@@ -356,42 +423,28 @@ async function evaluateCandidateExclusions(client: SupabaseClient, candidateId: 
 }
 
 /**
- * R4.5 minimal role taxonomy (PRD §9.1): no normalized vacancy role
- * taxonomy or NLP/ML matching exists in this repository, so this is
- * deliberately a plain case-insensitive substring comparison between each
- * of the candidate's free-text candidate_selected_roles.role_name values
- * and vacancies.raw_title — an exact match is just the substring-equals-
- * whole-string case, so no separate exact-match branch is needed. Empty or
- * whitespace-only role names are skipped rather than matched, since
- * `"".includes("")` would otherwise make a blank role name match every
- * vacancy title.
+ * Whether the vacancy's title is relevant to ANY of the candidate's saved target
+ * roles — the tokenized matcher from shared/roleTaxonomy.ts, the same one the
+ * Target Roles search and the feed filter use.
+ *
+ * WHY IT IS NOT A SUBSTRING CHECK ANY MORE. The old rule was
+ * title.includes(role), which passed "Metadata Analyst" for the role "Data
+ * Analyst" — the role's letters happened to be contiguous inside a different
+ * word. The shared matcher requires every token of the role to match a word of
+ * the title, so that case now fails.
+ *
+ * THE CODES AND THE matchedRole DETAIL ARE UNCHANGED (Phase 0 decision): an
+ * empty role list is NO_ROLES_SELECTED, no match is ROLE_NOT_MATCHED with the
+ * saved roles as evidence, and a match names the role that satisfied it.
  */
-async function evaluateRoleMatch(
-  client: SupabaseClient,
-  candidateId: string,
-  vacancyTitle: string,
-): Promise<GateResult> {
-  const { data, error } = await client
-    .from("candidate_selected_roles")
-    .select("role_name")
-    .eq("candidate_id", candidateId);
-
-  if (error) {
-    throw error;
-  }
-
-  const selectedRoles = ((data ?? []) as Array<{ role_name: string }>).map((row) => row.role_name);
+function evaluateRoleMatch(preferences: SearchPreferences, vacancyTitle: string): GateResult {
+  const selectedRoles = preferences.targetRoles;
 
   if (selectedRoles.length === 0) {
     return { status: "fail", reasonCode: "NO_ROLES_SELECTED" };
   }
 
-  const normalizedTitle = vacancyTitle.toLowerCase();
-
-  const matchedRole = selectedRoles.find((role) => {
-    const normalizedRole = role.trim().toLowerCase();
-    return normalizedRole.length > 0 && normalizedTitle.includes(normalizedRole);
-  });
+  const matchedRole = selectedRoles.find((role) => isTitleRelevantToRole(vacancyTitle, role));
 
   if (matchedRole) {
     return { status: "pass", detail: { matchedRole } };

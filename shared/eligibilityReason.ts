@@ -30,8 +30,11 @@ export const GATE_REASON_CLAUSES: Record<string, string> = {
   // application gates so one ineligibilityReasonOf renders both.
   role_mismatch: "this job doesn't match the roles you selected",
   excluded_company: "you've excluded this company",
+  excluded_industry: "you've excluded this industry",
   work_mode_mismatch: "this job's work mode doesn't match what you're looking for",
   below_min_salary: "the advertised salary is below your minimum",
+  location_not_stated: "you haven't told us where you want to work yet",
+  location_mismatch: "this job is outside the locations you chose",
 };
 
 export const GENERIC_INELIGIBLE_REASON = "it didn't pass our eligibility checks";
@@ -64,8 +67,10 @@ export const GATE_PRECEDENCE = [
   // the application gate above; these three exist only in the feed ledger, and
   // are listed so ineligibilityReasonOf can render it.
   "excluded_company",
+  "excluded_industry",
   "work_mode",
   "salary",
+  "location",
 ] as const;
 
 /**

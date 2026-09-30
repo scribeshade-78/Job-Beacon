@@ -411,6 +411,19 @@ export function applySearchPreferenceConstraints<Q extends FilterableQuery>(
     next = next.eq("currency", preferences.salary.currency) as Q;
   }
 
+  // Location: ONLY when intent is stated. openToAny means no restriction, and
+  // an unstated location leaves the feed open — the server gate is what refuses
+  // to queue in that state, and hard-filtering here would hide the whole feed.
+  const { countries, cities, openToAny } = preferences.locations;
+
+  if (!openToAny && countries.length > 0 && cities.length > 0) {
+    next = next.or("country.in." + inList(countries) + ",city.in." + inList(cities)) as Q;
+  } else if (!openToAny && countries.length > 0) {
+    next = next.in("country", countries) as Q;
+  } else if (!openToAny && cities.length > 0) {
+    next = next.in("city", cities) as Q;
+  }
+
   // Name exclusions reuse the existing standing-exclusion builder, so the
   // quoting and the "no industry column on the view" reporting stay in one place.
   const exclusions = applyPreferenceExclusions(next, {
@@ -422,78 +435,10 @@ export function applySearchPreferenceConstraints<Q extends FilterableQuery>(
   return { query: exclusions.query, unapplied: exclusions.unapplied };
 }
 
-/** The job attributes the feed ledger judges. OpportunitySummary satisfies it. */
-export interface SearchPreferenceJob {
-  title: string;
-  companyName: string | null;
-  remoteType: string | null;
-  salary: { max: number | null; currency: string | null };
-}
-
-/** The ledger is deliberately in the same gates shape as application_plans.gate_results. */
-export type SearchPreferenceGates = Record<
-  "role_match" | "excluded_company" | "work_mode" | "salary",
-  { status: "pass" | "fail"; reasonCode?: string; detail?: Record<string, unknown> }
->;
-
-export interface SearchPreferenceLedger {
-  eligible: boolean;
-  gates: SearchPreferenceGates;
-}
-
-/**
- * The structured, human-readable reason a job is filtered out — the feed's
- * eligibility ledger.
- *
- * WHY IT IS NOT JUST A DROP. The feed hides rows the candidate never sees, so a
- * silent exclusion is indistinguishable from a broken filter. Each check mirrors
- * one clause above one-for-one, so the profile the server filtered on and the
- * sentence the candidate reads come from the same object, and
- * ineligibilityReasonOf renders the first failing gate exactly as it does for an
- * application plan.
- */
-export function evaluateSearchPreferenceEligibility(
-  preferences: SearchPreferences,
-  job: SearchPreferenceJob,
-): SearchPreferenceLedger {
-  const roleConstrained = preferences.targetRoles.length > 0;
-  const rolePasses = !roleConstrained || matchesAnyTargetRole(job.title, preferences.targetRoles);
-
-  const company = job.companyName === null ? null : job.companyName.trim().toLowerCase();
-  const excludedCompany =
-    company !== null &&
-    company !== "" &&
-    preferences.exclusions.companies.some((name) => name.toLowerCase() === company);
-
-  const mode = preferences.workMode;
-  const modeConstrained = mode === "remote" || mode === "hybrid" || mode === "on_site";
-  const modePasses = !modeConstrained || job.remoteType === mode;
-
-  const min = preferences.salary.min;
-  const currency = preferences.salary.currency;
-  const jobCurrency = job.salary.currency === null ? null : job.salary.currency.trim().toUpperCase();
-  const salaryPasses =
-    min === null ||
-    (job.salary.max !== null && job.salary.max >= min && (currency === null || jobCurrency === currency));
-
-  const gates: SearchPreferenceGates = {
-    role_match: rolePasses
-      ? { status: "pass" }
-      : { status: "fail", reasonCode: "role_mismatch", detail: { targetRoles: preferences.targetRoles } },
-    excluded_company: excludedCompany
-      ? { status: "fail", reasonCode: "excluded_company", detail: { companyName: job.companyName } }
-      : { status: "pass" },
-    work_mode: modePasses
-      ? { status: "pass" }
-      : { status: "fail", reasonCode: "work_mode_mismatch", detail: { workMode: mode, jobWorkMode: job.remoteType } },
-    salary: salaryPasses
-      ? { status: "pass" }
-      : {
-          status: "fail",
-          reasonCode: "below_min_salary",
-          detail: { min, currency, salaryMax: job.salary.max, jobCurrency },
-        },
-  };
-
-  return { eligible: Object.values(gates).every((gate) => gate.status === "pass"), gates };
-}
+export {
+  evaluateSearchPreferenceEligibility,
+  isEligibleForFeed,
+  type SearchPreferenceGates,
+  type SearchPreferenceJob,
+  type SearchPreferenceLedger,
+} from "../../../shared/searchPreferences";

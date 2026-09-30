@@ -15,6 +15,8 @@
  * incomplete and the second as stated, so the two must stay distinguishable.
  */
 
+import { matchesAnyTargetRole } from "./roleTaxonomy.js";
+
 export type SearchWorkMode = "remote" | "hybrid" | "on_site" | "any";
 
 /**
@@ -150,4 +152,159 @@ export function buildSearchPreferences(
     },
     isComplete: targetRoles.length > 0 && workModeStated(workMode) && locationIntentExplicit(locations),
   };
+}
+
+
+/** The job attributes any preference gate judges. OpportunitySummary satisfies it. */
+export interface SearchPreferenceJob {
+  title: string;
+  companyName: string | null;
+  /**
+   * company_profiles.industry, when the reader has it. The candidate-facing
+   * opportunities view does not expose it, so the client never does and the
+   * industry gate passes there; the service-role gate reads it and enforces it.
+   */
+  industry?: string | null;
+  remoteType: string | null;
+  country?: string | null;
+  city?: string | null;
+  salary: { max: number | null; currency: string | null };
+}
+
+/**
+ * The feed/server ledger, deliberately in the same gates shape as
+ * application_plans.gate_results so one ineligibilityReasonOf renders both.
+ */
+export type SearchPreferenceGates = Record<
+  "role_match" | "excluded_company" | "excluded_industry" | "work_mode" | "salary" | "location",
+  { status: "pass" | "fail"; reasonCode?: string; detail?: Record<string, unknown> }
+>;
+
+export interface SearchPreferenceLedger {
+  eligible: boolean;
+  gates: SearchPreferenceGates;
+}
+
+function normalized(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim().toLowerCase() : null;
+}
+
+/**
+ * The structured, human-readable reason a job is filtered out or refused — the
+ * one evaluator both the feed and the server gate call.
+ *
+ * WHY IT IS SHARED AND NOT DUPLICATED. The client must not show a job the server
+ * will refuse, and the server must not refuse a job the client presents as fine;
+ * two implementations of "does this match?" would drift exactly where it hurts.
+ *
+ * LOCATION IS THE ONE PLACE THE CONSUMERS DIFFER, and that is deliberate rather
+ * than hidden: location_not_stated fails the SERVER gate (no consent to submit
+ * anywhere was ever given) while the feed still shows the job, because manual
+ * browsing remains available. isEligibleForFeed below encodes that one
+ * difference; everything else is identical.
+ */
+export function evaluateSearchPreferenceEligibility(
+  preferences: SearchPreferences,
+  job: SearchPreferenceJob,
+): SearchPreferenceLedger {
+  const roleConstrained = preferences.targetRoles.length > 0;
+  const rolePasses = !roleConstrained || matchesAnyTargetRole(job.title, preferences.targetRoles);
+
+  const company = normalized(job.companyName);
+  const excludedCompany =
+    company !== null && preferences.exclusions.companies.some((name) => normalized(name) === company);
+
+  // A missing industry is NOT evidence of an excluded industry: nothing to compare.
+  const industry = normalized(job.industry);
+  const excludedIndustry =
+    industry !== null && preferences.exclusions.industries.some((name) => normalized(name) === industry);
+
+  const mode = preferences.workMode;
+  const modeConstrained = mode === "remote" || mode === "hybrid" || mode === "on_site";
+  const modePasses = !modeConstrained || job.remoteType === mode;
+
+  const min = preferences.salary.min;
+  const currency = preferences.salary.currency;
+  // Defensive about undefined as well as null: a row read outside the typed
+  // mapper can simply lack the column, and a currency we cannot name is "no
+  // currency" rather than a crash.
+  const jobCurrency =
+    typeof job.salary.currency === "string" && job.salary.currency.trim() !== ""
+      ? job.salary.currency.trim().toUpperCase()
+      : null;
+  const salaryPasses =
+    min === null ||
+    (job.salary.max !== null && job.salary.max >= min && (currency === null || jobCurrency === currency));
+
+  const { countries, cities, openToAny } = preferences.locations;
+  const jobCountry = normalized(job.country);
+  const jobCity = normalized(job.city);
+
+  let locationPasses: boolean;
+  let locationReasonCode: string | undefined;
+
+  if (openToAny) {
+    locationPasses = true;
+  } else if (countries.length === 0 && cities.length === 0) {
+    // Fail closed, and separately from "out of scope": not having stated a
+    // location is not consent to submit anywhere.
+    locationPasses = false;
+    locationReasonCode = "location_not_stated";
+  } else {
+    const countryMatch = jobCountry !== null && countries.some((name) => normalized(name) === jobCountry);
+    const cityMatch = jobCity !== null && cities.some((name) => normalized(name) === jobCity);
+
+    locationPasses = countryMatch || cityMatch;
+    locationReasonCode = "location_mismatch";
+  }
+
+  const gates: SearchPreferenceGates = {
+    role_match: rolePasses
+      ? { status: "pass" }
+      : { status: "fail", reasonCode: "role_mismatch", detail: { targetRoles: preferences.targetRoles } },
+    excluded_company: excludedCompany
+      ? { status: "fail", reasonCode: "excluded_company", detail: { companyName: job.companyName } }
+      : { status: "pass" },
+    excluded_industry: excludedIndustry
+      ? { status: "fail", reasonCode: "excluded_industry", detail: { industry: job.industry } }
+      : { status: "pass" },
+    work_mode: modePasses
+      ? { status: "pass" }
+      : { status: "fail", reasonCode: "work_mode_mismatch", detail: { workMode: mode, jobWorkMode: job.remoteType } },
+    salary: salaryPasses
+      ? { status: "pass" }
+      : {
+          status: "fail",
+          reasonCode: "below_min_salary",
+          detail: { min, currency, salaryMax: job.salary.max, jobCurrency },
+        },
+    location: locationPasses
+      ? { status: "pass" }
+      : {
+          status: "fail",
+          reasonCode: locationReasonCode,
+          detail: { countries, cities, openToAny, jobCountry: job.country, jobCity: job.city },
+        },
+  };
+
+  return { eligible: Object.values(gates).every((gate) => gate.status === "pass"), gates };
+}
+
+/**
+ * Whether the FEED should show a job, which is the ledger minus one case: an
+ * unstated location does not hide a job from browsing (manual search stays
+ * available), while the server gate still refuses to queue it.
+ */
+export function isEligibleForFeed(preferences: SearchPreferences, job: SearchPreferenceJob): boolean {
+  const ledger = evaluateSearchPreferenceEligibility(preferences, job);
+
+  if (ledger.eligible) {
+    return true;
+  }
+
+  return Object.entries(ledger.gates).every(
+    ([name, gate]) =>
+      gate.status === "pass" ||
+      (name === "location" && gate.reasonCode === "location_not_stated"),
+  );
 }

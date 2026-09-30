@@ -16,6 +16,8 @@ function opportunity(remoteType: string | null): OpportunitySummary {
     companyName: "Acme",
     companyDomain: null,
     location: "US",
+    country: null,
+    city: null,
     remoteType,
     trustStatus: "VERIFIED",
     sourceCode: "greenhouse",

@@ -89,6 +89,9 @@ export interface OpportunitySummary {
   companyName: string | null;
   companyDomain: string | null;
   location: string;
+  /** Raw view columns, used by the shared preference ledger's location gate. */
+  country: string | null;
+  city: string | null;
   remoteType: string | null;
   trustStatus: OpportunityTrustStatus;
   /**
@@ -380,6 +383,8 @@ export async function listOpportunities(
       companyName: row.company_name,
       companyDomain: row.company_domain,
       location: formatLocation(row),
+      country: row.country,
+      city: row.city,
       remoteType: row.remote_type,
       trustStatus: row.trust_status ?? "UNDER_REVIEW",
       sourceCode: row.source_code,
@@ -448,6 +453,8 @@ export async function listOpportunitiesByIds(
         companyName: row.company_name,
         companyDomain: row.company_domain,
         location: formatLocation(row),
+        country: row.country,
+        city: row.city,
         remoteType: row.remote_type,
         trustStatus: row.trust_status ?? "UNDER_REVIEW",
         sourceCode: row.source_code,

@@ -67,6 +67,13 @@ const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   fact_confirmations: { data: [], error: null },
   application_plans: { data: null, error: null },
   application_attempts: { data: [], error: null },
+  // Phase 1 Task 6: the gate now loads SearchPreferences itself, and reads the
+  // company name / industry for the exclusions gates. Null defaults mean "no
+  // preferences row" and "no company", which is the state every pre-existing
+  // test was written against.
+  candidate_preferences: { data: null, error: null },
+  companies: { data: null, error: null },
+  company_profiles: { data: null, error: null },
 };
 
 function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
@@ -580,16 +587,15 @@ describe("evaluateEligibilityGates", () => {
       });
     });
 
-    it("does not treat a blank role name as matching every vacancy title", async () => {
+    it("treats a blank role name as no role at all", async () => {
       const client = makeClient({
         candidate_selected_roles: { data: [{ role_name: "   " }], error: null },
       });
       const result = await evaluateEligibilityGates(client, baseInput);
-      expect(result.gates.role_match).toEqual({
-        status: "fail",
-        reasonCode: "ROLE_NOT_MATCHED",
-        detail: { selectedRoles: ["   "] },
-      });
+      // The unified SearchPreferences trims and drops blank entries, so a blank
+      // role is indistinguishable from having selected none — and it still does
+      // not match every vacancy title.
+      expect(result.gates.role_match).toEqual({ status: "fail", reasonCode: "NO_ROLES_SELECTED" });
     });
   });
 
@@ -684,5 +690,217 @@ describe("evaluateEligibilityGates", () => {
       });
       await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
     });
+  });
+});
+
+describe("search preference gates", () => {
+  /**
+   * A vacancy + preferences+roles fixture where every gate passes, so each test
+   * below can change exactly one thing and show which gate caught it.
+   */
+  const fullyEligible = {
+    vacancies: {
+      data: {
+        source_code: "greenhouse",
+        trust_status: "VERIFIED",
+        raw_title: "Backend Engineer",
+        company_id: "company-1",
+        country: "India",
+        city: "Bengaluru",
+        remote_type: "remote",
+        salary_max: 90000,
+        currency: "USD",
+      },
+      error: null,
+    },
+    source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
+    candidate_preferences: {
+      data: {
+        preferred_countries: ["India"],
+        preferred_cities: [],
+        remote_preference: "remote",
+        employment_types: [],
+        min_salary: 60000,
+        min_salary_currency: "USD",
+        open_to_any_location: false,
+        excluded_companies: ["Acme Corp"],
+        excluded_industries: ["Gambling"],
+      },
+      error: null,
+    },
+    candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
+    extracted_facts: { data: [{ id: "fact-1" }], error: null },
+    fact_confirmations: { data: [{ status: "confirmed" }], error: null },
+    companies: { data: { displayed_name: "Contoso" }, error: null },
+    company_profiles: { data: { industry: "Software" }, error: null },
+  };
+
+  it("passes and queues a job that satisfies every search preference", async () => {
+    const result = await evaluateEligibilityGates(makeClient(fullyEligible), baseInput);
+
+    expect(result.eligible).toBe(true);
+    expect(result.gates.role_match).toEqual({ status: "pass", detail: { matchedRole: "Backend Engineer" } });
+    expect(result.gates.excluded_company).toEqual({ status: "pass" });
+    expect(result.gates.excluded_industry).toEqual({ status: "pass" });
+    expect(result.gates.work_mode).toEqual({ status: "pass" });
+    expect(result.gates.salary).toEqual({ status: "pass" });
+    expect(result.gates.location).toEqual({ status: "pass" });
+  });
+
+  it("rejects a title that only matches by substring", async () => {
+    // "Metadata Analyst" contains the letters of "Data Analyst" but not its
+    // words; the old substring gate passed this, the tokenized matcher does not.
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        vacancies: { data: { ...fullyEligible.vacancies.data, raw_title: "Metadata Analyst" }, error: null },
+        candidate_selected_roles: { data: [{ role_name: "Data Analyst" }], error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.role_match).toEqual({
+      status: "fail",
+      reasonCode: "ROLE_NOT_MATCHED",
+      detail: { selectedRoles: ["Data Analyst"] },
+    });
+  });
+
+  it("rejects a work mode that does not match the stated preference", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        vacancies: { data: { ...fullyEligible.vacancies.data, remote_type: "on_site" }, error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.work_mode?.status).toBe("fail");
+    expect(result.gates.work_mode?.reasonCode).toBe("work_mode_mismatch");
+  });
+
+  it("rejects a salary below the stated floor", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        vacancies: { data: { ...fullyEligible.vacancies.data, salary_max: 50000 }, error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.salary?.status).toBe("fail");
+    expect(result.gates.salary?.reasonCode).toBe("below_min_salary");
+  });
+
+  it("rejects a company the candidate excluded, case-insensitively", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        companies: { data: { displayed_name: "acme corp" }, error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.excluded_company?.status).toBe("fail");
+    expect(result.gates.excluded_company?.reasonCode).toBe("excluded_company");
+  });
+
+  it("rejects an industry the candidate excluded, case-insensitively", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        company_profiles: { data: { industry: "gambling" }, error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.excluded_industry?.status).toBe("fail");
+    expect(result.gates.excluded_industry?.reasonCode).toBe("excluded_industry");
+  });
+
+  it("does not exclude a company with no company_profiles row", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        company_profiles: { data: null, error: null },
+      }),
+      baseInput,
+    );
+
+    // No evidence of an excluded industry is not an exclusion.
+    expect(result.gates.excluded_industry).toEqual({ status: "pass" });
+    expect(result.eligible).toBe(true);
+  });
+
+  it("rejects a job outside the stated locations", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        vacancies: {
+          data: { ...fullyEligible.vacancies.data, country: "Germany", city: "Berlin" },
+          error: null,
+        },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.location?.status).toBe("fail");
+    expect(result.gates.location?.reasonCode).toBe("location_mismatch");
+  });
+
+  it("rejects with location_not_stated when the candidate never stated a location", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...fullyEligible,
+        candidate_preferences: {
+          data: {
+            ...fullyEligible.candidate_preferences.data,
+            preferred_countries: [],
+            preferred_cities: [],
+            open_to_any_location: false,
+          },
+          error: null,
+        },
+      }),
+      baseInput,
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.location?.status).toBe("fail");
+    expect(result.gates.location?.reasonCode).toBe("location_not_stated");
+  });
+
+  it("ignores a forged payload and uses the database preferences", async () => {
+    // The caller cannot claim their way past the gate: the gate loads both
+    // tables itself from the authenticated candidate id, so the DB's role and
+    // salary floor win over anything in the request.
+    const client = makeClient({
+      ...fullyEligible,
+      candidate_selected_roles: { data: [{ role_name: "Data Analyst" }], error: null },
+      candidate_preferences: {
+        data: { ...fullyEligible.candidate_preferences.data, min_salary: 500000 },
+        error: null,
+      },
+    });
+
+    const forged = {
+      candidateId: "candidate-1",
+      vacancyId: "vacancy-1",
+      targetRoles: ["Backend Engineer"],
+      workMode: "any",
+      salary: { min: null, currency: null },
+    } as unknown as Parameters<typeof evaluateEligibilityGates>[1];
+
+    const result = await evaluateEligibilityGates(client, forged);
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.role_match.reasonCode).toBe("ROLE_NOT_MATCHED");
+    expect(result.gates.salary?.reasonCode).toBe("below_min_salary");
   });
 });

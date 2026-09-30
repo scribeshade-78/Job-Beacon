@@ -444,6 +444,7 @@ describe("evaluateSearchPreferenceEligibility", () => {
     ...buildSearchPreferences(null, []),
     targetRoles: ["Data Engineer"],
     workMode: "remote",
+    locations: { countries: ["India"], cities: [], openToAny: false },
     salary: { min: 60000, currency: "USD" },
     exclusions: { companies: ["Acme Corp"], industries: [] },
     isComplete: true,
@@ -453,6 +454,9 @@ describe("evaluateSearchPreferenceEligibility", () => {
   const job = (overrides: Partial<SearchPreferenceJob> = {}): SearchPreferenceJob => ({
     title: "Senior Data Engineer",
     companyName: "Globex",
+    country: "India",
+    city: "Bengaluru",
+    industry: "Software",
     remoteType: "remote",
     salary: { max: 90000, currency: "USD" },
     ...overrides,
@@ -490,6 +494,7 @@ describe("evaluateSearchPreferenceEligibility", () => {
     const unconstrained = preferences({
       targetRoles: [],
       workMode: null,
+      locations: { countries: [], cities: [], openToAny: true },
       salary: { min: null, currency: null },
       exclusions: { companies: [], industries: [] },
     });

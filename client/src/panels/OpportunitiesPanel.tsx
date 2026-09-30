@@ -37,6 +37,7 @@ import {
   deriveFiltersFromPreferences,
   evaluateSearchPreferenceEligibility,
   filterOpportunitiesByRoleRelevance,
+  isEligibleForFeed,
   type OpportunityFilters,
 } from "../lib/opportunityQuery";
 import { loadCandidatePreferences, type CandidatePreferences } from "../lib/candidatePreferences";
@@ -351,7 +352,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         // job could appear here that the paged query would have excluded.
         const eligibleDiscovered = searchPreferences
           ? discovered.opportunities.filter(
-              (opportunity) => evaluateSearchPreferenceEligibility(searchPreferences, opportunity).eligible,
+              (opportunity) => isEligibleForFeed(searchPreferences, opportunity),
             )
           : discovered.opportunities;
 
@@ -472,11 +473,13 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     const reasons = new Set<string>();
 
     for (const opportunity of opportunities ?? []) {
-      const ledger = evaluateSearchPreferenceEligibility(searchPreferences, opportunity);
-
-      if (!ledger.eligible) {
-        reasons.add(ineligibilityReasonOf(ledger.gates));
+      // An unstated location does not hide a job from the feed (manual browsing
+      // stays available); the server gate is what refuses to queue it.
+      if (isEligibleForFeed(searchPreferences, opportunity)) {
+        continue;
       }
+
+      reasons.add(ineligibilityReasonOf(evaluateSearchPreferenceEligibility(searchPreferences, opportunity).gates));
     }
 
     return [...reasons];
