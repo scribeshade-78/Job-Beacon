@@ -11,7 +11,7 @@
  * repeatedly warn against.
  *
  * The stages are MUTUALLY EXCLUSIVE: every application is assigned exactly one
- * stage by pipelineStageOf below, so the five categorized counts sum exactly
+ * stage by pipelineStageOf below, so the six categorized counts sum exactly
  * to All.
  *
  * "Verification" and "Assessment" remain dropped rather than approximated: no
@@ -24,9 +24,12 @@
  *   Rejection    a rejection response
  *   Interview    an interview response
  *   Applied      submitted successfully, with no response yet
- *   In Progress  never submitted successfully — attempts pending, held for
- *                review (pending_review), leased, failed, cancelled, or none
- *                at all
+ *   In Progress  never submitted successfully AND still eligible — attempts
+ *                pending, held for review (pending_review), leased, failed,
+ *                cancelled, or none at all
+ *   Ineligible   the eligibility gates refused the plan, so no attempt was ever
+ *                created. gate_results.eligible is false; nothing was sent, so
+ *                this must not read as work in progress.
  *
  * RESPONSE PRECEDENCE is Offer > Rejection > Interview, per explicit product
  * direction. An application can legitimately hold several response categories
@@ -51,6 +54,12 @@
 export interface PipelineStageInput {
   attempts: ReadonlyArray<{ status: string }>;
   responseCategories: readonly string[];
+  /**
+   * gate_results.eligible: whether the eligibility gates let this plan queue.
+   * Required rather than optional so a new caller cannot silently inherit the
+   * old "everything without a submission is in progress" behaviour.
+   */
+  eligible: boolean;
 }
 
 /**
@@ -63,6 +72,7 @@ export interface PipelineStageInput {
 export const PIPELINE_STAGES = [
   { id: "all", label: "All" },
   { id: "in_progress", label: "In Progress" },
+  { id: "ineligible", label: "Not eligible" },
   { id: "applied", label: "Applied" },
   { id: "interview", label: "Interview" },
   { id: "offer", label: "Offer" },
@@ -80,6 +90,7 @@ const RESPONSE_PRECEDENCE = ["offer", "rejection", "interview"] as const;
 /** Mirrors PIPELINE_STAGES minus All, so the two cannot drift apart visually. */
 export const CATEGORIZED_STAGE_IDS: readonly CategorizedPipelineStageId[] = [
   "in_progress",
+  "ineligible",
   "applied",
   "interview",
   "offer",
@@ -87,9 +98,17 @@ export const CATEGORIZED_STAGE_IDS: readonly CategorizedPipelineStageId[] = [
 ];
 
 /**
- * The single stage an application belongs to. Total by construction: the final
- * branch catches everything, so no row can fall outside the bar and the counts
- * cannot leak.
+ * The single stage an application belongs to. Total by construction: the
+ * eligibility branch and the final in_progress branch partition everything not
+ * otherwise classified, so no row can fall outside the bar and the counts cannot
+ * leak.
+ *
+ * ELIGIBILITY IS CHECKED AFTER A SUBMISSION, NOT BEFORE. A response or a
+ * succeeded attempt is evidence something real happened and outranks a later
+ * re-evaluation that flipped gate_results to ineligible; "Applied" is the
+ * truthful stage for a plan that was actually sent. Only a plan with no
+ * submission and eligible = false is "Ineligible" — which is exactly the
+ * population that used to be mislabelled "In Progress".
  */
 export function pipelineStageOf(application: PipelineStageInput): CategorizedPipelineStageId {
   for (const stage of RESPONSE_PRECEDENCE) {
@@ -100,6 +119,10 @@ export function pipelineStageOf(application: PipelineStageInput): CategorizedPip
 
   if (application.attempts.some((attempt) => attempt.status === "succeeded")) {
     return "applied";
+  }
+
+  if (!application.eligible) {
+    return "ineligible";
   }
 
   return "in_progress";
@@ -117,7 +140,7 @@ export function filterByPipelineStage<T extends PipelineStageInput>(
 }
 
 /**
- * One pass, one bucket per application. All is the list length and the five
+ * One pass, one bucket per application. All is the list length and the six
  * categorized counts sum to it exactly — asserted in the tests, because a
  * partition that silently stops partitioning is the whole failure mode this
  * rule exists to prevent.
@@ -128,6 +151,7 @@ export function countByPipelineStage<T extends PipelineStageInput>(
   const counts: Record<PipelineStageId, number> = {
     all: applications.length,
     in_progress: 0,
+    ineligible: 0,
     applied: 0,
     interview: 0,
     offer: 0,

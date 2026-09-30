@@ -189,14 +189,22 @@ describe("getCandidatePipeline", () => {
     const result = await getCandidatePipeline(pipelineClient());
 
     expect(result.stages.map((stage) => stage.stage)).toEqual(PIPELINE_STAGES.map((stage) => stage.id));
-    expect(result.stages).toHaveLength(6);
+    expect(result.stages).toHaveLength(7);
   });
 
   it("classifies each application into exactly one mutually exclusive stage", async () => {
     const result = await getCandidatePipeline(pipelineClient());
     const counts = Object.fromEntries(result.stages.map((stage) => [stage.stage, stage.count]));
 
-    expect(counts).toEqual({ all: 5, in_progress: 2, applied: 1, interview: 1, offer: 0, rejection: 1 });
+    expect(counts).toEqual({
+      all: 5,
+      in_progress: 2,
+      ineligible: 0,
+      applied: 1,
+      interview: 1,
+      offer: 0,
+      rejection: 1,
+    });
   });
 
   it("keeps the categorized counts summing exactly to All", async () => {

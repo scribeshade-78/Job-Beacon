@@ -5,6 +5,7 @@ import {
   type AgentToolName,
 } from "../../shared/agent.js";
 import { bulkApplyToVacancies, type BulkApplyResult } from "../applications/bulkApply.js";
+import { GATE_REASON_CLAUSES, GENERIC_INELIGIBLE_REASON } from "../../shared/eligibilityReason.js";
 
 /**
  * R4 — the executable tool registry, and the boundary between "the model said
@@ -188,20 +189,6 @@ function parseQueueApplicationsArgs(raw: unknown): AgentArgsParseResult<QueueApp
  * support; only the primary copy is translated. An unrecognised code falls back
  * to the generic eligibility sentence rather than leaking the identifier.
  */
-const GATE_REASON_COPY: Record<string, string> = {
-  NO_ADAPTER_REGISTERED_FOR_SOURCE: "automatic applications aren't available for this job's site yet",
-  SOURCE_APPLICATION_NOT_AUTHORIZED: "this job's site isn't authorized for automatic applications",
-  AUTOMATION_NOT_AUTHORIZED: "automatic applications are paused on your account",
-  VACANCY_TRUST_STATUS_INELIGIBLE: "we haven't finished checking this job posting",
-  ROLE_NOT_MATCHED: "this job doesn't match the roles you selected",
-  NO_ROLES_SELECTED: "you haven't selected any target roles yet",
-  NO_FACTS_EXTRACTED: "you haven't confirmed any profile facts yet",
-  NO_FACTS_CONFIRMED: "you haven't confirmed any profile facts yet",
-  DAILY_APPLICATION_LIMIT_EXCEEDED: "you've hit today's application limit",
-  DUPLICATE_APPLICATION_EXISTS: "you've already applied to this job",
-};
-
-const GENERIC_BLOCKED_REASON = "it didn't pass our eligibility checks";
 
 /** Distinct plain-language reasons across every blocked outcome, in first-seen order. */
 export function describeBlockingGates(result: BulkApplyResult): string[] {
@@ -214,7 +201,7 @@ export function describeBlockingGates(result: BulkApplyResult): string[] {
 
     for (const gate of outcome.blockingGates) {
       seen.add(
-        (gate.reasonCode !== null && GATE_REASON_COPY[gate.reasonCode]) || GENERIC_BLOCKED_REASON,
+        (gate.reasonCode !== null && GATE_REASON_CLAUSES[gate.reasonCode]) || GENERIC_INELIGIBLE_REASON,
       );
     }
   }

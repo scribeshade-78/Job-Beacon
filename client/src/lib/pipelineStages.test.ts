@@ -9,12 +9,14 @@ import {
 } from "./pipelineStages";
 import type { ApplicationSummary } from "./applications";
 import type { ResponseCategory } from "../../../shared/priorityScore";
+import { GENERIC_INELIGIBLE_REASON, ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 
 type AttemptStatus = "pending" | "leased" | "succeeded" | "failed" | "action_required" | "cancelled";
 
 function application(
   statuses: AttemptStatus[],
   responseCategories: ResponseCategory[] = [],
+  eligible = true,
 ): ApplicationSummary {
   return {
     planId: "plan-1",
@@ -22,7 +24,8 @@ function application(
     vacancyTitle: "Data Engineer",
     vacancyUrl: "https://example.test/job/1",
     companyName: null,
-    eligible: true,
+    eligible,
+    ineligibleReason: null,
     createdAt: "2026-09-17T00:00:00Z",
     responseCategories,
     attempts: statuses.map((status, index) => ({
@@ -43,6 +46,7 @@ describe("PIPELINE_STAGES", () => {
     expect(PIPELINE_STAGES.map((stage) => stage.id)).toEqual([
       "all",
       "in_progress",
+      "ineligible",
       "applied",
       "interview",
       "offer",
@@ -87,11 +91,24 @@ describe("pipelineStageOf", () => {
     expect(pipelineStageOf(application(["succeeded"], ["offer", "rejection", "interview"]))).toBe("offer");
   });
 
-  it("puts a never-submitted application In Progress", () => {
+  it("puts an eligible, never-submitted application In Progress", () => {
     expect(pipelineStageOf(application(["pending"]))).toBe("in_progress");
     expect(pipelineStageOf(application(["leased"]))).toBe("in_progress");
     expect(pipelineStageOf(application([]))).toBe("in_progress");
     expect(pipelineStageOf(application(["cancelled"]))).toBe("in_progress");
+  });
+
+  it("sends a never-submitted, ineligible application to Not eligible", () => {
+    // The bug this fixes: these rows used to be counted as In Progress even
+    // though no attempt existed and none was ever going to.
+    expect(pipelineStageOf(application([], [], false))).toBe("ineligible");
+  });
+
+  it("keeps a real submission out of the ineligible bucket", () => {
+    // gate_results is re-evaluated and can flip to false after a plan was sent;
+    // a succeeded attempt or a response is evidence something real happened.
+    expect(pipelineStageOf(application(["succeeded"], [], false))).toBe("applied");
+    expect(pipelineStageOf(application([], ["rejection"], false))).toBe("rejection");
   });
 
   it("NEVER treats a failed submission as a rejection", () => {
@@ -122,6 +139,7 @@ describe("mutual exclusivity", () => {
     application(["failed"]),
     application(["pending"]),
     application([]),
+    application([], [], false),
   ];
 
   it("places every application in exactly one categorized stage", () => {
@@ -158,10 +176,23 @@ describe("countByPipelineStage", () => {
       application(["pending"]),
     ]);
 
-    expect(counts).toEqual({ all: 7, applied: 2, interview: 1, offer: 1, rejection: 1, in_progress: 2 });
-    expect(counts.applied + counts.interview + counts.offer + counts.rejection + counts.in_progress).toBe(
-      counts.all,
-    );
+    expect(counts).toEqual({
+      all: 7,
+      applied: 2,
+      interview: 1,
+      offer: 1,
+      rejection: 1,
+      in_progress: 2,
+      ineligible: 0,
+    });
+    expect(
+      counts.applied +
+        counts.interview +
+        counts.offer +
+        counts.rejection +
+        counts.in_progress +
+        counts.ineligible,
+    ).toBe(counts.all);
   });
 
   it("counts zeros for an empty list", () => {
@@ -172,6 +203,7 @@ describe("countByPipelineStage", () => {
       offer: 0,
       rejection: 0,
       in_progress: 0,
+      ineligible: 0,
     });
   });
 
@@ -214,5 +246,36 @@ describe("filterByPipelineStage", () => {
 
   it("returns an empty list for a stage nothing reaches, without throwing", () => {
     expect(filterByPipelineStage([application(["pending"])], "offer")).toEqual([]);
+  });
+});
+
+describe("ineligibilityReasonOf", () => {
+  it("translates the first failing gate's reasonCode", () => {
+    expect(
+      ineligibilityReasonOf({
+        application_support: { status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" },
+      }),
+    ).toBe("automatic applications aren't available for this job's site yet");
+  });
+
+  it("draws from gate precedence when several gates fail", () => {
+    expect(
+      ineligibilityReasonOf({
+        application_support: { status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" },
+        role_match: { status: "fail", reasonCode: "ROLE_NOT_MATCHED" },
+      }),
+    ).toBe("this job doesn't match the roles you selected");
+  });
+
+  it("falls back to a generic sentence rather than a raw token", () => {
+    expect(ineligibilityReasonOf({ role_match: { status: "fail", reasonCode: "SOMETHING_NEW" } })).toBe(
+      GENERIC_INELIGIBLE_REASON,
+    );
+    expect(ineligibilityReasonOf({ role_match: { status: "fail" } })).toBe(GENERIC_INELIGIBLE_REASON);
+    expect(ineligibilityReasonOf(undefined)).toBe(GENERIC_INELIGIBLE_REASON);
+  });
+
+  it("ignores gates that passed", () => {
+    expect(ineligibilityReasonOf({ role_match: { status: "pass" } })).toBe(GENERIC_INELIGIBLE_REASON);
   });
 });

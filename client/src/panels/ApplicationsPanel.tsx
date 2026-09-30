@@ -216,7 +216,7 @@ export function ApplicationsPanel() {
         )}
 
         {/* Stage bar. Same segmented treatment as AuthCard's switcher, but
-            flex + overflow-x-auto rather than a fixed grid: five labels with
+            flex + overflow-x-auto rather than a fixed grid: six labels with
             counts do not fit a phone, and scrolling beats wrapping or
             truncating a stage name. */}
         <div
@@ -271,7 +271,9 @@ export function ApplicationsPanel() {
                   <span className="text-sm text-ios-text-secondary"> · {application.companyName}</span>
                 )}{" "}
                 <span className="text-sm text-ios-text-secondary">
-                  — {application.eligible ? "eligible" : "not eligible"}
+                  — {application.eligible
+                    ? "eligible"
+                    : `not eligible — ${application.ineligibleReason ?? "it didn't pass our eligibility checks"}`}
                 </span>
 
                 {/* Surfaced so a row's stage membership is inspectable rather

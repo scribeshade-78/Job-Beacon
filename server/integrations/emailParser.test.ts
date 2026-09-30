@@ -75,6 +75,9 @@ function makeClient(options: ClientOptions = {}) {
     id: "attempt-1",
     status: "succeeded",
     application_plan_id: "plan-1",
+    // The embedded parent row readStageForAttempt asks for alongside the
+    // attempts; eligible=true keeps the derived stage about the response.
+    application_plans: { gate_results: { eligible: true } },
     messages: [{ id: "msg-1", response_classifications: [{ category: classification.category }] }],
   };
 

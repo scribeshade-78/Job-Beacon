@@ -299,16 +299,22 @@ async function readStageForAttempt(
 
   const { data: attempts, error: attemptsError } = await client
     .from("application_attempts")
-    .select("id, status, messages (id, response_classifications (category))")
+    .select("id, status, application_plans (gate_results), messages (id, response_classifications (category))")
     .eq("application_plan_id", planId);
 
   if (attemptsError) throw attemptsError;
 
+  const rows = (attempts ?? []) as unknown as Array<{
+    status: string;
+    // Embedded parent row: gate_results.eligible is what separates "In
+    // Progress" from "Not eligible" in the shared stage rule.
+    application_plans: { gate_results: { eligible?: boolean } | null } | null;
+    messages: Array<{ response_classifications: Array<{ category: string }> | null }> | null;
+  }>;
+
   const categories: string[] = [];
 
-  for (const row of (attempts ?? []) as Array<{
-    messages: Array<{ response_classifications: Array<{ category: string }> | null }> | null;
-  }>) {
+  for (const row of rows) {
     for (const message of row.messages ?? []) {
       for (const classification of message.response_classifications ?? []) {
         if (!categories.includes(classification.category)) {
@@ -319,8 +325,11 @@ async function readStageForAttempt(
   }
 
   return pipelineStageOf({
-    attempts: ((attempts ?? []) as Array<{ status: string }>).map((row) => ({ status: row.status })),
+    attempts: rows.map((row) => ({ status: row.status })),
     responseCategories: categories,
+    // Fail closed: a plan row we cannot read is treated as not-eligible, the
+    // same default the MCP pipeline summary uses.
+    eligible: rows[0]?.application_plans?.gate_results?.eligible ?? false,
   });
 }
 

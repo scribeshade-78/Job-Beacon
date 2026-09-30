@@ -69,6 +69,7 @@ describe("listApplications", () => {
           vacancyUrl: "https://example.com/jobs/1",
           companyName: null,
           eligible: true,
+          ineligibleReason: null,
           createdAt: "2026-08-18T00:00:00Z",
           // No messages embedded on this row, so no response stages — and,
           // importantly, NOT 'rejection': the attempt is 'failed', which means
@@ -303,6 +304,38 @@ describe("listApplications", () => {
       expect(result.applications[0].vacancyTitle).toBe("");
       expect(result.applications[0].vacancyUrl).toBe("");
       expect(result.applications[0].attempts).toEqual([]);
+    }
+  });
+
+  it("derives the ineligibility reason from the failing gate", async () => {
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "plan-6",
+          vacancy_id: "vac-6",
+          gate_results: {
+            eligible: false,
+            gates: { application_support: { status: "fail", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" } },
+          },
+          created_at: "2026-08-18T00:00:00Z",
+          vacancies: null,
+          application_attempts: [],
+        },
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    const result = await listApplications(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.applications[0].eligible).toBe(false);
+      expect(result.applications[0].ineligibleReason).toBe(
+        "automatic applications aren't available for this job's site yet",
+      );
     }
   });
 

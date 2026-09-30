@@ -5,6 +5,7 @@ import {
   type ApplicationEvidenceView,
 } from "./applicationEvidence";
 import { isResponseCategory, type ResponseCategory } from "../../../shared/priorityScore";
+import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 
 /**
  * §16.4 worker lifecycle states (application_attempts.status check
@@ -69,6 +70,12 @@ export interface ApplicationSummary {
   /** The employer, when the vacancy carries a company. Null rather than guessed. */
   companyName: string | null;
   eligible: boolean;
+  /**
+   * Why this plan is not eligible, in candidate-facing words, or null when it
+   * is. Derived from gate_results.gates rather than stored, so the sentence
+   * stays in step with the gate copy (shared/eligibilityReason.ts).
+   */
+  ineligibleReason: string | null;
   createdAt: string;
   attempts: ApplicationAttemptSummary[];
   /**
@@ -82,7 +89,13 @@ export interface ApplicationSummary {
 interface ApplicationPlanRow {
   id: string;
   vacancy_id: string;
-  gate_results: { eligible: boolean };
+  gate_results: {
+    eligible: boolean;
+    // Absent on rows written before the gates object existed (see
+    // eligibilityGate.ts); an absent or unrecognised gate falls back to the
+    // generic reason rather than surfacing a raw code.
+    gates?: Record<string, { status?: string; reasonCode?: string } | null | undefined> | null;
+  };
   created_at: string;
   vacancies: {
     raw_title: string;
@@ -189,6 +202,9 @@ export async function listApplications(
         vacancyUrl: row.vacancies?.authoritative_url ?? "",
         companyName: row.vacancies?.companies?.displayed_name ?? null,
         eligible: row.gate_results.eligible,
+        ineligibleReason: row.gate_results.eligible
+          ? null
+          : ineligibilityReasonOf(row.gate_results.gates),
         createdAt: row.created_at,
         responseCategories: collectResponseCategories(row.application_attempts),
         attempts: (row.application_attempts ?? []).map((attempt) => ({
