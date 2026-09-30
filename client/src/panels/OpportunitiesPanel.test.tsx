@@ -7,9 +7,9 @@ import { useHashLocation } from "wouter/use-hash-location";
  * The job title in the list is the entry point to the internal detail page.
  *
  * The data layer is mocked on purpose: what is under test is WHERE the link
- * points, not how the list is fetched (that has its own suite in
- * lib/opportunities.test.ts). The board URL is still present in the fixture, so
- * a link that quietly kept using it would fail here.
+ * points and how the trust badge is presented, not how the list is fetched
+ * (that has its own suite in lib/opportunities.test.ts). The board URL is still
+ * in the fixture, so a link that quietly kept using it would fail here.
  */
 
 const fixtures = vi.hoisted(() => ({
@@ -21,7 +21,9 @@ const fixtures = vi.hoisted(() => ({
     companyDomain: "contoso.test",
     location: "Bengaluru, India",
     remoteType: "remote",
-    trustStatus: "VERIFIED",
+    // Production's common case: an aggregator-tier source, so the badge, the
+    // page-level banner and the (absent) per-card paragraph are all exercised.
+    trustStatus: "UNDER_REVIEW",
     sourceCode: "remotive",
     salary: { min: 120000, max: 150000, currency: "USD", interval: "year", source: "estimated" },
     discoveredAt: "2026-09-17T00:00:00Z",
@@ -107,5 +109,15 @@ describe("OpportunitiesPanel job links", () => {
     // offer a second way out of the app.
     expect(await screen.findByText("Azure Data Engineer")).toBeTruthy();
     expect(screen.queryByRole("link", { name: /Open original job posting/ })).toBeNull();
+  });
+
+  it("explains the trust badge once at page level instead of on every card", async () => {
+    renderPanel();
+
+    expect(await screen.findByText("Azure Data Engineer")).toBeTruthy();
+    // One page-level explanation...
+    expect(screen.getByText(/Some listings come from sources we can/)).toBeTruthy();
+    // ...and the full paragraph is no longer repeated for every card.
+    expect(screen.queryByText(/We haven/)).toBeNull();
   });
 });

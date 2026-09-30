@@ -220,3 +220,32 @@ export function TrustWarnings({ trustStatus }: { trustStatus: OpportunityTrustSt
 
   return null;
 }
+
+/**
+ * The page-level explanation of the trust badges.
+ *
+ * WHY IT IS NOT PER CARD. Every unverified listing repeated the same paragraph,
+ * so a page of 25 cards was 25 identical warnings and the differences between
+ * the jobs were buried. The card keeps the compact badge (StatusBadge renders a
+ * distinct icon AND a label, never colour alone); the explanation lives here
+ * once. The detail page keeps the full wording, where it can be read next to the
+ * listing it actually describes.
+ */
+export function TrustNoticeBanner() {
+  return (
+    <div
+      role="note"
+      className="mb-4 rounded-control border border-status-under-review/40 bg-status-under-review/8 px-3 py-2.5 text-xs text-status-under-review-fg"
+    >
+      <p>
+        <span className="font-semibold">Some listings come from sources we can’t confirm.</span>{" "}
+        A listing marked <span className="font-semibold">Unverified source</span> came from a
+        third-party job board we can’t check against the employer’s own site, so its details
+        and salary may be out of date. A listing marked{" "}
+        <span className="font-semibold">Partly verified</span> is real, but some details are
+        unconfirmed. Open a job to read the full warning, and confirm anything you rely on at the
+        source before you apply or share personal information.
+      </p>
+    </div>
+  );
+}

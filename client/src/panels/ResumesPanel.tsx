@@ -1,4 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from "react";
+import { AlertTriangle, CheckCircle2, Clock, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -7,6 +8,7 @@ import { deleteResume, getResumeSignedUrl, listResumes, uploadResume, type Resum
 import { extractResumeFacts, listExtractedFacts, type ExtractedFact } from "../lib/resumeExtraction";
 import { confirmAllFacts, confirmFact, correctFact, rejectFact, reopenFact } from "../lib/factConfirmations";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { resumeStepDetail, type ResumeParseStatus } from "../../../shared/readiness";
 
 interface ResumesPanelProps {
   candidateId: string;
@@ -17,6 +19,42 @@ const FACT_STATUS_BADGE: Record<ExtractedFact["confirmationStatus"], StatusBadge
   confirmed: "fact_confirmed",
   rejected: "fact_rejected",
 };
+
+/**
+ * Colours for the parse states, reusing the app's existing status palettes
+ * rather than inventing a fourth: neutral for "not processed yet", blue for
+ * "working", verified-green for ready, blocked-red for failed.
+ */
+const RESUME_STATUS_TEXT_CLASS: Record<ResumeParseStatus, string> = {
+  uploaded: "text-ios-text-secondary",
+  parsing: "text-ios-blue",
+  parsed: "text-status-verified-fg",
+  failed: "text-status-blocked-fg",
+};
+
+/**
+ * The extraction button's label, which IS the retry action.
+ *
+ * There is one extraction entry point on the server, so there is one button:
+ * its label follows the parse state instead of adding a second control that
+ * would call the same endpoint for the same resume.
+ */
+function extractButtonLabel(status: ResumeParseStatus, extracting: boolean): string {
+  if (extracting) {
+    return "Extracting…";
+  }
+
+  switch (status) {
+    case "parsed":
+      return "Re-extract facts";
+    case "failed":
+      return "Retry extraction";
+    case "parsing":
+      return "Parsing…";
+    case "uploaded":
+      return "Extract facts";
+  }
+}
 
 export function ResumesPanel({ candidateId }: ResumesPanelProps) {
   const [resumes, setResumes] = useState<ResumeDocument[] | null>(null);
@@ -128,9 +166,13 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
 
     if (result.kind === "error") {
       setError(result.message);
-    } else {
-      await refreshFacts();
     }
+
+    // Re-read on success AND on failure. The server records 'parsed' or
+    // 'failed' on the row, and that status is what tells the candidate whether
+    // this needs a retry — leaving it stale would show the old state after a
+    // retry that just failed.
+    await refresh();
 
     setExtractingId(null);
   }
@@ -248,6 +290,19 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
           aria-label="Upload resume"
           className="text-sm text-ios-text-secondary file:mr-3 file:rounded-control file:border-0 file:bg-ios-blue-button file:px-3.5 file:py-2 file:text-sm file:font-semibold file:text-white disabled:opacity-50"
         />
+
+        {/* WHY A RESUME IS REQUIRED, not just "no items". The list is what feeds
+            confirmed facts into every application, and automatic submission
+            refuses to run until a resume has been read — so an empty page is a
+            setup blocker, not an empty table. */}
+        {resumes !== null && resumes.length === 0 && (
+          <p className="mt-4 rounded-control border border-ios-separator bg-ios-bg px-3 py-2.5 text-sm text-ios-text-secondary">
+            No resumes yet. Upload one and JobBeacon reads it to build the confirmed facts your
+            applications are filled in from. Automatic applications cannot run until a resume has
+            been uploaded and processed.
+          </p>
+        )}
+
         <ul className="mt-4 space-y-3">
           {resumes?.map((resume) => {
             const facts = factsByResumeId[resume.id] ?? [];
@@ -270,10 +325,10 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={busy || extracting}
+                    disabled={busy || extracting || resume.parseStatus === "parsing"}
                     onClick={() => void handleExtract(resume.id)}
                   >
-                    {extracting ? "Extracting…" : "Extract facts"}
+                    {extractButtonLabel(resume.parseStatus, extracting)}
                   </Button>
                   <Button
                     variant="destructive"
@@ -283,6 +338,21 @@ export function ResumesPanel({ candidateId }: ResumesPanelProps) {
                   >
                     Delete
                   </Button>
+                </div>
+
+                <div
+                  className={`mt-1 flex items-center gap-1.5 text-xs ${RESUME_STATUS_TEXT_CLASS[resume.parseStatus]}`}
+                >
+                  {resume.parseStatus === "parsing" ? (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : resume.parseStatus === "parsed" ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  ) : resume.parseStatus === "failed" ? (
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  <span>{resumeStepDetail({ status: resume.parseStatus })}</span>
                 </div>
 
                 {facts.length > 0 && (

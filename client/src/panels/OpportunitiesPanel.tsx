@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { StatusBadge } from "../components/ui/status-badge";
 import {
   FitSection,
-  TrustWarnings,
+  TrustNoticeBanner,
   autoApplyStatusBadge,
   formatSourceName,
   isPartiallyVerified,
@@ -608,9 +608,23 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           </p>
         )}
 
+        {/* ONE explanation for the whole list, instead of the same paragraph on
+            every card. Each card's trust badge is the indicator; this is where the
+            candidate reads what it means. */}
+        {(unverifiedCount > 0 || partiallyVerifiedCount > 0) && <TrustNoticeBanner />}
+
         <ul className="space-y-4" role="list" aria-label="Job opportunities">
           {visibleOpportunities.map((opp) => {
             const unverified = isUnverifiedSource(opp.trustStatus);
+            const partiallyVerified = isPartiallyVerified(opp.trustStatus);
+            // The full sentences live in the page-level banner and on the detail
+            // page; the card badge is just the indicator. The tooltip repeats the
+            // short version for anyone who hovers before reading the banner.
+            const trustTitle = unverified
+              ? "Unverified source \u2014 we cannot confirm this listing against the employer\u2019s own site. See the note above the list."
+              : partiallyVerified
+                ? "Partly verified \u2014 the listing is real, but some details are unconfirmed. See the note above the list."
+                : undefined;
 
             return (
               <li
@@ -661,7 +675,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                           New
                         </Badge>
                       )}
-                      <StatusBadge status={trustStatusToBadge(opp.trustStatus)} />
+                      <StatusBadge status={trustStatusToBadge(opp.trustStatus)} title={trustTitle} />
                       <span className="text-xs text-ios-text-secondary">
                         {formatSalary(opp.salary)}
                       </span>
@@ -670,8 +684,6 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                       </span>
                       <StatusBadge status={autoApplyStatusBadge(opp.autoApplyStatus)} className="text-xs" />
                     </div>
-
-                    <TrustWarnings trustStatus={opp.trustStatus} />
 
                     <FitSection fit={opp.fitAnalysis} />
                   </div>

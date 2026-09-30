@@ -344,13 +344,15 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
 export interface StatusBadgeProps {
   status: StatusBadgeStatus;
   className?: string;
+  /** Optional native tooltip. The icon and label already carry the status. */
+  title?: string;
 }
 
-export function StatusBadge({ status, className }: StatusBadgeProps) {
+export function StatusBadge({ status, className, title }: StatusBadgeProps) {
   const { label, bg, fg, Icon } = STATUS_CONFIG[status];
 
   return (
-    <Badge className={cn(bg, fg, className)}>
+    <Badge className={cn(bg, fg, className)} title={title}>
       <Icon className="h-3.5 w-3.5 shrink-0" />
       {label}
     </Badge>
