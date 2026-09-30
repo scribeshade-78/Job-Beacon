@@ -254,17 +254,182 @@ export const ROLE_TAXONOMY: RoleTaxonomyEntry[] = [
   },
 ];
 
-/** Case-insensitive substring match against title and aliases. Empty query returns no results. */
+/**
+ * Search normalization: lowercase, and every run of non-alphanumeric characters
+ * becomes one space. "Front-end" and "front end" then compare equal, and
+ * "node.js" tokenizes to "node js" — so the exact-match tier holds however a
+ * hyphen or slash was typed.
+ */
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+/** Tokens of one title/alias/skill string, under the same normalization. */
+function tokensOf(value: string): string[] {
+  const normalized = normalizeSearchText(value);
+  return normalized === "" ? [] : normalized.split(" ");
+}
+
+/** Edit distance, iterative two-row Levenshtein. Small and dependency-free. */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+
+    for (let j = 1; j <= b.length; j += 1) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, substitution);
+    }
+
+    previous = current;
+  }
+
+  return previous[b.length];
+}
+
+/**
+ * How far a query token may differ from a taxonomy word and still count. One
+ * edit for words up to 8 characters covers the ordinary typo shapes
+ * ("enginer" -> "engineer", "dat" -> "data"); longer words get two, where the
+ * larger surface keeps the false-positive rate down.
+ */
+function typoBudget(length: number): number {
+  return length > 8 ? 2 : 1;
+}
+
+/**
+ * True when one query token matches one taxonomy word.
+ *
+ * Exact first, then a shared prefix (so "eng" finds "engineer") for tokens of
+ * at least three characters, then a bounded edit distance for real typos.
+ * Two-character tokens ("pm", "hr", "ae") match exactly only — at that length
+ * almost anything is within one edit of almost anything.
+ */
+function tokenMatchesWord(token: string, word: string): boolean {
+  if (token === word) {
+    return true;
+  }
+
+  if (token.length < 3 || word.length < 3) {
+    return false;
+  }
+
+  if (word.startsWith(token) || token.startsWith(word)) {
+    return true;
+  }
+
+  if (Math.abs(token.length - word.length) > 2) {
+    return false;
+  }
+
+  return levenshtein(token, word) <= typoBudget(Math.max(token.length, word.length));
+}
+
+function tokenHits(token: string, words: readonly string[]): boolean {
+  return words.some((word) => tokenMatchesWord(token, word));
+}
+
+interface RankedRole {
+  entry: RoleTaxonomyEntry;
+  exact: boolean;
+  titleHits: number;
+  aliasHits: number;
+  skillHits: number;
+  totalHits: number;
+  index: number;
+}
+
+/**
+ * The relevance tier an entry earned. Ordered as the product rule states:
+ * exact full-string match, then every token in the title, then every token in
+ * the aliases, then partial coverage.
+ */
+function relevanceTier(role: RankedRole, tokenCount: number): number {
+  if (role.exact) return 5;
+  if (role.titleHits === tokenCount) return 4;
+  if (role.aliasHits === tokenCount) return 3;
+  return 2;
+}
+
+/**
+ * Tokenized, ranked role search.
+ *
+ * The old rule was one whole-string `includes`, so a multi-word query like
+ * "Azure Data Engineer" matched nothing and the panel silently fell back to the
+ * same default suggestions. This splits the query into tokens, matches each
+ * token against a title, alias or skill word, and ranks by how much of the
+ * query an entry accounts for:
+ *
+ *   1. exact full-string match on the title or an alias
+ *   2. every token present in the title
+ *   3. every token present in the aliases
+ *   4. partial coverage, ranked by tokens matched (title, then alias, then skill)
+ *
+ * SKILLS ARE THE EXISTING RELATED-TERM SURFACE: "spark" or "airflow" finds Data
+ * Engineer without a second, fabricated synonym table. A token that matches
+ * nothing anywhere contributes no partial credit, so a query carrying one
+ * unknown word ("Azure Data Engineer") still surfaces the entries the known
+ * tokens describe. An empty query, or one whose tokens match no word at all,
+ * returns [] — the zero-result state is the UI's to render.
+ */
 export function searchRoles(query: string): RoleTaxonomyEntry[] {
-  const normalized = query.trim().toLowerCase();
+  const normalized = normalizeSearchText(query);
 
   if (normalized === "") {
     return [];
   }
 
-  return ROLE_TAXONOMY.filter(
-    (entry) =>
-      entry.title.toLowerCase().includes(normalized) ||
-      entry.aliases.some((alias) => alias.toLowerCase().includes(normalized)),
-  );
+  const queryTokens = normalized.split(" ");
+  const ranked: RankedRole[] = [];
+
+  ROLE_TAXONOMY.forEach((entry, index) => {
+    const title = normalizeSearchText(entry.title);
+    const aliasTexts = entry.aliases.map(normalizeSearchText);
+    const exact = title === normalized || aliasTexts.includes(normalized);
+
+    const titleWords = tokensOf(entry.title);
+    const aliasWords = entry.aliases.flatMap(tokensOf);
+    const skillWords = entry.skills.flatMap(tokensOf);
+
+    let titleHits = 0;
+    let aliasHits = 0;
+    let skillHits = 0;
+    let totalHits = 0;
+
+    for (const token of queryTokens) {
+      const inTitle = tokenHits(token, titleWords);
+      const inAlias = tokenHits(token, aliasWords);
+      const inSkill = tokenHits(token, skillWords);
+
+      if (inTitle) titleHits += 1;
+      if (inAlias) aliasHits += 1;
+      if (inSkill) skillHits += 1;
+      if (inTitle || inAlias || inSkill) totalHits += 1;
+    }
+
+    if (exact || totalHits > 0) {
+      ranked.push({ entry, exact, titleHits, aliasHits, skillHits, totalHits, index });
+    }
+  });
+
+  return ranked
+    .sort((a, b) => {
+      const tierDiff = relevanceTier(b, queryTokens.length) - relevanceTier(a, queryTokens.length);
+      if (tierDiff !== 0) return tierDiff;
+      if (b.totalHits !== a.totalHits) return b.totalHits - a.totalHits;
+      if (b.titleHits !== a.titleHits) return b.titleHits - a.titleHits;
+      if (b.aliasHits !== a.aliasHits) return b.aliasHits - a.aliasHits;
+      if (b.skillHits !== a.skillHits) return b.skillHits - a.skillHits;
+      return a.index - b.index;
+    })
+    .map((role) => role.entry);
 }
