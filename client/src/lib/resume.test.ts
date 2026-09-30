@@ -82,6 +82,8 @@ describe("listResumes", () => {
           mime_type: "application/pdf",
           byte_size: 10,
           created_at: "2026-08-13T00:00:00Z",
+          parse_status: null,
+          parse_error: null,
         },
       ],
       error: null,
@@ -107,6 +109,10 @@ describe("listResumes", () => {
           mimeType: "application/pdf",
           byteSize: 10,
           createdAt: "2026-08-13T00:00:00Z",
+          // The row carries no parse_status, so the mapper normalises it to
+          // 'uploaded' — an unparse-statused upload is not yet readable.
+          parseStatus: "uploaded",
+          parseError: null,
         },
       ],
     });

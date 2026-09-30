@@ -83,6 +83,7 @@ interface PreferencesDraft {
   willingToRelocate: boolean | null;
   excludedCompanies: string;
   excludedIndustries: string;
+  openToAnyLocation: boolean;
 }
 
 function toDraft(preferences: CandidatePreferences | null): PreferencesDraft {
@@ -103,6 +104,10 @@ function toDraft(preferences: CandidatePreferences | null): PreferencesDraft {
     willingToRelocate: preferences?.willingToRelocate ?? null,
     excludedCompanies: (preferences?.excludedCompanies ?? []).join("\n"),
     excludedIndustries: (preferences?.excludedIndustries ?? []).join("\n"),
+    // false for a candidate who has never toggled it, which is every existing
+    // row: nothing has ever been recorded about geographic openness, so defaulting
+    // to true would silently widen their search.
+    openToAnyLocation: preferences?.openToAnyLocation ?? false,
   };
 }
 
@@ -252,6 +257,7 @@ export function CandidatePreferencesPanel({ candidateId }: CandidatePreferencesP
       willingToRelocate: draft.willingToRelocate,
       excludedCompanies: parseListInput(draft.excludedCompanies),
       excludedIndustries: parseListInput(draft.excludedIndustries),
+      openToAnyLocation: draft.openToAnyLocation,
     });
 
     setSaving(false);
@@ -308,6 +314,30 @@ export function CandidatePreferencesPanel({ candidateId }: CandidatePreferencesP
         {/* 2. Location / Remote preference */}
         <section className="space-y-3 border-t border-ios-separator pt-5">
           <h3 className="text-sm font-medium text-black">Location and remote preference</h3>
+
+          {/* GEOGRAPHIC SCOPE, NOT WORK MODE. Deliberately placed above the
+              country/city fields because it governs whether they are required,
+              and worded to say so — "any location" alongside "Remote only" would
+              otherwise read as a second, conflicting work-mode choice. */}
+          <div className="space-y-1.5 rounded-control border border-ios-separator bg-ios-bg p-3">
+            <label className="flex items-start gap-2.5 text-sm text-black">
+              <input
+                type="checkbox"
+                id="open-to-any-location"
+                checked={draft.openToAnyLocation}
+                disabled={!loaded}
+                onChange={(event) => patch({ openToAnyLocation: event.target.checked })}
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-ios-separator text-ios-blue focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
+              />
+              <span className="font-medium">Open to opportunities in any location</span>
+            </label>
+            <p className="pl-6 text-xs text-ios-text-secondary">
+              This is about <span className="font-medium">where</span> the job is, not whether it is
+              remote or on-site — set that separately below. While this is ticked, no country or city is
+              required. Any countries or cities you have already entered are kept, and apply again if you
+              untick it.
+            </p>
+          </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">

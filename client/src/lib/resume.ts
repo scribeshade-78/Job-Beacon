@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isResumeParseStatus, type ResumeParseStatus } from "../../../shared/readiness";
 
 export type ResumeMimeType =
   | "application/pdf"
@@ -12,6 +13,42 @@ const ALLOWED_MIME_TYPES: readonly ResumeMimeType[] = [
 const GENERIC_FAILURE_MESSAGE = "Could not upload your resume. Please try again.";
 const UNSUPPORTED_FILE_MESSAGE = "Only PDF and DOCX resumes are supported.";
 
+/** The columns every resume read selects. Kept as one string so the two queries cannot drift. */
+const RESUME_COLUMNS =
+  "id, storage_path, original_filename, mime_type, byte_size, created_at, parse_status, parse_error";
+
+interface ResumeRow {
+  id: string;
+  storage_path: string;
+  original_filename: string;
+  mime_type: string;
+  byte_size: number;
+  created_at: string;
+  parse_status: string | null;
+  parse_error: string | null;
+}
+
+/**
+ * Maps a row to the candidate-facing shape.
+ *
+ * An unrecognised parse_status is reported as 'uploaded' rather than passed
+ * through: every consumer (readiness above all) treats an unknown token as
+ * not-parsed, and normalising here means a future status added by the server
+ * cannot reach the UI as a value nothing understands.
+ */
+function toResumeDocument(row: ResumeRow): ResumeDocument {
+  return {
+    id: row.id,
+    storagePath: row.storage_path,
+    originalFilename: row.original_filename,
+    mimeType: row.mime_type,
+    byteSize: row.byte_size,
+    createdAt: row.created_at,
+    parseStatus: isResumeParseStatus(row.parse_status) ? row.parse_status : "uploaded",
+    parseError: row.parse_error,
+  };
+}
+
 export interface ResumeDocument {
   id: string;
   storagePath: string;
@@ -19,6 +56,17 @@ export interface ResumeDocument {
   mimeType: string;
   byteSize: number;
   createdAt: string;
+  /**
+   * Whether JobBeacon has actually read this file.
+   *
+   * WRITTEN BY THE SERVER ONLY. A candidate holds no UPDATE grant and (since the
+   * Phase 0 Task 2 migration) cannot INSERT this column, so its value cannot be
+   * forged from the browser. Readiness requires 'parsed' — an upload alone is not
+   * evidence that anything could be read from the file.
+   */
+  parseStatus: ResumeParseStatus;
+  /** Safe failure code when parseStatus is 'failed'; otherwise null. */
+  parseError: string | null;
 }
 
 export type UploadResumeResult =
@@ -70,24 +118,14 @@ export async function uploadResume(
         mime_type: file.type,
         byte_size: file.size,
       })
-      .select("id, storage_path, original_filename, mime_type, byte_size, created_at")
+      .select(RESUME_COLUMNS)
       .single();
 
     if (insertError || !data) {
       return { kind: "error", message: GENERIC_FAILURE_MESSAGE };
     }
 
-    return {
-      kind: "success",
-      resume: {
-        id: data.id,
-        storagePath: data.storage_path,
-        originalFilename: data.original_filename,
-        mimeType: data.mime_type,
-        byteSize: data.byte_size,
-        createdAt: data.created_at,
-      },
-    };
+    return { kind: "success", resume: toResumeDocument(data as ResumeRow) };
   } catch {
     return { kind: "error", message: GENERIC_FAILURE_MESSAGE };
   }
@@ -103,7 +141,7 @@ export async function listResumes(
   try {
     const { data, error } = await client
       .from("resume_documents")
-      .select("id, storage_path, original_filename, mime_type, byte_size, created_at")
+      .select(RESUME_COLUMNS)
       // Only the candidate's own files. Tailored resumes are generated per
       // application and are kind='tailored' (20260917180000); listing them here
       // would put a file the candidate never chose next to their real uploads,
@@ -115,17 +153,7 @@ export async function listResumes(
       return { kind: "error", message: "Could not load your resumes. Please try again." };
     }
 
-    return {
-      kind: "success",
-      resumes: data.map((row) => ({
-        id: row.id,
-        storagePath: row.storage_path,
-        originalFilename: row.original_filename,
-        mimeType: row.mime_type,
-        byteSize: row.byte_size,
-        createdAt: row.created_at,
-      })),
-    };
+    return { kind: "success", resumes: (data as ResumeRow[]).map(toResumeDocument) };
   } catch {
     return { kind: "error", message: "Could not load your resumes. Please try again." };
   }

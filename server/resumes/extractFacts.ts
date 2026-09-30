@@ -1,5 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
+import {
+  markResumeParseFailed,
+  markResumeParsed,
+  markResumeParsing,
+  parseErrorCodeFor,
+} from "./parseStatus.js";
 import { extractResumeText, UnsupportedResumeFormatError } from "./textExtraction.js";
 import {
   EXTRACTION_PROMPT_VERSION,
@@ -131,6 +137,21 @@ function toFactRows(
  * set of fact rows is built in memory first and inserted in one batch
  * call, so a malformed-output rejection can never leave a partial write.
  */
+interface ResumeRowForExtraction {
+  id: string;
+  candidate_id: string;
+  storage_path: string;
+  mime_type: string;
+}
+
+/**
+ * Extracts facts, recording the parse status the candidate's readiness depends on.
+ *
+ * STATUS IS PART OF THE OUTCOME, not a side effect bolted on: a document that
+ * parsed and a document nobody could read are different facts about the
+ * candidate's setup, and before this the schema could not tell them apart at
+ * all. Every terminal path below writes one of 'parsed' or 'failed'.
+ */
 export async function extractResumeFacts(
   serviceClient: SupabaseClient,
   openaiClient: Pick<OpenAI, "chat">,
@@ -147,12 +168,59 @@ export async function extractResumeFacts(
     return { kind: "error", message: "Could not look up this resume. Please try again." };
   }
 
-  const resume = resumeRow as { id: string; candidate_id: string; storage_path: string; mime_type: string } | null;
+  const resume = resumeRow as ResumeRowForExtraction | null;
 
+  // OWNERSHIP BEFORE ANY STATUS WRITE. Marking 'parsing' before this check
+  // would let a caller flip somebody else's resume state by guessing an id, so
+  // the not_found path returns without touching the row.
   if (!resume || resume.candidate_id !== input.candidateId) {
     return { kind: "not_found" };
   }
 
+  // RETRY IS THE SAME ENTRY POINT. From 'uploaded' or 'failed' this clears the
+  // previous error and starts a fresh attempt, so a candidate retrying a failed
+  // resume never sees the old failure while the new one runs.
+  await markResumeParsing(serviceClient, resume.id);
+
+  let outcome: ExtractFactsResult;
+
+  try {
+    outcome = await runExtraction(serviceClient, openaiClient, input, resume, model);
+  } catch (error) {
+    // AN UNHANDLED THROW MUST NOT LEAVE THE DOCUMENT STUCK IN 'parsing'. A
+    // resume that says 'parsing' forever is worse than one that says it failed:
+    // nothing will ever move it, so readiness would hang rather than report.
+    await markResumeParseFailed(serviceClient, resume.id, "unexpected_error");
+    throw error;
+  }
+
+  if (outcome.kind === "success") {
+    await markResumeParsed(serviceClient, resume.id);
+  } else {
+    // null for 'not_found', which cannot reach here (ownership already passed)
+    // and must never write a status anyway.
+    const code = parseErrorCodeFor(outcome.kind);
+
+    if (code !== null) {
+      await markResumeParseFailed(serviceClient, resume.id, code);
+    }
+  }
+
+  return outcome;
+}
+
+/**
+ * The extraction work itself, with ownership already established and the row
+ * already marked 'parsing'. Split out so the status transitions above cannot be
+ * skipped by an early return added here later.
+ */
+async function runExtraction(
+  serviceClient: SupabaseClient,
+  openaiClient: Pick<OpenAI, "chat">,
+  input: ExtractFactsInput,
+  resume: ResumeRowForExtraction,
+  model: string,
+): Promise<ExtractFactsResult> {
   const { data: fileBlob, error: downloadError } = await serviceClient.storage
     .from("resumes")
     .download(resume.storage_path);

@@ -35,6 +35,10 @@ function tableBuilder(result: TableResult) {
     calls,
     select: record("select"),
     insert: record("insert"),
+    // The extraction path records parse status on resume_documents now, so the
+    // fake client has to support the update chain the same way it supports the
+    // read chain: update(...).eq(...) resolves to this table's result.
+    update: record("update"),
     eq: record("eq"),
     maybeSingle: (...args: unknown[]) => {
       calls.push({ method: "maybeSingle", args });
@@ -361,5 +365,142 @@ describe("extractResumeFacts", () => {
     await extractResumeFacts(client, fakeOpenAIClient, { resumeId: RESUME_ID, candidateId: CANDIDATE_ID });
 
     expect(from).not.toHaveBeenCalledWith("fact_confirmations");
+  });
+});
+
+describe("resume parse status transitions", () => {
+  function updatesFor(builders: ReturnType<typeof makeServiceClient>["builders"], table: string) {
+    return (builders[table]?.calls ?? [])
+      .filter((call) => call.method === "update")
+      .map((call) => call.args[0] as Record<string, unknown>);
+  }
+
+  it("marks the document parsing before the work, then parsed on success", async () => {
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction());
+    const { client, builders } = makeServiceClient();
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    expect(result.kind).toBe("success");
+
+    const updates = updatesFor(builders, "resume_documents");
+
+    expect(updates[0].parse_status).toBe("parsing");
+    expect(updates[updates.length - 1].parse_status).toBe("parsed");
+    expect(typeof updates[updates.length - 1].parsed_at).toBe("string");
+    // The parsed-at invariant the table itself enforces.
+    expect(updates[updates.length - 1].parsed_at).not.toBeNull();
+  });
+
+  it("clears a previous error when a retry starts parsing", async () => {
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction());
+    const { client, builders } = makeServiceClient();
+
+    await extractResumeFacts(client, fakeOpenAIClient, { resumeId: RESUME_ID, candidateId: CANDIDATE_ID });
+
+    expect(updatesFor(builders, "resume_documents")[0].parse_error).toBeNull();
+  });
+
+  it("records a safe failure code when the file format is unsupported", async () => {
+    const { UnsupportedResumeFormatError } = await import("./textExtraction.js");
+    const { extractResumeText } = await import("./textExtraction.js");
+    vi.mocked(extractResumeText).mockRejectedValueOnce(new UnsupportedResumeFormatError("doc"));
+    const { client, builders } = makeServiceClient();
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    expect(result.kind).toBe("unsupported_format");
+
+    const last = updatesFor(builders, "resume_documents").pop()!;
+    expect(last.parse_status).toBe("failed");
+    expect(last.parse_error).toBe("unsupported_file_format");
+  });
+
+  it("records a safe failure code when extraction output fails validation", async () => {
+    runResumeFactExtraction.mockRejectedValueOnce(new FakeMalformedExtractionError("bad shape"));
+    const { client, builders } = makeServiceClient();
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    expect(result.kind).toBe("malformed_extraction");
+    expect(updatesFor(builders, "resume_documents").pop()!.parse_error).toBe("extraction_service_failed");
+  });
+
+  it("marks failed when the extraction call fails for an unclassified reason", async () => {
+    runResumeFactExtraction.mockRejectedValueOnce(new Error("provider exploded"));
+    const { client, builders } = makeServiceClient();
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    // Already classified as a returned error rather than a throw, so the only
+    // thing this test pins is that it does not leave the document in 'parsing'.
+    expect(result.kind).toBe("error");
+
+    const updates = updatesFor(builders, "resume_documents");
+    expect(updates[0].parse_status).toBe("parsing");
+    const last = updates[updates.length - 1];
+    expect(last.parse_status).toBe("failed");
+    expect(last.parse_error).toBe("unexpected_error");
+  });
+
+  /**
+   * THE STUCK-IN-PARSING CASE. A rejection from the storage layer escapes the
+   * inner function entirely, and without the wrapper's catch the document would
+   * read "parsing" forever — nothing would ever move it, so readiness would hang
+   * instead of reporting a problem.
+   */
+  it("marks failed and rethrows when a dependency throws outside the handled paths", async () => {
+    runResumeFactExtraction.mockResolvedValueOnce(validExtraction());
+    const { client, builders, download } = makeServiceClient();
+    download.mockRejectedValueOnce(new Error("storage down"));
+
+    await expect(
+      extractResumeFacts(client, fakeOpenAIClient, { resumeId: RESUME_ID, candidateId: CANDIDATE_ID }),
+    ).rejects.toThrow("storage down");
+
+    const updates = updatesFor(builders, "resume_documents");
+    expect(updates[0].parse_status).toBe("parsing");
+    const last = updates[updates.length - 1];
+    expect(last.parse_status).toBe("failed");
+    expect(last.parse_error).toBe("unexpected_error");
+  });
+
+  /**
+   * An ownership mismatch must not touch the row at all: writing a status here
+   * would turn the endpoint into a way to change somebody else's resume state by
+   * guessing an id.
+   */
+  it("writes no status at all when the resume does not belong to the caller", async () => {
+    const { client, builders } = makeServiceClient({
+      resumeDocumentsResult: {
+        data: {
+          id: RESUME_ID,
+          candidate_id: "99999999-9999-9999-9999-999999999999",
+          storage_path: "other/resume.pdf",
+          mime_type: "application/pdf",
+        },
+        error: null,
+      },
+    });
+
+    const result = await extractResumeFacts(client, fakeOpenAIClient, {
+      resumeId: RESUME_ID,
+      candidateId: CANDIDATE_ID,
+    });
+
+    expect(result.kind).toBe("not_found");
+    expect(updatesFor(builders, "resume_documents")).toHaveLength(0);
   });
 });

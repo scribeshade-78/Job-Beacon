@@ -131,6 +131,7 @@ const FIT_ANALYSIS_BUDGET_MS = 45_000;
 import { runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
+import { loadCandidateReadiness, setupRefusals } from "./applications/readinessGate.js";
 import {
   approveAttempt,
   approveOwnedAttempt,
@@ -948,6 +949,30 @@ export function createApp(options: CreateAppOptions = {}) {
       }
 
       try {
+        // SETUP READINESS, ENFORCED SERVER-SIDE. The Home card hides the action
+        // when setup is incomplete, but a hidden button is not a gate: this
+        // endpoint can be called directly, so the same rule is re-derived here
+        // from authoritative rows. Refusing before any planning happens means an
+        // unset-up account cannot create application plans at all.
+        //
+        // THIS ADDS TO THE EXISTING GATES AND REMOVES NONE. The eligibility,
+        // source-policy, adapter, duplicate and consent checks still run inside
+        // bulkApplyToVacancies for every vacancy that gets this far.
+        const readiness = await loadCandidateReadiness(resolveServiceClient(), request.user!.id);
+        const refusals = setupRefusals(readiness);
+
+        if (refusals.length > 0) {
+          response.set("Cache-Control", "no-store");
+          // 409 rather than 400: the request is well-formed, the account's state
+          // is what refuses it. The structured blockers let a client say which
+          // step is missing instead of showing one generic sentence.
+          response.status(409).json({
+            error: "Finish setting up your account before queueing applications.",
+            blockers: refusals,
+          });
+          return;
+        }
+
         const result = await bulkApplyToVacancies(resolveServiceClient(), {
           candidateId: request.user!.id,
           vacancyIds: vacancyIds as string[],

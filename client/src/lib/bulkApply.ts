@@ -85,6 +85,28 @@ export async function submitBulkApply(
     return { kind: "error", message: "You're applying too quickly. Please wait a few minutes." };
   }
 
+  // 409 means the account is not set up yet, and the server names which step is
+  // missing. Reporting the generic failure here would bury the one actionable
+  // part, so the server's own sentence is preferred when it supplies one.
+  if (response.status === 409) {
+    let message = "Finish setting up your account before queueing applications.";
+
+    try {
+      const body = (await response.json()) as { error?: unknown; blockers?: Array<{ message?: unknown }> };
+      const firstBlocker = Array.isArray(body.blockers) ? body.blockers[0]?.message : null;
+
+      if (typeof firstBlocker === "string" && firstBlocker.trim() !== "") {
+        message = firstBlocker;
+      } else if (typeof body.error === "string" && body.error.trim() !== "") {
+        message = body.error;
+      }
+    } catch {
+      // Keep the default sentence.
+    }
+
+    return { kind: "error", message };
+  }
+
   if (!response.ok) {
     return { kind: "error", message: GENERIC_FAILURE };
   }

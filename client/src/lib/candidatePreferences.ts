@@ -33,6 +33,15 @@ export interface CandidatePreferences {
   willingToRelocate: boolean | null;
   excludedCompanies: string[];
   excludedIndustries: string[];
+  /**
+   * Geographic scope only: true means any location is acceptable, so
+   * preferredCountries/preferredCities are not required while it is true.
+   * Independent of remotePreference, which is about work mode.
+   *
+   * preferredCountries/preferredCities are NOT cleared when this is enabled:
+   * they are what makes turning it back off restore the previous scope.
+   */
+  openToAnyLocation: boolean;
 }
 
 export const EMPTY_PREFERENCES: CandidatePreferences = {
@@ -47,6 +56,7 @@ export const EMPTY_PREFERENCES: CandidatePreferences = {
   willingToRelocate: null,
   excludedCompanies: [],
   excludedIndustries: [],
+  openToAnyLocation: false,
 };
 
 export type PreferencesResult =
@@ -72,6 +82,7 @@ interface PreferenceRow {
   willing_to_relocate: boolean | null;
   excluded_companies: string[] | null;
   excluded_industries: string[] | null;
+  open_to_any_location: boolean | null;
 }
 
 function toPreferences(row: PreferenceRow): CandidatePreferences {
@@ -87,6 +98,10 @@ function toPreferences(row: PreferenceRow): CandidatePreferences {
     willingToRelocate: row.willing_to_relocate,
     excludedCompanies: row.excluded_companies ?? [],
     excludedIndustries: row.excluded_industries ?? [],
+    // A null column means the row predates the column's NOT NULL default, which
+    // can only happen between applying the migration and backfilling — treat it
+    // as false, the conservative reading, rather than as "anywhere".
+    openToAnyLocation: row.open_to_any_location === true,
   };
 }
 
@@ -97,7 +112,7 @@ export async function loadCandidatePreferences(
   try {
     const { data, error } = await client
       .from("candidate_preferences")
-      .select("preferred_countries, preferred_cities, remote_preference, employment_types, work_authorization, requires_sponsorship, min_salary, min_salary_currency, willing_to_relocate, excluded_companies, excluded_industries")
+      .select("preferred_countries, preferred_cities, remote_preference, employment_types, work_authorization, requires_sponsorship, min_salary, min_salary_currency, willing_to_relocate, excluded_companies, excluded_industries, open_to_any_location")
       .eq("candidate_id", candidateId)
       .maybeSingle();
 
@@ -156,6 +171,7 @@ export async function saveCandidatePreferences(
     willing_to_relocate: preferences.willingToRelocate,
     excluded_companies: preferences.excludedCompanies,
     excluded_industries: preferences.excludedIndustries,
+    open_to_any_location: preferences.openToAnyLocation === true,
     updated_at: new Date().toISOString(),
   };
 
@@ -163,7 +179,7 @@ export async function saveCandidatePreferences(
     const { data, error } = await client
       .from("candidate_preferences")
       .upsert(payload, { onConflict: "candidate_id" })
-      .select("preferred_countries, preferred_cities, remote_preference, employment_types, work_authorization, requires_sponsorship, min_salary, min_salary_currency, willing_to_relocate, excluded_companies, excluded_industries")
+      .select("preferred_countries, preferred_cities, remote_preference, employment_types, work_authorization, requires_sponsorship, min_salary, min_salary_currency, willing_to_relocate, excluded_companies, excluded_industries, open_to_any_location")
       .single();
 
     if (error || !data) {

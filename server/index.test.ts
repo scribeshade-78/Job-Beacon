@@ -680,7 +680,7 @@ describe("POST /api/opportunities/bulk-apply", () => {
     mockedBulkApply.mockResolvedValueOnce(batchResult);
 
     await withTestServer(
-      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      { verifyAccessToken: testVerifier, serviceClient: readyReadinessClient() },
       async (testBaseUrl) => {
         const response = await fetch(`${testBaseUrl}/api/opportunities/bulk-apply`, {
           method: "POST",
@@ -2255,6 +2255,9 @@ describe("POST /api/resumes/:id/extract", () => {
                     },
             }),
           }),
+          // Phase 0 Task 2: the extraction path records parse status on the row
+          // before and after the work, so the client must answer those updates.
+          update: () => ({ eq: async () => ({ error: null }) }),
         };
       }
       if (table === "extracted_facts") {
@@ -4095,3 +4098,72 @@ describe("POST /api/vacancies/:vacancyId/interview-prep", () => {
   });
 });
 
+
+/**
+ * A service client that answers the readiness reads as a fully set-up candidate.
+ *
+ * The bulk-apply route now derives setup readiness server-side before queueing,
+ * so a bare `{}` client throws on the first readiness query. Returning READY here
+ * is deliberate: these tests are about validation and response wiring, and the
+ * refusal path has its own tests below.
+ */
+function readyReadinessClient() {
+  return {
+    from: (table: string) => {
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+
+      for (const method of ["select", "eq", "order", "limit"]) {
+        builder[method] = chain;
+      }
+
+      builder.maybeSingle = () => {
+        if (table === "resume_documents") {
+          return Promise.resolve({ data: { parse_status: "parsed" }, error: null });
+        }
+        if (table === "candidate_preferences") {
+          return Promise.resolve({
+            data: {
+              remote_preference: "remote",
+              preferred_countries: ["India"],
+              preferred_cities: [],
+              open_to_any_location: false,
+            },
+            error: null,
+          });
+        }
+        if (table === "automation_authorizations") {
+          return Promise.resolve({ data: { status: "authorized" }, error: null });
+        }
+        if (table === "candidate_profiles") {
+          return Promise.resolve({ data: { review_before_submit: true }, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      };
+      builder.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve({ data: null, error: null, count: 1 }).then(resolve);
+
+      return builder;
+    },
+  } as never;
+}
+
+/** A client whose readiness reads all fail, so the route must refuse rather than assume. */
+function unreadyReadinessClient() {
+  return {
+    from: () => {
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+
+      for (const method of ["select", "eq", "order", "limit"]) {
+        builder[method] = chain;
+      }
+
+      builder.maybeSingle = () => Promise.resolve({ data: null, error: null });
+      builder.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve({ data: null, error: null, count: 0 }).then(resolve);
+
+      return builder;
+    },
+  } as never;
+}
