@@ -8,6 +8,7 @@ import {
   type PreferenceKey,
   type SortId,
 } from "../../../shared/opportunityQuery";
+import { matchesAnyTargetRole } from "./roleTaxonomy";
 import type { CandidatePreferences } from "./candidatePreferences";
 
 /**
@@ -339,4 +340,37 @@ export function applyOpportunitySort<Q extends FilterableQuery>(
   }
 
   return { query: next, applied: effective.id };
+}
+
+
+/**
+ * The feed's target-role relevance filter.
+ *
+ * WHY IT LIVES HERE AND NOT IN SQL. The relevance rule is the tokenized matcher
+ * in lib/roleTaxonomy.ts — the same one the Target Roles search uses — and that
+ * rule is not expressible as a PostgREST clause without inventing a second,
+ * different matching system (a raw ilike on the title would treat "end" as a hit
+ * for "Backend"). This module owns the feed's query shape, so the row filter
+ * belongs beside it.
+ *
+ * IT FILTERS THE FETCHED PAGE, SO CALLERS MUST PAGE ON RAW ROWS. Callers keep
+ * the unfiltered page in state and filter only what they render; the offset then
+ * still counts database rows, and a filtered page cannot re-read or skip rows.
+ * Filtering inside the query would make the offset a count of filtered rows.
+ *
+ * NO TARGET ROLES MEANS NO FILTER — the existing product behaviour, where a
+ * candidate who has not chosen roles sees the whole verified feed. The readiness
+ * gate, not this filter, is what asks them to choose.
+ */
+export function filterOpportunitiesByRoleRelevance<T extends { title: string }>(
+  opportunities: readonly T[],
+  targetRoles: readonly string[],
+): T[] {
+  const roles = targetRoles.map((role) => role.trim()).filter((role) => role !== "");
+
+  if (roles.length === 0) {
+    return [...opportunities];
+  }
+
+  return opportunities.filter((opportunity) => matchesAnyTargetRole(opportunity.title, roles));
 }

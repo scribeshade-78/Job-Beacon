@@ -433,3 +433,92 @@ export function searchRoles(query: string): RoleTaxonomyEntry[] {
     })
     .map((role) => role.entry);
 }
+
+/**
+ * Compact form used ONLY to recognise a typed role name as a taxonomy entry.
+ *
+ * "Frontend Developer" and the alias "front-end developer" differ by a space and
+ * a hyphen, and a candidate may type either, so the lookup compares them with
+ * every separator removed. This is a lookup key, not a matching rule.
+ */
+function compactSearchText(value: string): string {
+  return normalizeSearchText(value).replace(/ /g, "");
+}
+
+/** The taxonomy entry a selected role name refers to, or null for a custom role. */
+function taxonomyEntryFor(roleName: string): RoleTaxonomyEntry | null {
+  const normalized = normalizeSearchText(roleName);
+
+  if (normalized === "") {
+    return null;
+  }
+
+  const compact = compactSearchText(roleName);
+
+  return (
+    ROLE_TAXONOMY.find(
+      (entry) =>
+        normalizeSearchText(entry.title) === normalized ||
+        entry.aliases.some((alias) => normalizeSearchText(alias) === normalized) ||
+        compactSearchText(entry.title) === compact ||
+        entry.aliases.some((alias) => compactSearchText(alias) === compact),
+    ) ?? null
+  );
+}
+
+/**
+ * Whether one job title is relevant to one selected target role — the feed's
+ * strict half of the same tokenized matcher searchRoles uses above.
+ *
+ * RELEVANT MEANS THE TITLE CARRIES THE ROLE, not merely a word from it. The
+ * whole role phrase (or a taxonomy title/alias for it) must be present in the
+ * title, so "Data Engineer" keeps "Senior Data Engineer" and "Azure Data
+ * Engineer" but drops "Data Analyst": one shared word is not the job. Prefix and
+ * typo tolerance come from the same tokenMatchesWord, so "Data Engineering Lead"
+ * still matches "engineer".
+ *
+ * SKILLS ARE THE SAME RELATED-TERM SURFACE, matched EXACTLY rather than by
+ * prefix: "spark" keeps a Spark Engineer for Data Engineer, while prefixing
+ * would let Backend Engineer's "api design" pull in every Product Designer.
+ *
+ * An unrecognised role name still works — it is matched as its own phrase, which
+ * is exactly what a candidate-entered custom role is.
+ */
+export function isTitleRelevantToRole(title: string, roleName: string): boolean {
+  const titleWords = tokensOf(title);
+
+  if (titleWords.length === 0) {
+    return false;
+  }
+
+  const entry = taxonomyEntryFor(roleName);
+  const phrases = [roleName, ...(entry ? [entry.title, ...entry.aliases] : [])];
+
+  for (const phrase of phrases) {
+    const tokens = tokensOf(phrase);
+
+    if (tokens.length > 0 && tokens.every((token) => tokenHits(token, titleWords))) {
+      return true;
+    }
+  }
+
+  if (entry) {
+    for (const skill of entry.skills) {
+      for (const token of tokensOf(skill)) {
+        if (token.length >= 3 && titleWords.includes(token)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * True when the title matches ANY selected role. An empty list matches nothing
+ * here; the caller decides that "no roles" means "no filtering".
+ */
+export function matchesAnyTargetRole(title: string, roleNames: readonly string[]): boolean {
+  return roleNames.some((roleName) => isTitleRelevantToRole(title, roleName));
+}

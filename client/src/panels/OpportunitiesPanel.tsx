@@ -35,9 +35,11 @@ import {
   EMPTY_FILTERS,
   countActiveFilters,
   deriveFiltersFromPreferences,
+  filterOpportunitiesByRoleRelevance,
   type OpportunityFilters,
 } from "../lib/opportunityQuery";
 import { loadCandidatePreferences, type CandidatePreferences } from "../lib/candidatePreferences";
+import { listSelectedRoles } from "../lib/candidateSelectedRoles";
 import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
@@ -127,6 +129,13 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const [preferences, setPreferences] = useState<CandidatePreferences | null>(null);
   const [sort, setSort] = useState<SortId>(DEFAULT_SORT);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  /**
+   * The selected target roles. EMPTY MEANS NO FILTER — the existing behaviour
+   * for a candidate who has not chosen any, who keeps seeing the whole verified
+   * feed. A non-empty list makes the feed strict (see visibleOpportunities).
+   */
+  const [targetRoles, setTargetRoles] = useState<string[]>([]);
+
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
   const [querying, setQuerying] = useState(false);
@@ -188,13 +197,45 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   }, [candidateId]);
 
   /**
+   * The candidate's target roles — the feed's relevance input.
+   *
+   * Read here rather than inside listOpportunities because the filter is applied
+   * to the RENDERED rows while the query keeps paging on the raw rows. Filtering
+   * inside the query would make the offset a count of returned (filtered) rows,
+   * so the next page would re-read or skip database rows.
+   */
+  useEffect(() => {
+    if (!candidateId) {
+      setTargetRoles([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    listSelectedRoles(getSupabaseBrowserClient()).then((result) => {
+      if (cancelled) return;
+      setTargetRoles(result.kind === "success" ? result.roles.map((role) => role.roleName) : []);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [candidateId]);
+
+  /**
    * The ONE place the list is read, and the reason filters and sort are
    * dependencies rather than state the callers have to remember to re-apply.
    *
    * Task I made the filtering and the ordering SERVER-SIDE, so a page now holds
    * up to a full page of matches rather than a filtered subset of whatever rows
-   * happened to be loaded. That is what removes the old "showing 4 of 25 loaded"
-   * caveat — and it is also why nothing narrows the fetched rows again below.
+   * happened to be loaded.
+   *
+   * THE TARGET-ROLE FILTER IS THE ONE EXCEPTION, and it narrows what is
+   * RENDERED rather than the query (see visibleOpportunities). It has to: the
+   * relevance rule is the tokenized matcher in lib/roleTaxonomy.ts, which
+   * PostgREST cannot express, and filtering inside the query would turn the
+   * offset into a count of filtered rows and corrupt paging. The state below
+   * therefore keeps the RAW page, and the offset still counts database rows.
    */
   useEffect(() => {
     if (filters === null) return;
@@ -383,16 +424,21 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    * contradicting its own "sorted by" label.
    */
   const visibleOpportunities = useMemo(() => {
+    let merged: OpportunitySummary[];
+
     if (newlyDiscovered.length === 0) {
-      return opportunities ?? [];
+      merged = opportunities ?? [];
+    } else {
+      // The freshly fetched rows go on top; anything that is ALSO in the loaded
+      // page is dropped from its old position rather than rendered twice.
+      const freshIds = new Set(newlyDiscovered.map((opportunity) => opportunity.id));
+
+      merged = [...newlyDiscovered, ...(opportunities ?? []).filter((opportunity) => !freshIds.has(opportunity.id))];
     }
 
-    // The freshly fetched rows go on top; anything that is ALSO in the loaded
-    // page is dropped from its old position rather than rendered twice.
-    const freshIds = new Set(newlyDiscovered.map((opportunity) => opportunity.id));
-
-    return [...newlyDiscovered, ...(opportunities ?? []).filter((opportunity) => !freshIds.has(opportunity.id))];
-  }, [opportunities, newlyDiscovered]);
+    // The one thing that narrows the fetched rows: target-role relevance.
+    return filterOpportunitiesByRoleRelevance(merged, targetRoles);
+  }, [opportunities, newlyDiscovered, targetRoles]);
 
   const activeFilterCount = filters === null ? 0 : countActiveFilters(filters);
 
@@ -581,6 +627,19 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           <p className="text-sm text-ios-text-secondary">No opportunities match these filters.</p>
         )}
 
+        {/* The role filter can empty a non-empty page. That is a different fact
+            from "no jobs" and from "your filters match none", and it is the one
+            the candidate can act on by editing their target roles. */}
+        {(opportunities?.length ?? 0) > 0 && visibleOpportunities.length === 0 && targetRoles.length > 0 && (
+          <p className="text-sm text-ios-text-secondary">
+            No jobs match your target roles.{" "}
+            <Link href="/target-roles" className="text-ios-blue hover:underline">
+              Update your target roles
+            </Link>{" "}
+            to widen the feed.
+          </p>
+        )}
+
         {visibleOpportunities.length > 0 && (
           <p className="text-xs text-ios-text-secondary mb-3">
             {newlyDiscovered.length > 0 ? (
@@ -602,8 +661,9 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             )}
             {unverifiedCount > 0 && <> · {unverifiedCount} unverified</>}
             {/* The old "showing N of M loaded" line is gone with the client-side
-                filter it described: filtering now happens in SQL, so the loaded
-                rows ARE the matches and the two numbers were always equal. */}
+                filter it described. The one thing that now narrows the loaded
+                rows is the target-role filter below the header, and the count to
+                its left is the number that survived it. */}
             {querying && <> · updating…</>}
           </p>
         )}

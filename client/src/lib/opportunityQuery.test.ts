@@ -12,6 +12,7 @@ import {
   applyPreferenceExclusions,
   countActiveFilters,
   deriveFiltersFromPreferences,
+  filterOpportunitiesByRoleRelevance,
   freshnessCutoff,
   inheritedFilterLabels,
   type FilterableQuery,
@@ -308,5 +309,62 @@ describe("countActiveFilters", () => {
         }),
       ),
     ).toBe(8);
+  });
+});
+
+describe("filterOpportunitiesByRoleRelevance", () => {
+  const job = (title: string) => ({ title });
+
+  it("keeps only Data Engineering jobs for a candidate who selected Data Engineer", () => {
+    const kept = filterOpportunitiesByRoleRelevance(
+      [
+        job("Senior Data Engineer"),
+        job("Azure Data Engineer"),
+        job("Data Analyst"),
+        job("Marketing Manager"),
+        job("Sales Executive"),
+      ],
+      ["Data Engineer"],
+    ).map((entry) => entry.title);
+
+    // "Data Analyst" shares the word "data" and is still not the role; one
+    // shared word is not the job.
+    expect(kept).toEqual(["Senior Data Engineer", "Azure Data Engineer"]);
+  });
+
+  it("keeps Frontend jobs and excludes Data Engineering for Frontend Developer", () => {
+    const kept = filterOpportunitiesByRoleRelevance(
+      [job("Frontend Engineer"), job("React Developer"), job("Data Engineer"), job("Backend Engineer")],
+      // The alias form of the taxonomy title "Frontend Engineer".
+      ["Frontend Developer"],
+    ).map((entry) => entry.title);
+
+    expect(kept).toEqual(["Frontend Engineer", "React Developer"]);
+  });
+
+  it("returns every job when no target roles are selected", () => {
+    const rows = [job("Data Engineer"), job("Marketing Manager")];
+
+    expect(filterOpportunitiesByRoleRelevance(rows, [])).toEqual(rows);
+    // A blank role is "not selected", not a role that matches everything.
+    expect(filterOpportunitiesByRoleRelevance(rows, ["   "])).toEqual(rows);
+  });
+
+  it("includes a job that matches an alias or a taxonomy skill", () => {
+    const kept = filterOpportunitiesByRoleRelevance(
+      [job("ETL Developer"), job("Spark Engineer"), job("Graphic Designer")],
+      ["Data Engineer"],
+    ).map((entry) => entry.title);
+
+    expect(kept).toEqual(["ETL Developer", "Spark Engineer"]);
+  });
+
+  it("matches a custom role outside the taxonomy by its own words", () => {
+    const kept = filterOpportunitiesByRoleRelevance(
+      [job("Senior Blockchain Wizard"), job("Data Engineer")],
+      ["Blockchain Wizard"],
+    ).map((entry) => entry.title);
+
+    expect(kept).toEqual(["Senior Blockchain Wizard"]);
   });
 });
