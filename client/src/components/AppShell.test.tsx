@@ -62,11 +62,41 @@ describe("candidate navigation", () => {
     expect(nav().getByText("Employer access")).toBeTruthy();
   });
 
-  it("still offers the ordinary candidate destinations", () => {
+  it("still offers the ordinary candidate destinations, under their new labels", () => {
     renderShell(CANDIDATE);
 
-    for (const label of ["Overview", "Opportunities", "Applications", "Security", "Plans & Billing"]) {
+    for (const label of [
+      "Home",
+      "Find Jobs",
+      "Inbox",
+      "Tasks",
+      "Companies",
+      "Applications",
+      "Security",
+      "Plans & Billing",
+    ]) {
       expect(nav().getByText(label)).toBeTruthy();
+    }
+  });
+
+  /**
+   * The rename is LABELS ONLY: every destination still points at the same route,
+   * so a copy change cannot quietly re-point navigation.
+   */
+  it("keeps every candidate route unchanged", () => {
+    renderShell(CANDIDATE);
+
+    const routes: Array<[string, string]> = [
+      ["Home", "#/"],
+      ["Find Jobs", "#/opportunities"],
+      ["Inbox", "#/responses"],
+      ["Tasks", "#/action-required"],
+      ["Companies", "#/companies"],
+      ["Applications", "#/applications"],
+    ];
+
+    for (const [label, href] of routes) {
+      expect(nav().getByRole("link", { name: label }).getAttribute("href")).toBe(href);
     }
   });
 

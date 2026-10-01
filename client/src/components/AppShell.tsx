@@ -33,15 +33,15 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { href: "/", label: "Overview", Icon: LayoutDashboard },
+  { href: "/", label: "Home", Icon: LayoutDashboard },
   { href: "/profile", label: "Profile", Icon: User },
   { href: "/resumes", label: "Resumes", Icon: FileText },
   { href: "/target-roles", label: "Target Roles", Icon: Target },
-  { href: "/opportunities", label: "Opportunities", Icon: Briefcase },
+  { href: "/opportunities", label: "Find Jobs", Icon: Briefcase },
   { href: "/applications", label: "Applications", Icon: Send },
-  { href: "/responses", label: "Responses", Icon: Inbox },
-  { href: "/action-required", label: "Action Required", Icon: AlertCircle },
-  { href: "/companies", label: "Company Intelligence", Icon: Building2 },
+  { href: "/responses", label: "Inbox", Icon: Inbox },
+  { href: "/action-required", label: "Tasks", Icon: AlertCircle },
+  { href: "/companies", label: "Companies", Icon: Building2 },
   // CLAIMING A COMPANY, NOT ENTERING THE EMPLOYER PORTAL. This replaced an
   // unconditional "Employer" link to /employer: the claim flow is a candidate
   // action, so it belongs under the account, while the portal itself requires an

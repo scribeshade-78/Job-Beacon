@@ -554,7 +554,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     return (
       <Card>
         <CardHeader className="flex-row items-start justify-between gap-4">
-          <CardTitle id="opportunities-title">Opportunities</CardTitle>
+          <CardTitle id="opportunities-title">Find Jobs</CardTitle>
           {refreshButton}
         </CardHeader>
         <CardContent aria-labelledby="opportunities-title">
@@ -567,7 +567,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   return (
     <Card>
       <CardHeader className="flex-row items-start justify-between gap-4">
-        <CardTitle id="opportunities-title">Opportunities</CardTitle>
+        <CardTitle id="opportunities-title">Find Jobs</CardTitle>
         {refreshButton}
       </CardHeader>
       <CardContent aria-labelledby="opportunities-title">

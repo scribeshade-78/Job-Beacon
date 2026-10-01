@@ -14,7 +14,7 @@ import type { MailboxMessage } from "./mailboxMessages";
  * none is not shown here at all.
  */
 export const TODAY_SECTIONS = [
-  { key: "action_required", title: "Action Required", categories: ["action_required"] },
+  { key: "action_required", title: "Tasks", categories: ["action_required"] },
   { key: "interviews", title: "Interviews", categories: ["interview"] },
   { key: "offers", title: "Offers", categories: ["offer"] },
   { key: "updates", title: "Updates", categories: ["recruiter_followup", "application_received", "other"] },

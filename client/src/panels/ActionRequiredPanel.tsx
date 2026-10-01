@@ -227,7 +227,7 @@ export function ActionRequiredPanel() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle id="action-required-title">Action Required</CardTitle>
+        <CardTitle id="action-required-title">Tasks</CardTitle>
       </CardHeader>
       <CardContent aria-labelledby="action-required-title">
         {error && (
