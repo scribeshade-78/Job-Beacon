@@ -44,6 +44,7 @@ function makeQueryBuilder(result: TableResult) {
     eq: () => builder,
     in: vi.fn(() => builder),
     gte: vi.fn(() => builder),
+    single: async () => result,
     maybeSingle: async () => result,
     then: (onFulfilled: (value: TableResult) => unknown, onRejected?: (reason: unknown) => unknown) =>
       Promise.resolve(arrayResult).then(onFulfilled, onRejected),
@@ -74,6 +75,12 @@ const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   candidate_preferences: { data: null, error: null },
   companies: { data: null, error: null },
   company_profiles: { data: null, error: null },
+  // Phase 3: the plan_entitlement gate loads the effective plan itself. Null
+  // defaults mean "no subscription" -> free, with no plan_limits row -> not
+  // entitled; every pre-existing test below only asserts its own gate.
+  subscriptions: { data: null, error: null },
+  subscription_plans: { data: null, error: null },
+  plan_limits: { data: null, error: null },
 };
 
 function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
@@ -733,6 +740,9 @@ describe("search preference gates", () => {
     fact_confirmations: { data: [{ status: "confirmed" }], error: null },
     companies: { data: { displayed_name: "Contoso" }, error: null },
     company_profiles: { data: { industry: "Software" }, error: null },
+    subscriptions: { data: { plan_id: "plan-pro" }, error: null },
+    subscription_plans: { data: { id: "plan-pro", code: "pro" }, error: null },
+    plan_limits: { data: { max_auto_apply_india_per_month: 100, max_auto_apply_us_per_month: 300 }, error: null },
   };
 
   it("passes and queues a job that satisfies every search preference", async () => {
@@ -902,5 +912,116 @@ describe("search preference gates", () => {
     expect(result.eligible).toBe(false);
     expect(result.gates.role_match.reasonCode).toBe("ROLE_NOT_MATCHED");
     expect(result.gates.salary?.reasonCode).toBe("below_min_salary");
+  });
+});
+
+describe("plan entitlement gate", () => {
+  /** Every other gate in a passing state, so these tests isolate the plan gate. */
+  const otherwiseEligible = {
+    vacancies: {
+      data: {
+        source_code: "greenhouse",
+        trust_status: "VERIFIED",
+        raw_title: "Backend Engineer",
+        company_id: "company-1",
+        country: "India",
+        city: "Bengaluru",
+        remote_type: "remote",
+        salary_max: 90000,
+        currency: "USD",
+      },
+      error: null,
+    },
+    source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
+    candidate_preferences: {
+      data: {
+        preferred_countries: ["India"],
+        preferred_cities: [],
+        remote_preference: "remote",
+        employment_types: [],
+        min_salary: 60000,
+        min_salary_currency: "USD",
+        open_to_any_location: false,
+        excluded_companies: [],
+        excluded_industries: [],
+      },
+      error: null,
+    },
+    candidate_selected_roles: { data: [{ role_name: "Backend Engineer" }], error: null },
+    extracted_facts: { data: [{ id: "fact-1" }], error: null },
+    fact_confirmations: { data: [{ status: "confirmed" }], error: null },
+    companies: { data: { displayed_name: "Contoso" }, error: null },
+    company_profiles: { data: { industry: "Software" }, error: null },
+  };
+
+  const paidPlan = {
+    subscriptions: { data: { plan_id: "plan-pro" }, error: null },
+    subscription_plans: { data: { id: "plan-pro", code: "pro" }, error: null },
+    plan_limits: { data: { max_auto_apply_india_per_month: 100, max_auto_apply_us_per_month: 300 }, error: null },
+  };
+
+  const freePlan = {
+    subscriptions: { data: null, error: null },
+    subscription_plans: { data: { id: "plan-free", code: "free" }, error: null },
+    plan_limits: { data: { max_auto_apply_india_per_month: 0, max_auto_apply_us_per_month: 0 }, error: null },
+  };
+
+  it("passes and queues for a paid plan with a non-zero allowance", async () => {
+    const result = await evaluateEligibilityGates(makeClient({ ...otherwiseEligible, ...paidPlan }), baseInput);
+
+    expect(result.eligible).toBe(true);
+    expect(result.gates.plan_entitlement).toEqual({ status: "pass" });
+  });
+
+  it("rejects a Free candidate (no subscription) with plan_not_eligible", async () => {
+    const result = await evaluateEligibilityGates(makeClient({ ...otherwiseEligible, ...freePlan }), baseInput);
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.plan_entitlement).toEqual({
+      status: "fail",
+      reasonCode: "plan_not_eligible",
+      detail: { planCode: "free" },
+    });
+  });
+
+  it("is entitled when only one destination quota is non-zero", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({
+        ...otherwiseEligible,
+        subscriptions: { data: { plan_id: "plan-us" }, error: null },
+        subscription_plans: { data: { id: "plan-us", code: "starter" }, error: null },
+        plan_limits: { data: { max_auto_apply_india_per_month: 0, max_auto_apply_us_per_month: 80 }, error: null },
+      }),
+      baseInput,
+    );
+
+    expect(result.gates.plan_entitlement).toEqual({ status: "pass" });
+  });
+
+  it("rejects when the effective plan has no plan_limits row", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({ ...otherwiseEligible, ...paidPlan, plan_limits: { data: null, error: null } }),
+      baseInput,
+    );
+
+    expect(result.gates.plan_entitlement).toEqual({
+      status: "fail",
+      reasonCode: "plan_not_eligible",
+      detail: { planCode: "pro" },
+    });
+  });
+
+  it("ignores a forged payload and uses the database entitlement", async () => {
+    const forged = {
+      candidateId: "candidate-1",
+      vacancyId: "vacancy-1",
+      planEntitled: true,
+      plan: "power",
+    } as unknown as Parameters<typeof evaluateEligibilityGates>[1];
+
+    const result = await evaluateEligibilityGates(makeClient({ ...otherwiseEligible, ...freePlan }), forged);
+
+    expect(result.eligible).toBe(false);
+    expect(result.gates.plan_entitlement?.reasonCode).toBe("plan_not_eligible");
   });
 });

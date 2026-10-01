@@ -6,6 +6,7 @@ import {
 } from "../../shared/searchPreferences.js";
 import { isTitleRelevantToRole } from "../../shared/roleTaxonomy.js";
 import { loadSearchPreferencesForCandidate } from "./searchPreferences.js";
+import { loadAutomationEntitlement } from "../billing/automationEntitlement.js";
 
 export type GateStatus = "pass" | "fail";
 
@@ -71,6 +72,7 @@ export interface EligibilityGates {
   work_mode?: GateResult;
   salary?: GateResult;
   location?: GateResult;
+  plan_entitlement?: GateResult;
 }
 
 export interface EligibilityGateOutcome {
@@ -147,6 +149,7 @@ export async function evaluateEligibilityGates(
     searchPreferences,
     companyResult,
     companyProfileResult,
+    automationEntitlement,
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
@@ -167,6 +170,9 @@ export async function evaluateEligibilityGates(
           .select("industry")
           .eq("company_id", vacancy.company_id)
           .maybeSingle(),
+    // The plan entitlement is loaded from the candidate's own rows, never from
+    // the request.
+    loadAutomationEntitlement(client, candidateId),
   ]);
 
   if (companyResult.error) {
@@ -206,6 +212,13 @@ export async function evaluateEligibilityGates(
     work_mode: preferenceLedger.gates.work_mode,
     salary: preferenceLedger.gates.salary,
     location: preferenceLedger.gates.location,
+    plan_entitlement: automationEntitlement.planEntitled
+      ? { status: "pass" }
+      : {
+          status: "fail",
+          reasonCode: "plan_not_eligible",
+          detail: { planCode: automationEntitlement.planCode },
+        },
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");

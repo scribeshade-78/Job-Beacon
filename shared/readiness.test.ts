@@ -31,6 +31,7 @@ function input(overrides: Partial<ReadinessInput> = {}): ReadinessInput {
     preferences: COMPLETE_PREFERENCES,
     consentStatus: "authorized",
     canQueue: true,
+    planEntitled: true,
     reviewBeforeSubmit: true,
     scheduledAutomationRunning: false,
     ...overrides,
@@ -323,5 +324,33 @@ describe("consent readiness and primary state precedence", () => {
     ]);
     expect(readiness.steps.every((step) => step.complete)).toBe(true);
     expect(readiness.completedSteps).toBe(4);
+  });
+});
+
+describe("plan entitlement readiness", () => {
+  it("reports plan_not_eligible, and refuses the queue, when the plan excludes automation", () => {
+    const readiness = evaluateReadiness(input({ planEntitled: false }));
+
+    expect(readiness.setupComplete).toBe(true);
+    expect(readiness.blockers.map((b) => b.code)).toContain("plan_not_eligible");
+    expect(readiness.primaryState).toBe("plan_not_eligible");
+    expect(readiness.reviewQueueAvailable).toBe(false);
+    expect(readiness.submissionAvailable).toBe(false);
+    expect(readinessHeadline(readiness)).toBe("Setup complete · Your plan does not include automation");
+  });
+
+  it("does not report the plan blocker before the four setup steps are complete", () => {
+    const readiness = evaluateReadiness(input({ planEntitled: false, resume: { status: "uploaded" } }));
+
+    expect(readiness.blockers.map((b) => b.code)).not.toContain("plan_not_eligible");
+    expect(readiness.primaryState).toBe("setup_incomplete");
+  });
+
+  it("is ready for the review queue with a complete setup, consent and an entitled plan", () => {
+    const readiness = evaluateReadiness(input({ planEntitled: true }));
+
+    expect(readiness.blockers.map((b) => b.code)).not.toContain("plan_not_eligible");
+    expect(readiness.primaryState).toBe("ready_for_review_queue");
+    expect(readiness.reviewQueueAvailable).toBe(true);
   });
 });

@@ -15,6 +15,7 @@ const COMPLETE: ReadinessInput = {
   preferences: { saved: true, remotePreference: "remote", countryCount: 1, cityCount: 0, openToAnyLocation: false },
   consentStatus: "authorized",
   canQueue: true,
+  planEntitled: true,
   reviewBeforeSubmit: true,
   scheduledAutomationRunning: false,
 };
@@ -114,5 +115,14 @@ describe("loadCandidateReadiness", () => {
     expect(readiness.setupComplete).toBe(false);
     expect(readiness.primaryState).toBe("setup_incomplete");
     expect(setupRefusals(readiness).length).toBeGreaterThan(0);
+  });
+});
+
+describe("plan entitlement and setupRefusals", () => {
+  it("does not refuse the request for a plan that excludes automation", () => {
+    const readiness = evaluateReadiness({ ...COMPLETE, planEntitled: false });
+
+    expect(readiness.blockers.map((b) => b.code)).toContain("plan_not_eligible");
+    expect(setupRefusals(readiness)).toEqual([]);
   });
 });

@@ -35,6 +35,7 @@ export const GATE_REASON_CLAUSES: Record<string, string> = {
   below_min_salary: "the advertised salary is below your minimum",
   location_not_stated: "you haven't told us where you want to work yet",
   location_mismatch: "this job is outside the locations you chose",
+  plan_not_eligible: "your current plan does not include automatic applications",
 };
 
 export const GENERIC_INELIGIBLE_REASON = "it didn't pass our eligibility checks";
@@ -71,6 +72,7 @@ export const GATE_PRECEDENCE = [
   "work_mode",
   "salary",
   "location",
+  "plan_entitlement",
 ] as const;
 
 /**

@@ -20,6 +20,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { evaluateReadiness, type Readiness, type ReadinessBlockerCode } from "../../shared/readiness.js";
 import { loadQueueCapability } from "./queueCapability.js";
+import { loadAutomationEntitlement } from "../billing/automationEntitlement.js";
 
 /** The structured refusal a caller receives, so a client can act rather than parse prose. */
 export interface ReadinessRefusal {
@@ -71,6 +72,16 @@ export async function loadCandidateReadiness(
 
   const capability = await loadQueueCapability(client);
 
+  // FAIL CLOSED, like every other input here: an unreadable plan is not an
+  // entitled plan. The eligibility gate propagates the same read failure as an
+  // error; readiness is the display/refusal input and must not 500.
+  let planEntitled = false;
+  try {
+    planEntitled = (await loadAutomationEntitlement(client, candidateId)).planEntitled;
+  } catch {
+    planEntitled = false;
+  }
+
   const preferences = preferenceRow as {
     remote_preference: string | null;
     preferred_countries: string[] | null;
@@ -93,6 +104,7 @@ export async function loadCandidateReadiness(
       : null,
     consentStatus: (consentRow as { status: unknown } | null)?.status ?? null,
     canQueue: capability.canQueue,
+    planEntitled,
     reviewBeforeSubmit: (profileRow as { review_before_submit: boolean } | null)?.review_before_submit !== false,
     // No scheduled automation exists (verified in server/scheduler.ts), so this
     // is always false and 'active' is therefore unreachable — deliberately.
@@ -105,7 +117,7 @@ export async function loadCandidateReadiness(
  * the candidate is set up.
  *
  * ONLY THE FOUR SETUP STEPS ARE CHECKED HERE. Capability blockers
- * (supported_source_missing) are deliberately excluded: those are already
+ * (supported_source_missing, plan_not_eligible) are deliberately excluded: those are already
  * enforced per-vacancy by the eligibility gates, and refusing the whole request
  * for them would replace the existing, more informative per-job reasons with one
  * blanket error.

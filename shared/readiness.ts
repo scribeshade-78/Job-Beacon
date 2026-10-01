@@ -103,6 +103,13 @@ export interface ReadinessInput {
    * of the product, not an oversight.
    */
   scheduledAutomationRunning: boolean;
+  /**
+   * Whether the candidate's EFFECTIVE plan includes a non-zero auto-apply
+   * allowance (server/billing/automationEntitlement.ts). A SEPARATE AXIS from
+   * canQueue — that is source capability, this is the subscription — kept
+   * separate so neither can hide the other.
+   */
+  planEntitled: boolean;
 }
 
 export type ReadinessBlockerCode =
@@ -115,7 +122,8 @@ export type ReadinessBlockerCode =
   | "supported_source_missing"
   | "submission_adapter_missing"
   | "automation_paused"
-  | "automation_stopped";
+  | "automation_stopped"
+  | "plan_not_eligible";
 
 export interface ReadinessAction {
   label: string;
@@ -161,7 +169,8 @@ export type PrimaryState =
   | "ready_for_review_queue"
   | "automation_paused"
   | "active"
-  | "stopped";
+  | "stopped"
+  | "plan_not_eligible";
 
 export interface Readiness {
   resumeReady: boolean;
@@ -188,6 +197,7 @@ const RESUME_ACTION: ReadinessAction = { label: "Upload resume", route: "/resume
 const ROLES_ACTION: ReadinessAction = { label: "Choose target roles", route: "/target-roles" };
 const PREFERENCES_ACTION: ReadinessAction = { label: "Complete search preferences", route: "/profile" };
 const CONSENT_ACTION: ReadinessAction = { label: "Review submission consent", route: null };
+const PLAN_ACTION: ReadinessAction = { label: "View plans", route: "/billing" };
 
 /** Whether the resume step is satisfied. Only a successfully parsed upload counts. */
 export function resumeStepComplete(resume: ReadinessResumeInput | null): boolean {
@@ -357,9 +367,11 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
   const setupComplete = nonConsentStepsComplete && consentReady;
 
   const discoveryAvailable = rolesReady && preferencesReady;
-  const reviewQueueAvailable = setupComplete && consentReady && input.canQueue;
+  // The plan is a necessary condition for BOTH: without it nothing can be
+  // queued, submitted or controlled, whatever the source can do.
+  const reviewQueueAvailable = setupComplete && consentReady && input.canQueue && input.planEntitled;
   const submissionAvailable = reviewQueueAvailable;
-  const automationControlsAvailable = setupComplete && consentReady && input.canQueue;
+  const automationControlsAvailable = setupComplete && consentReady && input.canQueue && input.planEntitled;
 
   const blockers: ReadinessBlocker[] = [
     ...resumeBlockers(input.resume),
@@ -388,6 +400,19 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
     });
   }
 
+  // The second capability axis, reported under the same rule: only once the
+  // candidate has done everything they can, and never collapsed into the source
+  // limitation above — "no source can submit" and "your plan excludes
+  // automation" are different facts with different remedies.
+  if (setupComplete && !input.planEntitled) {
+    blockers.push({
+      code: "plan_not_eligible",
+      message:
+        "Your current plan does not include automatic applications. Upgrade your plan to enable automation.",
+      action: PLAN_ACTION,
+    });
+  }
+
   let primaryState: PrimaryState;
 
   if (!nonConsentStepsComplete) {
@@ -400,6 +425,8 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
     primaryState = "submission_consent_missing";
   } else if (!input.canQueue) {
     primaryState = "blocked_no_supported_source";
+  } else if (!input.planEntitled) {
+    primaryState = "plan_not_eligible";
   } else if (input.scheduledAutomationRunning) {
     primaryState = "active";
   } else {
@@ -482,6 +509,8 @@ export function readinessHeadline(readiness: Readiness): string {
       return "Ready to search · Submission consent required";
     case "blocked_no_supported_source":
       return "Setup complete · Automatic submission unavailable";
+    case "plan_not_eligible":
+      return "Setup complete · Your plan does not include automation";
     case "ready_for_review_queue":
       return "Ready for application review";
     case "automation_paused":
