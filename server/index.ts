@@ -924,6 +924,35 @@ export function createApp(options: CreateAppOptions = {}) {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // GET /api/readiness
+  //
+  // THE STRUCTURED SETUP STATE the Home checklist renders, from the same
+  // loadCandidateReadiness call the bulk-apply route already refuses on. Exposed
+  // so the checklist renders the one shared rule instead of re-deriving it in
+  // the browser (which is how the UI and the gate drift apart). Read-only and
+  // scoped to the authenticated candidate. The FULL Readiness object is returned
+  // so a future banner or nav indicator can reuse it without another round-trip.
+  //
+  // NOT CACHED: the steps and the plan/source flags change as the candidate acts,
+  // and a cached "incomplete" would keep a finished checklist on screen.
+  // ---------------------------------------------------------------------------
+  app.get("/api/readiness", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const readiness = await loadCandidateReadiness(resolveServiceClient(), request.user!.id);
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json(readiness);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Readiness read failed:", message);
+      // 500, not a fabricated "not set up": the checklist must be able to tell
+      // "not set up" from "we could not check", and a default would either hide a
+      // refusal or claim readiness the server never verified.
+      response.status(500).json({ error: "Could not check your setup progress" });
+    }
+  });
+
   app.post(
     "/api/opportunities/bulk-apply",
     requireAuth,

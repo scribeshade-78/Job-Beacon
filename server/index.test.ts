@@ -589,6 +589,67 @@ describe("GET /api/opportunities/capability", () => {
   });
 });
 
+describe("GET /api/readiness", () => {
+  beforeEach(() => {
+    // The real loadCandidateReadiness calls loadQueueCapability; pin it so the
+    // endpoint test is about the route, not about another module's mock state.
+    vi.mocked(loadQueueCapability).mockResolvedValue({ canQueue: false, queueableSources: [] } as never);
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/readiness`);
+
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns the candidate's full readiness object", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: readyReadinessClient() },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/readiness`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+
+        const body = (await response.json()) as {
+          steps: unknown[];
+          completedSteps: number;
+          totalSteps: number;
+          setupComplete: boolean;
+        };
+        expect(body.steps).toHaveLength(4);
+        expect(body.totalSteps).toBe(4);
+        expect(typeof body.completedSteps).toBe("number");
+        expect(body.setupComplete).toBe(true);
+      },
+    );
+  });
+
+  it("returns 500 rather than a fabricated state when the read fails", async () => {
+    await withTestServer(
+      {
+        verifyAccessToken: testVerifier,
+        serviceClient: {
+          from: () => {
+            throw new Error("down");
+          },
+        } as never,
+      },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/readiness`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
+
 describe("POST /api/opportunities/bulk-apply", () => {
   const mockedBulkApply = vi.mocked(bulkApplyToVacancies);
   const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

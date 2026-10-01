@@ -18,6 +18,7 @@ import {
   type QueueCapabilityState,
 } from "../lib/queueCapability";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { AUTOMATION_CONSENT_ANCHOR_ID } from "../lib/readiness";
 
 /**
  * CONSENT STATE, AND NOTHING MORE.
@@ -99,7 +100,7 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
   const automationCapabilityNotice = describeAutomationCapabilityNotice(capability);
 
   return (
-    <Card>
+    <Card id={AUTOMATION_CONSENT_ANCHOR_ID}>
       <CardHeader>
         <CardTitle id="automation-title">Automation</CardTitle>
       </CardHeader>

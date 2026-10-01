@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { SetupChecklist } from "../components/SetupChecklist";
 import { AutomationPanel } from "../panels/AutomationPanel";
 import { ActionRequiredPanel } from "../panels/ActionRequiredPanel";
 import { TodayPanel } from "../panels/TodayPanel";
@@ -17,7 +18,12 @@ interface OverviewPageProps {
 
 export function OverviewPage({ candidateId, ready }: OverviewPageProps) {
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+    <div className="space-y-6">
+      {/* Full width, above the grid, and NOT gated by `ready`: the checklist must
+          show its skeleton while identity is still loading. */}
+      <SetupChecklist />
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
       <div className="lg:col-span-4">{ready && candidateId && <AutomationPanel candidateId={candidateId} />}</div>
 
       <div className="lg:col-span-8">
@@ -41,6 +47,7 @@ export function OverviewPage({ candidateId, ready }: OverviewPageProps) {
       <div className="lg:col-span-8">{ready && <TodayPanel />}</div>
 
       <div className="lg:col-span-4">{ready && <ActionRequiredPanel />}</div>
+      </div>
     </div>
   );
 }

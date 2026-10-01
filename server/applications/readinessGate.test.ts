@@ -126,3 +126,54 @@ describe("plan entitlement and setupRefusals", () => {
     expect(setupRefusals(readiness)).toEqual([]);
   });
 });
+
+describe("loadCandidateReadiness timestamps", () => {
+  it("populates each completed step's timestamp from its own row", async () => {
+    const rows: Record<string, { data: unknown; error: unknown }> = {
+      resume_documents: { data: { parse_status: "parsed", parsed_at: "2026-09-01T00:00:00.000Z" }, error: null },
+      candidate_preferences: {
+        data: {
+          remote_preference: "remote",
+          preferred_countries: ["India"],
+          preferred_cities: [],
+          open_to_any_location: false,
+          updated_at: "2026-09-03T00:00:00.000Z",
+        },
+        error: null,
+      },
+      automation_authorizations: {
+        data: { status: "authorized", status_changed_at: "2026-09-04T00:00:00.000Z" },
+        error: null,
+      },
+      candidate_profiles: { data: { review_before_submit: true }, error: null },
+      candidate_selected_roles: { data: { created_at: "2026-09-02T00:00:00.000Z" }, error: null },
+    };
+
+    const client = {
+      from: (table: string) => {
+        const builder: Record<string, unknown> = {};
+        const chain = () => builder;
+
+        for (const method of ["select", "eq", "in", "order", "limit"]) {
+          builder[method] = chain;
+        }
+
+        const result = rows[table] ?? { data: null, error: null };
+        builder.maybeSingle = () => Promise.resolve(result);
+        builder.single = () => Promise.resolve(result);
+        builder.then = (resolve: (value: unknown) => unknown) =>
+          Promise.resolve({ data: null, error: null, count: table === "candidate_selected_roles" ? 1 : null }).then(resolve);
+
+        return builder;
+      },
+    } as never;
+
+    const readiness = await loadCandidateReadiness(client, "candidate-1");
+    const byId = (id: string) => readiness.steps.find((entry) => entry.id === id)!;
+
+    expect(byId("resume").timestamp).toBe("2026-09-01T00:00:00.000Z");
+    expect(byId("target_roles").timestamp).toBe("2026-09-02T00:00:00.000Z");
+    expect(byId("search_preferences").timestamp).toBe("2026-09-03T00:00:00.000Z");
+    expect(byId("submission_consent").timestamp).toBe("2026-09-04T00:00:00.000Z");
+  });
+});

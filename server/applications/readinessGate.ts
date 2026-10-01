@@ -39,11 +39,17 @@ export async function loadCandidateReadiness(
   client: SupabaseClient,
   candidateId: string,
 ): Promise<Readiness> {
-  const [{ data: resumeRow }, { count: roleCount }, { data: preferenceRow }, { data: consentRow }, { data: profileRow }] =
-    await Promise.all([
+  const [
+    { data: resumeRow },
+    { count: roleCount },
+    { data: earliestRoleRow },
+    { data: preferenceRow },
+    { data: consentRow },
+    { data: profileRow },
+  ] = await Promise.all([
       client
         .from("resume_documents")
-        .select("parse_status")
+        .select("parse_status, parsed_at")
         .eq("candidate_id", candidateId)
         .eq("kind", "uploaded")
         .order("created_at", { ascending: false })
@@ -53,14 +59,23 @@ export async function loadCandidateReadiness(
         .from("candidate_selected_roles")
         .select("role_name", { count: "exact", head: true })
         .eq("candidate_id", candidateId),
+      // The EARLIEST selection is when the step was finished; adding a second
+      // role later must not move the completion date forward.
+      client
+        .from("candidate_selected_roles")
+        .select("created_at")
+        .eq("candidate_id", candidateId)
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle(),
       client
         .from("candidate_preferences")
-        .select("remote_preference, preferred_countries, preferred_cities, open_to_any_location")
+        .select("remote_preference, preferred_countries, preferred_cities, open_to_any_location, updated_at")
         .eq("candidate_id", candidateId)
         .maybeSingle(),
       client
         .from("automation_authorizations")
-        .select("status")
+        .select("status, status_changed_at")
         .eq("candidate_id", candidateId)
         .maybeSingle(),
       client
@@ -87,6 +102,7 @@ export async function loadCandidateReadiness(
     preferred_countries: string[] | null;
     preferred_cities: string[] | null;
     open_to_any_location: boolean | null;
+    updated_at: string | null;
   } | null;
 
   return evaluateReadiness({
@@ -103,6 +119,15 @@ export async function loadCandidateReadiness(
         }
       : null,
     consentStatus: (consentRow as { status: unknown } | null)?.status ?? null,
+    // Each value is applied only when the step is COMPLETE (see
+    // shared/readiness.ts); null is the honest answer for a step with no row.
+    timestamps: {
+      resume: (resumeRow as { parsed_at: string | null } | null)?.parsed_at ?? null,
+      targetRoles: (earliestRoleRow as { created_at: string } | null)?.created_at ?? null,
+      searchPreferences: preferences?.updated_at ?? null,
+      submissionConsent:
+        (consentRow as { status_changed_at: string | null } | null)?.status_changed_at ?? null,
+    },
     canQueue: capability.canQueue,
     planEntitled,
     reviewBeforeSubmit: (profileRow as { review_before_submit: boolean } | null)?.review_before_submit !== false,

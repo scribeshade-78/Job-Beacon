@@ -354,3 +354,46 @@ describe("plan entitlement readiness", () => {
     expect(readiness.reviewQueueAvailable).toBe(true);
   });
 });
+
+describe("step timestamps", () => {
+  it("carries a completion timestamp only on a completed step", () => {
+    const readiness = evaluateReadiness(
+      input({
+        planEntitled: true,
+        timestamps: {
+          resume: "2026-09-01T00:00:00.000Z",
+          targetRoles: "2026-09-02T00:00:00.000Z",
+          searchPreferences: null,
+          submissionConsent: "2026-09-03T00:00:00.000Z",
+        },
+      }),
+    );
+
+    const byId = (id: string) => readiness.steps.find((entry) => entry.id === id)!;
+
+    expect(byId("resume").timestamp).toBe("2026-09-01T00:00:00.000Z");
+    expect(byId("target_roles").timestamp).toBe("2026-09-02T00:00:00.000Z");
+    expect(byId("search_preferences").timestamp).toBeNull();
+    expect(byId("submission_consent").timestamp).toBe("2026-09-03T00:00:00.000Z");
+  });
+
+  it("never reports a timestamp for an incomplete step", () => {
+    const readiness = evaluateReadiness(
+      input({
+        planEntitled: true,
+        resume: { status: "uploaded" },
+        timestamps: {
+          resume: "2026-09-01T00:00:00.000Z",
+          targetRoles: null,
+          searchPreferences: null,
+          submissionConsent: null,
+        },
+      }),
+    );
+
+    const resume = readiness.steps.find((entry) => entry.id === "resume")!;
+
+    expect(resume.complete).toBe(false);
+    expect(resume.timestamp).toBeNull();
+  });
+});

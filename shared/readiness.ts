@@ -82,6 +82,14 @@ export interface ReadinessPreferencesInput {
   openToAnyLocation: unknown;
 }
 
+/** ISO completion timestamps per step, supplied by the server loader. */
+export interface ReadinessStepTimestamps {
+  resume: string | null;
+  targetRoles: string | null;
+  searchPreferences: string | null;
+  submissionConsent: string | null;
+}
+
 export interface ReadinessInput {
   /** The candidate's most recent UPLOADED resume (kind = 'uploaded'), or null. */
   resume: ReadinessResumeInput | null;
@@ -110,6 +118,11 @@ export interface ReadinessInput {
    * separate so neither can hide the other.
    */
   planEntitled: boolean;
+  /**
+   * ISO completion timestamps for the four steps. Applied only to a COMPLETE
+   * step, so an incomplete step can never carry a completion date.
+   */
+  timestamps?: ReadinessStepTimestamps;
 }
 
 export type ReadinessBlockerCode =
@@ -445,7 +458,7 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
       complete: resumeReady,
       detail: resumeStepDetail(input.resume),
       action: resumeReady ? null : RESUME_ACTION,
-      timestamp: null,
+      timestamp: resumeReady ? (input.timestamps?.resume ?? null) : null,
     },
     {
       id: "target_roles",
@@ -455,7 +468,7 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
         ? input.targetRoleCount + (input.targetRoleCount === 1 ? " role selected" : " roles selected")
         : "No target roles selected",
       action: rolesReady ? null : ROLES_ACTION,
-      timestamp: null,
+      timestamp: rolesReady ? (input.timestamps?.targetRoles ?? null) : null,
     },
     {
       id: "search_preferences",
@@ -465,7 +478,7 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
         ? "Location and work mode saved"
         : "Location and work mode not saved yet",
       action: preferencesReady ? null : PREFERENCES_ACTION,
-      timestamp: null,
+      timestamp: preferencesReady ? (input.timestamps?.searchPreferences ?? null) : null,
     },
     {
       id: "submission_consent",
@@ -473,7 +486,7 @@ export function evaluateReadiness(input: ReadinessInput): Readiness {
       complete: consentGranted,
       detail: consentGranted ? "Submission consent granted" : "Submission consent not granted",
       action: consentGranted ? null : CONSENT_ACTION,
-      timestamp: null,
+      timestamp: consentGranted ? (input.timestamps?.submissionConsent ?? null) : null,
     },
   ];
 
