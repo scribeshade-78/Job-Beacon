@@ -17,7 +17,7 @@ const token = async () => "token-123";
 const READY_UNAVAILABLE: QueueCapabilityState = {
   kind: "ready",
   canQueue: false,
-  explanation: "No available job source supports automatic applications yet.",
+  explanation: "Automatic submission unavailable — no available job source supports it yet.",
 };
 
 const READY_AVAILABLE: QueueCapabilityState = {
@@ -160,11 +160,11 @@ describe("describeLoadedCount", () => {
 });
 
 describe("describeAutomationCapabilityNotice", () => {
-  it("explains that nothing can run and that consent is kept", () => {
+  it("explains that automatic submission is unavailable and that consent is kept", () => {
     const notice = describeAutomationCapabilityNotice(READY_UNAVAILABLE);
 
-    expect(notice).toContain("can't run");
-    expect(notice).toContain("Your authorization is saved");
+    expect(notice).toContain("Automatic submission unavailable");
+    expect(notice).toContain("Your submission consent is saved");
   });
 
   it("shows nothing when an application can actually be queued", () => {

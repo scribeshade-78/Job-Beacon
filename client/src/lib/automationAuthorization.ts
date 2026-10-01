@@ -21,7 +21,7 @@ export const CONSENT_DISCLOSURE = [
   "No vacancy-by-vacancy approval will be required once discovery and application features are available.",
   "Any exclusions you set apply globally to what JobBeacon considers on your behalf.",
   "You can pause, resume or stop at any time.",
-  "This authorization and its timestamp are recorded for your security history.",
+  "This submission consent and its timestamp are recorded for your security history.",
 ] as const;
 
 const GENERIC_FAILURE_MESSAGE = "Could not update your automation status. Please try again.";

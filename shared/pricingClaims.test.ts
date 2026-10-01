@@ -77,10 +77,10 @@ describe("candidate-facing pricing makes no automatic-application claims", () =>
     expect(source).not.toContain("No automated applying");
   });
 
-  it("states once, for every tier, that automatic application is unavailable", () => {
+  it("states once, for every tier, that automatic submission is unavailable", () => {
     const source = readCode("client/src/panels/BillingPanel.tsx");
 
-    expect(source).toContain("Automatic application isn’t available yet.");
+    expect(source).toContain("Automatic submission unavailable.");
   });
 
   it("keeps the internal quota figures in the catalogue for the seed and parity test", () => {

@@ -530,7 +530,7 @@ export function BillingPanel() {
         role="note"
         className="rounded-control border border-ios-separator bg-ios-bg px-4 py-3 text-sm text-ios-text-secondary"
       >
-        <span className="font-medium text-black">Automatic application isn’t available yet.</span>{" "}
+        <span className="font-medium text-black">Automatic submission unavailable.</span>{" "}
         You can search, tailor and track applications on every plan, and open each job’s original
         posting to apply. We’ll state the allowance clearly here once automatic submission is live
         for a supported employer.

@@ -912,7 +912,7 @@ export function createApp(options: CreateAppOptions = {}) {
         canQueue: capability.canQueue,
         explanation: capability.canQueue
           ? "Automatic applications are available."
-          : "No available job source supports automatic applications yet.",
+          : "Automatic submission unavailable — no available job source supports it yet.",
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

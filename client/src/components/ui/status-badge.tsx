@@ -198,7 +198,7 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     Icon: PauseIcon,
   },
   /**
-   * LABELLED "Authorized", NOT "Active", AND STYLED NEUTRALLY.
+   * LABELLED "Consent granted", NOT "Active", AND STYLED NEUTRALLY.
    *
    * The row it renders is automation_authorizations.status — a record of CONSENT,
    * which the candidate granted, not evidence that anything is running. The old
@@ -208,7 +208,7 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
    * consent is not one of them.
    */
   automation_authorized: {
-    label: "Authorized",
+    label: "Consent granted",
     bg: "bg-ios-separator/50",
     fg: "text-ios-text-secondary",
     Icon: CheckIcon,

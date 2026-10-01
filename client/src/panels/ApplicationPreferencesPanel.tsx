@@ -34,7 +34,7 @@ const RESUME_OPTIMIZATION_DESCRIPTIONS: Record<ResumeOptimizationLevel, string> 
 };
 
 const CONSENT_NOTE =
-  "Auto-approve only executes if you have provided explicit Automation Consent on the Home page.";
+  "Auto-approve only executes if you have provided explicit Submission consent on the Home page.";
 
 interface ApplicationPreferencesPanelProps {
   candidateId: string;

@@ -26,9 +26,9 @@ export type QueueCapabilityState =
   | { kind: "error"; message: string };
 
 export const CAPABILITY_CHECK_FAILED =
-  "Application availability couldn't be checked. Retry";
+  "Automatic submission status couldn't be checked. Retry";
 
-const GENERIC_FAILURE = "Application availability couldn't be checked. Retry";
+const GENERIC_FAILURE = "Automatic submission status couldn't be checked. Retry";
 
 /**
  * Reads the capability. Requires a token; a missing one is reported as an error
@@ -93,7 +93,7 @@ export async function fetchQueueCapability(
           ? body.explanation
           : body.canQueue
             ? "Automatic applications are available."
-            : "No available job source supports automatic applications yet.",
+            : "Automatic submission unavailable — no available job source supports it yet.",
     };
   } catch {
     return { kind: "error", message: GENERIC_FAILURE };
@@ -198,7 +198,7 @@ export function describeAutomationCapabilityNotice(capability: QueueCapabilitySt
   }
 
   return (
-    "Automatic applications can't run at the moment: no available job source supports queueing. " +
-    "Your authorization is saved and will apply once one does."
+    "Automatic submission unavailable: no available job source supports queueing. " +
+    "Your submission consent is saved and will apply once one does."
   );
 }

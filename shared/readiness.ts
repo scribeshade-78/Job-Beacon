@@ -227,7 +227,7 @@ export function resumeStepDetail(resume: ReadinessResumeInput | null): string {
     case "parsing":
       return "Resume parsing in progress";
     case "parsed":
-      return "Resume parsed and ready";
+      return "Resume ready";
     case "failed":
       return "Resume parsing failed · Review or retry";
   }

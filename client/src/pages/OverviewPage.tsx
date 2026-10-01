@@ -7,7 +7,7 @@ const STATS = [
   "Applications submitted",
   "Awaiting response",
   "Interviews scheduled",
-  "Action required",
+  "Tasks",
 ];
 
 interface OverviewPageProps {

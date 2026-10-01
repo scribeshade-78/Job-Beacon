@@ -138,7 +138,7 @@ export function AutomationPanel({ candidateId }: AutomationPanelProps) {
               ))}
             </ul>
             <Button disabled={busy} onClick={() => void run((client) => authorize(client, candidateId))}>
-              Authorize
+              Grant submission consent
             </Button>
           </>
         )}
