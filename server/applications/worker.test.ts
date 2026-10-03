@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./submissionAdapter.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./submissionAdapter.js")>();
@@ -27,6 +27,10 @@ function chain(result: { data: unknown; error: unknown }) {
     eq: vi.fn(() => builder),
     update: vi.fn(() => builder),
     insert: vi.fn(async () => result),
+    // maybeSingle is what the pre-submission dismissal recheck uses for both
+    // application_plans and dismissed_vacancies. Returning the table's own
+    // result keeps an unconfigured table at its default (null = no row).
+    maybeSingle: vi.fn(async () => result),
   };
   return builder;
 }
@@ -35,11 +39,17 @@ function makeClient(overrides: {
   rpcResult?: { data: unknown; error: unknown };
   evidenceInsertResult?: { data: unknown; error: unknown };
   attemptUpdateResult?: { data: unknown; error: unknown };
+  /** application_plans row the dismissal recheck reads, or null for "no plan". */
+  planResult?: { data: unknown; error: unknown };
+  /** dismissed_vacancies row, or null when the candidate has not dismissed it. */
+  dismissalResult?: { data: unknown; error: unknown };
 } = {}) {
   const rpc = vi.fn(async () => overrides.rpcResult ?? { data: [claimedAttempt], error: null });
   const from = vi.fn((table: string) => {
     if (table === "application_evidence") return chain(overrides.evidenceInsertResult ?? { data: null, error: null });
     if (table === "application_attempts") return chain(overrides.attemptUpdateResult ?? { data: null, error: null });
+    if (table === "application_plans") return chain(overrides.planResult ?? { data: null, error: null });
+    if (table === "dismissed_vacancies") return chain(overrides.dismissalResult ?? { data: null, error: null });
     return chain({ data: null, error: null });
   });
   return { rpc, from } as unknown as Parameters<typeof runOneApplicationAttempt>[0];
@@ -235,5 +245,73 @@ describe("runOneApplicationAttempt", () => {
     expect(attemptsTable.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: "failed", last_error: "still no adapter" }),
     );
+  });
+
+  describe("pre-submission dismissal recheck", () => {
+    // The spy is module-level and shared with the tests above, so each case here
+    // starts from a clean call history.
+    beforeEach(() => {
+      vi.mocked(submitApplicationAttempt).mockClear();
+    });
+
+    it("cancels the attempt without submitting when the candidate dismissed the vacancy", async () => {
+      const result = await runOneApplicationAttempt(
+        makeClient({
+          planResult: { data: { candidate_id: "candidate-1", vacancy_id: "vacancy-1" }, error: null },
+          dismissalResult: { data: { vacancy_id: "vacancy-1" }, error: null },
+        }),
+      );
+
+      expect(result).toEqual({
+        processed: true,
+        applicationAttemptId: "attempt-1",
+        outcome: "cancelled",
+      });
+      // Nothing left the building: the adapter is never reached.
+      expect(submitApplicationAttempt).not.toHaveBeenCalled();
+    });
+
+    it("marks a dismissed attempt cancelled, never failed", async () => {
+      const client = makeClient({
+        planResult: { data: { candidate_id: "candidate-1", vacancy_id: "vacancy-1" }, error: null },
+        dismissalResult: { data: { vacancy_id: "vacancy-1" }, error: null },
+      });
+
+      await runOneApplicationAttempt(client);
+
+      const attemptsTable = (client.from as ReturnType<typeof vi.fn>).mock.results.find(
+        (_r, i) => (client.from as ReturnType<typeof vi.fn>).mock.calls[i][0] === "application_attempts",
+      )!.value;
+      expect(attemptsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled" }));
+      expect(attemptsTable.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+    });
+
+    it("submits normally when the plan's vacancy is not dismissed", async () => {
+      vi.mocked(submitApplicationAttempt).mockResolvedValueOnce({
+        evidenceType: "submission_confirmation",
+        payload: { confirmationId: "x" },
+      });
+
+      const result = await runOneApplicationAttempt(
+        makeClient({
+          planResult: { data: { candidate_id: "candidate-1", vacancy_id: "vacancy-1" }, error: null },
+          // No dismissed_vacancies row: the default null.
+        }),
+      );
+
+      expect(result.outcome).toBe("succeeded");
+      expect(submitApplicationAttempt).toHaveBeenCalled();
+    });
+
+    it("throws rather than calling a query error 'not dismissed'", async () => {
+      await expect(
+        runOneApplicationAttempt(
+          makeClient({
+            planResult: { data: { candidate_id: "candidate-1", vacancy_id: "vacancy-1" }, error: null },
+            dismissalResult: { data: null, error: { message: "dismissed_vacancies unavailable" } },
+          }),
+        ),
+      ).rejects.toBeTruthy();
+    });
   });
 });

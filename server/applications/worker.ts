@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AtsSubmissionError } from "./adapters/errors.js";
 import { createActionRequiredEvent } from "./actionRequired.js";
+import { isVacancyDismissed } from "./dismissalGate.js";
 import {
   ActionRequiredSubmissionError,
   AuthorizationWithdrawnError,
@@ -52,6 +53,38 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
 
   if (!attempt) {
     return { processed: false };
+  }
+
+  // DISMISSAL RECHECK, IMMEDIATELY BEFORE SUBMISSION. The queue-time gate ran
+  // when the plan was created; this is the second check, at the last moment
+  // before anything leaves the building, because a candidate can dismiss a job
+  // while an attempt is already leased. Cancelled rather than failed: nothing
+  // was attempted at the portal, so there is no submission to retry and the row
+  // (and its history) is left intact.
+  //
+  // candidate_id/vacancy_id live on the PLAN, not on the attempt, so this is a
+  // second read rather than an attempt column. A missing plan row leaves the
+  // recheck unperformed; the queue-time gate remains the primary enforcement and
+  // such an attempt could not submit anyway.
+  const { data: plan, error: planError } = await client
+    .from("application_plans")
+    .select("candidate_id, vacancy_id")
+    .eq("id", attempt.application_plan_id)
+    .maybeSingle();
+
+  if (planError) {
+    throw planError;
+  }
+
+  const planRow = plan as { candidate_id: string; vacancy_id: string } | null;
+
+  if (planRow !== null && (await isVacancyDismissed(client, planRow.candidate_id, planRow.vacancy_id))) {
+    await client
+      .from("application_attempts")
+      .update({ status: "cancelled", updated_at: new Date().toISOString() })
+      .eq("id", attempt.id);
+
+    return { processed: true, applicationAttemptId: attempt.id, outcome: "cancelled" };
   }
 
   try {

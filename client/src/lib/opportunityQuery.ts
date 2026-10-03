@@ -200,7 +200,7 @@ export interface FilterableQuery {
  * contain a comma, which is the list separator — an unquoted "Acme, Inc" would
  * silently become two list entries and match neither.
  */
-function inList(values: readonly string[]): string {
+export function inList(values: readonly string[]): string {
   return "(" + values.map((value) => '"' + value.replace(/"/g, '\\"') + '"').join(",") + ")";
 }
 

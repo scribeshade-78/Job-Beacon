@@ -163,6 +163,7 @@ import {
   applyOpportunityFilters,
   applyOpportunitySort,
   applySearchPreferenceConstraints,
+  inList,
   type FilterableQuery,
   type OpportunityFilters,
 } from "./opportunityQuery";
@@ -190,6 +191,13 @@ export interface ListOpportunitiesOptions {
    * value and happens in the panel, while these apply to every request.
    */
   searchPreferences?: SearchPreferences | null;
+  /**
+   * Vacancies the candidate has dismissed (jobDecisions.ts). Dismissal beats a
+   * save, so this list is dismissed ids only, and it is applied as a query
+   * clause rather than a post-fetch filter: filtering after range() would make a
+   * page silently return fewer rows than OPPORTUNITIES_PAGE_SIZE.
+   */
+  excludeVacancyIds?: readonly string[];
   /** Task I — which of the 6 sorts to apply. An unavailable sort falls back to best match. */
   sort?: SortId;
 }
@@ -359,7 +367,13 @@ export async function listOpportunities(
       options.searchPreferences ?? null,
     );
 
-    const { query: sorted, applied: appliedSort } = applyOpportunitySort(excluded, options.sort);
+    const excludeIds = options.excludeVacancyIds ?? [];
+    const withoutDismissed =
+      excludeIds.length === 0
+        ? excluded
+        : (excluded.not("id", "in", inList(excludeIds)) as FilterableQuery);
+
+    const { query: sorted, applied: appliedSort } = applyOpportunitySort(withoutDismissed, options.sort);
 
     // The structural FilterableQuery type describes only what this module needs;
     // range() is not part of it because nothing in the filter or sort logic

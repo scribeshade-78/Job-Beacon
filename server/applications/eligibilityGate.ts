@@ -6,6 +6,7 @@ import {
 } from "../../shared/searchPreferences.js";
 import { isTitleRelevantToRole } from "../../shared/roleTaxonomy.js";
 import { loadSearchPreferencesForCandidate } from "./searchPreferences.js";
+import { evaluateDismissal } from "./dismissalGate.js";
 import { loadAutomationEntitlement } from "../billing/automationEntitlement.js";
 
 export type GateStatus = "pass" | "fail";
@@ -62,6 +63,12 @@ export interface EligibilityGates {
   verified_facts: GateResult;
   application_support: GateResult;
   rate_and_abuse_controls: GateResult;
+  /**
+   * The candidate's own per-vacancy dismissal (dismissed_vacancies). Dismissal
+   * beats a save row, so this is checked as its own gate rather than folded
+   * into candidate_exclusions — those are global categories, not a listing.
+   */
+  dismissed: GateResult;
   /**
    * SearchPreferences gates (Phase 1 Task 6). OPTIONAL because application_plans
    * rows written before this shipped have no such keys; the gate always writes
@@ -150,6 +157,7 @@ export async function evaluateEligibilityGates(
     companyResult,
     companyProfileResult,
     automationEntitlement,
+    dismissalGate,
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
@@ -173,6 +181,7 @@ export async function evaluateEligibilityGates(
     // The plan entitlement is loaded from the candidate's own rows, never from
     // the request.
     loadAutomationEntitlement(client, candidateId),
+    evaluateDismissal(client, candidateId, vacancyId),
   ]);
 
   if (companyResult.error) {
@@ -207,6 +216,7 @@ export async function evaluateEligibilityGates(
     verified_facts: verifiedFactsGate,
     application_support: evaluateApplicationSupport(vacancy, candidateId),
     rate_and_abuse_controls: rateAndAbuseControlsGate,
+    dismissed: dismissalGate,
     excluded_company: preferenceLedger.gates.excluded_company,
     excluded_industry: preferenceLedger.gates.excluded_industry,
     work_mode: preferenceLedger.gates.work_mode,

@@ -41,6 +41,12 @@ import {
   type OpportunityFilters,
 } from "../lib/opportunityQuery";
 import { loadCandidatePreferences, type CandidatePreferences } from "../lib/candidatePreferences";
+import {
+  EMPTY_DECISIONS,
+  excludedFromFeed,
+  listVacancyDecisions,
+  type VacancyDecisions,
+} from "../lib/jobDecisions";
 import { loadSearchPreferences } from "../lib/searchPreferences";
 import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 import type { SearchPreferences } from "../../../shared/searchPreferences";
@@ -143,6 +149,15 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    */
   const [searchPreferences, setSearchPreferences] = useState<SearchPreferences | null>(null);
 
+  /**
+   * The candidate's own Save/Dismiss rows, loaded once and fed to every list
+   * query as an exclusion clause. A failed read leaves EMPTY_DECISIONS: the feed
+   * behaves exactly as it did before the feature rather than going blank, and the
+   * queue-time gate (server/applications/dismissalGate.ts) is what actually
+   * refuses a dismissed vacancy.
+   */
+  const [decisions, setDecisions] = useState<VacancyDecisions>(EMPTY_DECISIONS);
+
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
   const [querying, setQuerying] = useState(false);
@@ -231,6 +246,21 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     };
   }, [candidateId]);
 
+  // Loaded once: these are the candidate's own rows and no other surface writes
+  // them while the feed is open.
+  useEffect(() => {
+    let cancelled = false;
+
+    listVacancyDecisions(getSupabaseBrowserClient()).then((result) => {
+      if (cancelled || result.kind !== "success") return;
+      setDecisions(result.decisions);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /**
    * The ONE place the list is read, and the reason filters and sort are
    * dependencies rather than state the callers have to remember to re-apply.
@@ -252,7 +282,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     let cancelled = false;
     setQuerying(true);
 
-    listOpportunities(getSupabaseBrowserClient(), { filters, searchPreferences, sort }).then((result) => {
+    listOpportunities(getSupabaseBrowserClient(), {
+      filters,
+      searchPreferences,
+      sort,
+      // Dismissal wins over a save (jobDecisions.ts), so this is dismissed ids
+      // only. Applied as a query clause so paging still counts real rows.
+      excludeVacancyIds: excludedFromFeed(decisions),
+    }).then((result) => {
       if (cancelled) return;
 
       setQuerying(false);
@@ -270,7 +307,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [filters, searchPreferences, sort]);
+  }, [filters, searchPreferences, sort, decisions]);
 
   // Phase 2.3c: paging is offset-based off the current row count. The view
   // orders by the stored priority_score, so an urgency refresh can shuffle a
@@ -286,6 +323,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       filters: filters ?? EMPTY_FILTERS,
       searchPreferences,
       sort,
+      excludeVacancyIds: excludedFromFeed(decisions),
     });
     setLoadingMore(false);
 
@@ -340,7 +378,12 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         // The SAME filters, exclusions and sort the list is currently showing.
         // Re-reading page 1 unfiltered here would silently replace a filtered list
         // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
-        listOpportunities(client, { filters: filters ?? EMPTY_FILTERS, searchPreferences, sort }),
+        listOpportunities(client, {
+          filters: filters ?? EMPTY_FILTERS,
+          searchPreferences,
+          sort,
+          excludeVacancyIds: excludedFromFeed(decisions),
+        }),
         listOpportunitiesByIds(client, unscoredIds),
       ]);
 
@@ -356,7 +399,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             )
           : discovered.opportunities;
 
-        setNewlyDiscovered(narrowToWorkMode(eligibleDiscovered));
+        // The by-id read bypasses the paged query's clauses, so the dismissal
+        // rule is applied here too — otherwise a re-discovered job the candidate
+        // already rejected would surface at the top of the list.
+        const withoutDismissed = eligibleDiscovered.filter(
+          (opportunity) => !decisions.dismissed.has(opportunity.id),
+        );
+
+        setNewlyDiscovered(narrowToWorkMode(withoutDismissed));
       }
 
       const text = describeDiscoveryResult(outcome.result);

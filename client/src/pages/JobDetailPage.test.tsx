@@ -97,6 +97,9 @@ const fixtures = vi.hoisted(() => {
       },
     } as Record<string, unknown>,
     insertedReports: [] as Array<Record<string, unknown>>,
+    insertedSaves: [] as Array<Record<string, unknown>>,
+    insertedDismissals: [] as Array<Record<string, unknown>>,
+    deletedFrom: [] as string[],
   };
 });
 
@@ -138,16 +141,37 @@ vi.mock("../lib/supabaseClient", () => ({
           fixtures.insertedReports.push(row);
           return { error: null };
         }
+        if (table === "saved_vacancies") {
+          fixtures.insertedSaves.push(row);
+          return { error: null };
+        }
+        if (table === "dismissed_vacancies") {
+          fixtures.insertedDismissals.push(row);
+          return { error: null };
+        }
         return { error: { message: "unexpected insert" } };
       };
-      builder.then = (resolve: (value: unknown) => unknown) =>
-        Promise.resolve({
-          data:
-            table === "candidate_opportunities"
-              ? fixtures.jobs.filter((entry) => ids.includes(entry.id))
-              : [],
-          error: null,
-        }).then(resolve);
+      builder.delete = () => {
+        fixtures.deletedFrom.push(table);
+        return builder;
+      };
+      builder.then = (resolve: (value: unknown) => unknown) => {
+        // Saved/dismissed reads return what was inserted in this test, so the
+        // page's re-read after a write reflects the decision like the real table.
+        const data =
+          table === "candidate_opportunities"
+            ? fixtures.jobs.filter((entry) => ids.includes(entry.id))
+            : table === "saved_vacancies"
+              ? fixtures.insertedSaves
+              : table === "dismissed_vacancies"
+                ? fixtures.insertedDismissals.map((row) => ({
+                    ...row,
+                    dismissed_at: "2026-10-01T00:00:00Z",
+                  }))
+                : [];
+
+        return Promise.resolve({ data, error: null }).then(resolve);
+      };
 
       return builder;
     },
@@ -295,6 +319,47 @@ describe("#/jobs/:jobId", () => {
         description: "Still open.",
       },
     ]);
+  });
+
+  it("saves the job, reports it, and can unsave it", async () => {
+    renderAt("/jobs/job-1");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved.")).toBeTruthy();
+    expect(fixtures.insertedSaves).toEqual([{ candidate_id: "candidate-1", vacancy_id: "job-1" }]);
+
+    // The button now reflects the saved state and unsaving goes through delete.
+    fireEvent.click(screen.getByRole("button", { name: "Saved ✓" }));
+
+    expect(await screen.findByText("Removed from your saved jobs.")).toBeTruthy();
+    expect(fixtures.deletedFrom).toContain("saved_vacancies");
+  });
+
+  it("dismisses the job with a reason and can undo it", async () => {
+    renderAt("/jobs/job-1");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss this job" }));
+    fireEvent.change(screen.getByLabelText("Why are you dismissing this job?"), {
+      target: { value: "wrong_location" },
+    });
+    fireEvent.change(screen.getByLabelText(/Anything else\?/), { target: { value: "Too far." } });
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(await screen.findByText(/It will not appear in your feed/)).toBeTruthy();
+    expect(fixtures.insertedDismissals).toEqual([
+      {
+        candidate_id: "candidate-1",
+        vacancy_id: "job-1",
+        reason: "wrong_location",
+        note: "Too far.",
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo dismissal" }));
+
+    expect(await screen.findByText("Dismissal undone.")).toBeTruthy();
+    expect(fixtures.deletedFrom).toContain("dismissed_vacancies");
   });
 
   it("reports a missing listing instead of rendering an empty page", async () => {

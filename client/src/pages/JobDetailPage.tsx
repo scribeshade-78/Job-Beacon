@@ -29,6 +29,22 @@ import {
   submitVacancyReport,
   type ReportCategory,
 } from "../lib/vacancyReports";
+import {
+  DISMISS_REASONS,
+  DISMISS_REASON_LABELS,
+  EMPTY_DECISIONS,
+  decisionStateOf,
+  dismissVacancy,
+  isDismissReason,
+  listVacancyDecisions,
+  saveVacancy,
+  undoDismissal,
+  unsaveVacancy,
+  type DismissReason,
+  type VacancyDecisions,
+} from "../lib/jobDecisions";
+
+const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
 
 interface JobDetailPageProps {
   jobId: string;
@@ -153,6 +169,15 @@ export function JobDetailPage({ jobId, candidateId }: JobDetailPageProps) {
     { kind: "idle" } | { kind: "sending" } | { kind: "sent" } | { kind: "error"; message: string }
   >({ kind: "idle" });
 
+  // Save / Dismiss. A failed load leaves EMPTY_DECISIONS, so the page shows the
+  // untouched actions rather than inventing a decision the candidate never made.
+  const [decisions, setDecisions] = useState<VacancyDecisions>(EMPTY_DECISIONS);
+  const [decisionMessage, setDecisionMessage] = useState<string | null>(null);
+  const [decisionPending, setDecisionPending] = useState(false);
+  const [dismissOpen, setDismissOpen] = useState(false);
+  const [dismissReason, setDismissReason] = useState<DismissReason>("not_interested");
+  const [dismissNote, setDismissNote] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     setState({ kind: "loading" });
@@ -167,6 +192,20 @@ export function JobDetailPage({ jobId, candidateId }: JobDetailPageProps) {
       cancelled = true;
     };
   }, [jobId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    listVacancyDecisions(getSupabaseBrowserClient()).then((result) => {
+      if (!cancelled && result.kind === "success") {
+        setDecisions(result.decisions);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (state.kind === "loading") {
     return (
@@ -261,6 +300,84 @@ export function JobDetailPage({ jobId, candidateId }: JobDetailPageProps) {
     setReportDescription("");
   }
 
+  // Dismissal beats save (jobDecisions.ts), so both flags can be true at once and
+  // the dismissal is what the copy and the exclusions honour.
+  const decisionState = decisionStateOf(decisions, job.id);
+  const alreadySaved = decisionState === "saved" || decisionState === "saved_and_dismissed";
+  const alreadyDismissed = decisionState === "dismissed" || decisionState === "saved_and_dismissed";
+  const dismissal = decisions.dismissed.get(job.id);
+
+  async function refreshDecisions() {
+    const result = await listVacancyDecisions(getSupabaseBrowserClient());
+
+    if (result.kind === "success") {
+      setDecisions(result.decisions);
+    }
+  }
+
+  async function handleToggleSave() {
+    if (candidateId === undefined) {
+      setDecisionMessage(SESSION_EXPIRED_MESSAGE);
+      return;
+    }
+
+    setDecisionPending(true);
+    const client = getSupabaseBrowserClient();
+    const result = alreadySaved
+      ? await unsaveVacancy(client, job.id)
+      : await saveVacancy(client, candidateId, job.id);
+    setDecisionPending(false);
+
+    if (result.kind === "error") {
+      setDecisionMessage(result.message);
+      return;
+    }
+
+    await refreshDecisions();
+    setDecisionMessage(alreadySaved ? "Removed from your saved jobs." : "Saved.");
+  }
+
+  async function handleDismiss() {
+    if (candidateId === undefined) {
+      setDecisionMessage(SESSION_EXPIRED_MESSAGE);
+      return;
+    }
+
+    setDecisionPending(true);
+    const result = await dismissVacancy(
+      getSupabaseBrowserClient(),
+      candidateId,
+      job.id,
+      dismissReason,
+      dismissNote,
+    );
+    setDecisionPending(false);
+
+    if (result.kind === "error") {
+      setDecisionMessage(result.message);
+      return;
+    }
+
+    setDismissOpen(false);
+    setDismissNote("");
+    await refreshDecisions();
+    setDecisionMessage("Dismissed. It will not appear in your feed or in automatic applications.");
+  }
+
+  async function handleUndoDismiss() {
+    setDecisionPending(true);
+    const result = await undoDismissal(getSupabaseBrowserClient(), job.id);
+    setDecisionPending(false);
+
+    if (result.kind === "error") {
+      setDecisionMessage(result.message);
+      return;
+    }
+
+    await refreshDecisions();
+    setDecisionMessage("Dismissal undone.");
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -324,6 +441,96 @@ export function JobDetailPage({ jobId, candidateId }: JobDetailPageProps) {
             primary path, and leaving the site is a decision the candidate makes
             after reading. */}
         <section aria-label="Actions" className="space-y-3 border-t border-ios-separator pt-4">
+          {/* Save and Dismiss are the candidate's own decisions, so they sit
+              first and are reversible. Dismissal is the stronger of the two and
+              says so in place: it removes the job from the feed and from
+              automatic selection, not just from this page. */}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="secondary" onClick={() => void handleToggleSave()} disabled={decisionPending}>
+              {alreadySaved ? "Saved ✓" : "Save"}
+            </Button>
+
+            {alreadyDismissed ? (
+              <Button variant="secondary" onClick={() => void handleUndoDismiss()} disabled={decisionPending}>
+                Undo dismissal
+              </Button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setDismissOpen((open) => !open)}
+                aria-expanded={dismissOpen}
+                className="text-sm text-ios-blue hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
+              >
+                Dismiss this job
+              </button>
+            )}
+          </div>
+
+          {alreadyDismissed && (
+            <p role="status" className="text-sm text-ios-text-secondary">
+              You dismissed this job
+              {dismissal === undefined ? "" : " (" + DISMISS_REASON_LABELS[dismissal.reason] + ")"}
+              . It is excluded from your feed and from automatic applications until you undo it.
+            </p>
+          )}
+
+          {dismissOpen && !alreadyDismissed && (
+            <form
+              aria-label="Dismiss this job"
+              className="space-y-3 rounded-control border border-ios-separator p-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleDismiss();
+              }}
+            >
+              <div>
+                <label className="block text-sm font-medium text-black" htmlFor="dismiss-reason">
+                  Why are you dismissing this job?
+                </label>
+                <select
+                  id="dismiss-reason"
+                  value={dismissReason}
+                  onChange={(event) => {
+                    const value: unknown = event.target.value;
+                    if (isDismissReason(value)) {
+                      setDismissReason(value);
+                    }
+                  }}
+                  className="mt-1 w-full rounded-control border border-ios-separator bg-white px-2 py-1.5 text-sm"
+                >
+                  {DISMISS_REASONS.map((reason) => (
+                    <option key={reason} value={reason}>
+                      {DISMISS_REASON_LABELS[reason]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-black" htmlFor="dismiss-note">
+                  Anything else? (optional)
+                </label>
+                <textarea
+                  id="dismiss-note"
+                  value={dismissNote}
+                  onChange={(event) => setDismissNote(event.target.value)}
+                  rows={2}
+                  className="mt-1 w-full rounded-control border border-ios-separator bg-white px-2 py-1.5 text-sm"
+                />
+              </div>
+
+              <Button type="submit" variant="secondary" disabled={decisionPending}>
+                Dismiss
+              </Button>
+            </form>
+          )}
+
+          {decisionMessage !== null && (
+            <p role="status" className="text-sm text-ios-text-secondary">
+              {decisionMessage}
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center gap-3">
             <Button variant="secondary" onClick={() => void handleQueue()} disabled={queuePending}>
               {queuePending ? "Adding…" : "Add to review queue"}

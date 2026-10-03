@@ -81,6 +81,9 @@ const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   subscriptions: { data: null, error: null },
   subscription_plans: { data: null, error: null },
   plan_limits: { data: null, error: null },
+  // The dismissal gate. Null means "this candidate has not dismissed this
+  // vacancy", which is the state every pre-existing test was written against.
+  dismissed_vacancies: { data: null, error: null },
 };
 
 function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
@@ -1023,5 +1026,28 @@ describe("plan entitlement gate", () => {
 
     expect(result.eligible).toBe(false);
     expect(result.gates.plan_entitlement?.reasonCode).toBe("plan_not_eligible");
+  });
+});
+
+describe("dismissal gate", () => {
+  it("passes when this candidate has not dismissed the vacancy", async () => {
+    const result = await evaluateEligibilityGates(makeClient(), baseInput);
+
+    expect(result.gates.dismissed).toEqual({ status: "pass" });
+  });
+
+  it("fails, and makes the whole outcome ineligible, when the candidate dismissed it", async () => {
+    const result = await evaluateEligibilityGates(
+      makeClient({ dismissed_vacancies: { data: { vacancy_id: "vacancy-1" }, error: null } }),
+      baseInput,
+    );
+
+    expect(result.gates.dismissed).toEqual({
+      status: "fail",
+      reasonCode: "VACANCY_DISMISSED",
+      detail: { vacancyId: "vacancy-1" },
+    });
+    // Dismissal is a hard stop, not a score penalty: no plan may be created.
+    expect(result.eligible).toBe(false);
   });
 });
