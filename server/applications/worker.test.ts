@@ -33,6 +33,7 @@ const claimedAttempt = {
   application_plan_id: "plan-1",
   attempts: 1,
   max_attempts: 5,
+  lease_token: "token-a",
 };
 
 interface TableResult {
@@ -42,8 +43,8 @@ interface TableResult {
 
 interface ClientConfig {
   rpcResult?: TableResult;
-  /** The conditional leased -> submitting transition. */
-  boundaryResult?: TableResult;
+  /** The begin_application_submission() RPC result: true means the boundary was crossed. */
+  boundaryRpcResult?: TableResult;
   /** Any other application_attempts update (status write, last_error write). */
   attemptUpdateResult?: TableResult;
   evidenceInsertResult?: TableResult;
@@ -82,11 +83,11 @@ function makeClient(config: ClientConfig = {}) {
           return builder;
         },
         then: (resolve: (value: unknown) => unknown) => {
-          const isBoundary = pending?.status === "submitting";
-          const result = isBoundary
-            ? (config.boundaryResult ?? { data: [{ id: claimedAttempt.id }], error: null })
-            : (config.attemptUpdateResult ?? { data: null, error: null });
-          return Promise.resolve(result).then(resolve);
+          // The boundary is an RPC now, so every application_attempts write that
+          // reaches this builder is an outcome write (status and/or last_error).
+          return Promise.resolve(config.attemptUpdateResult ?? { data: null, error: null }).then(
+            resolve,
+          );
         },
       };
 
@@ -121,7 +122,12 @@ function makeClient(config: ClientConfig = {}) {
     return builder;
   });
 
-  const rpc = vi.fn(async () => config.rpcResult ?? { data: [claimedAttempt], error: null });
+  const rpc = vi.fn(async (name: string) => {
+    if (name === "begin_application_submission") {
+      return config.boundaryRpcResult ?? { data: true, error: null };
+    }
+    return config.rpcResult ?? { data: [claimedAttempt], error: null };
+  });
 
   return {
     client: { rpc, from } as unknown as Parameters<typeof runOneApplicationAttempt>[0],
@@ -129,6 +135,7 @@ function makeClient(config: ClientConfig = {}) {
     attemptUpdates,
     attemptFilters,
     from,
+    rpc,
   };
 }
 
@@ -155,36 +162,39 @@ describe("runOneApplicationAttempt", () => {
     expect(submitApplicationAttempt).not.toHaveBeenCalled();
   });
 
-  describe("the submission boundary", () => {
-    it("validates lease ownership and expiry in the transition itself", async () => {
-      const { client, attemptFilters } = makeClient();
+  describe("the submission boundary (fenced)", () => {
+    it("presents this worker's lease token, not merely a valid-looking lease", async () => {
+      const { client, rpc } = makeClient();
 
       await runOneApplicationAttempt(client);
 
-      expect(attemptFilters[0]).toEqual([
-        ["id", claimedAttempt.id],
-        ["status", "leased"],
-        ["leased_until", expect.any(String)],
-      ]);
+      expect(rpc).toHaveBeenCalledWith("begin_application_submission", {
+        p_attempt_id: claimedAttempt.id,
+        p_lease_token: "token-a",
+      });
     });
 
-    it("does not call the adapter when the boundary write fails", async () => {
+    it("does not call the adapter when the boundary RPC errors", async () => {
       const { client } = makeClient({
-        boundaryResult: { data: null, error: { message: "attempts unavailable" } },
+        boundaryRpcResult: { data: null, error: { message: "function does not exist" } },
       });
 
       await expect(runOneApplicationAttempt(client)).rejects.toBeTruthy();
-      // The whole point: persistence failure BEFORE the call means nothing left
-      // the building, so there is no uncertain outcome to reconcile.
       expect(submitApplicationAttempt).not.toHaveBeenCalled();
     });
 
-    it("does not call the adapter when the lease is stale or already lost", async () => {
-      const { client } = makeClient({ boundaryResult: { data: [], error: null } });
+    it("STALE WORKER: its lease expired and was re-leased, so it crosses nothing", async () => {
+      // Worker B now holds a valid lease on the same row with a different token.
+      // Worker A still holds the claim it read earlier (token-a), so the database
+      // refuses A's transition and A must not reach the adapter.
+      const { client, rpc } = makeClient({ boundaryRpcResult: { data: false, error: null } });
 
       const result = await runOneApplicationAttempt(client);
 
-      // Zero affected rows: an expired lease, or another worker reclaimed it.
+      expect(rpc).toHaveBeenCalledWith("begin_application_submission", {
+        p_attempt_id: claimedAttempt.id,
+        p_lease_token: "token-a",
+      });
       expect(result).toEqual({
         processed: true,
         applicationAttemptId: claimedAttempt.id,
@@ -193,13 +203,37 @@ describe("runOneApplicationAttempt", () => {
       expect(submitApplicationAttempt).not.toHaveBeenCalled();
     });
 
-    it("crosses to 'submitting' before the adapter is reached", async () => {
-      const { client, log } = makeClient();
+    it("COMPETING WORKERS: only the worker whose transition succeeds reaches the adapter", async () => {
+      vi.mocked(submitApplicationAttempt).mockResolvedValueOnce({
+        evidenceType: "submission_confirmation",
+        payload: { confirmationId: "winner" },
+      });
 
-      await runOneApplicationAttempt(client);
+      const winner = makeClient({ boundaryRpcResult: { data: true, error: null } });
+      const loser = makeClient({ boundaryRpcResult: { data: false, error: null } });
 
-      expect(log[0]).toBe("attempt:submitting");
-      expect(attemptStatuses([{ status: "submitting" }])).toBeTruthy();
+      const winnerResult = await runOneApplicationAttempt(winner.client);
+      const loserResult = await runOneApplicationAttempt(loser.client);
+
+      expect(winnerResult.outcome).toBe("succeeded");
+      expect(submitApplicationAttempt).toHaveBeenCalledTimes(1);
+      expect(loserResult).toEqual({
+        processed: true,
+        applicationAttemptId: claimedAttempt.id,
+        outcome: "cancelled",
+      });
+    });
+
+    it("refuses to cross when the claim carried no lease token (un-migrated schema)", async () => {
+      const { client } = makeClient({
+        rpcResult: { data: [{ ...claimedAttempt, lease_token: null }], error: null },
+        boundaryRpcResult: { data: false, error: null },
+      });
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result.outcome).toBe("cancelled");
+      expect(submitApplicationAttempt).not.toHaveBeenCalled();
     });
   });
 
@@ -221,8 +255,10 @@ describe("runOneApplicationAttempt", () => {
       });
       // evidence strictly before the succeeded status: the receipt is what makes
       // the claim true, so it cannot be written afterwards.
-      expect(log).toEqual(["attempt:submitting", "evidence", "attempt:succeeded"]);
-      expect(attemptStatuses(attemptUpdates)).toEqual(["submitting", "succeeded"]);
+      // The boundary is now an RPC, so the only table writes visible here are
+      // the receipt and the final status — in that order.
+      expect(log).toEqual(["evidence", "attempt:succeeded"]);
+      expect(attemptStatuses(attemptUpdates)).toEqual(["succeeded"]);
     });
 
     it("does not claim success when the receipt could not be stored", async () => {
@@ -238,9 +274,10 @@ describe("runOneApplicationAttempt", () => {
       const result = await runOneApplicationAttempt(client);
 
       expect(result.outcome).toBe("needs_verification");
-      // The attempt stays 'submitting', which the claim predicate cannot
-      // reclaim — so there is no automatic resubmission.
-      expect(attemptStatuses(attemptUpdates)).toEqual(["submitting"]);
+      // No status is written at all, so the row keeps the boundary's
+      // 'submitting' — which the claim predicate cannot reclaim. There is
+      // therefore no automatic resubmission.
+      expect(attemptStatuses(attemptUpdates)).toEqual([]);
     });
 
     it("reports verification rather than success when the status write fails", async () => {
@@ -273,7 +310,7 @@ describe("runOneApplicationAttempt", () => {
       // The row is never set back to 'leased' or 'pending', so no ordinary
       // claim can pick it up again. The only status it ever holds is the
       // boundary's 'submitting', which the claim predicate excludes.
-      expect(attemptStatuses(attemptUpdates)).toEqual(["submitting", undefined]);
+      expect(attemptStatuses(attemptUpdates)).toEqual([undefined]);
       expect(attemptUpdates.some((u) => u.status === "leased" || u.status === "pending")).toBe(false);
     });
 

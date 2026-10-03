@@ -20,6 +20,13 @@ interface ClaimedAttempt {
   application_plan_id: string;
   attempts: number;
   max_attempts: number;
+  /**
+   * The fencing token minted by claim_application_attempt() for THIS worker.
+   * Null against a database that has not run
+   * 20261001160000_application_submission_fencing.sql; the boundary then
+   * refuses to cross, which is the safe direction.
+   */
+  lease_token: string | null;
 }
 
 /**
@@ -102,24 +109,30 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
   // racing a reclaim, matches zero rows and MUST NOT call the adapter. The
   // PostgREST error is checked too — an awaited builder resolves with { error }
   // rather than throwing, so an unchecked write would look like success.
-  const boundaryAt = new Date().toISOString();
-  const boundary = await client
-    .from("application_attempts")
-    .update({ status: "submitting", submission_started_at: boundaryAt, updated_at: boundaryAt })
-    .eq("id", attempt.id)
-    .eq("status", "leased")
-    .gt("leased_until", boundaryAt)
-    .select("id");
+  // FENCING + DATABASE-TIME EXPIRY, IN ONE ATOMIC STATEMENT.
+  //
+  // "status = 'leased' and leased_until in the future" is not proof that THIS
+  // worker holds the lease: a worker whose lease expired and whose row was then
+  // re-leased satisfies both. begin_application_submission additionally requires
+  // the lease_token minted for this worker, and evaluates leased_until against
+  // now() INSIDE the database, so the worker's own clock cannot be the thing
+  // that grants it permission.
+  const boundary = await client.rpc("begin_application_submission", {
+    p_attempt_id: attempt.id,
+    p_lease_token: attempt.lease_token,
+  });
 
   if (boundary.error) {
+    // Includes the schema-not-migrated case, where the function does not exist.
+    // Fatal on purpose: a boundary that cannot be established means the adapter
+    // must not be called, and failing loudly beats submitting unprotected.
     throw boundary.error;
   }
 
-  const crossed = Array.isArray(boundary.data) && boundary.data.length === 1;
-
-  if (!crossed) {
-    // Lost the lease to another worker, or never legitimately held it. Nothing
-    // has been sent anywhere, so this is not an uncertain outcome.
+  if (boundary.data !== true) {
+    // Lost the lease to another worker, never legitimately held it, or the
+    // lease expired. Nothing has been sent anywhere, so this is not an
+    // uncertain outcome.
     return { processed: true, applicationAttemptId: attempt.id, outcome: "cancelled" };
   }
 
