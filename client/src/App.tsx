@@ -126,7 +126,7 @@ export function SignedInRoutes({
             straight to the render prop, so the page receives jobId as a prop
             instead of re-parsing the hash. */}
         <Route path="/jobs/:jobId">
-          {(params) => <JobDetailPage jobId={params.jobId} />}
+          {(params) => <JobDetailPage jobId={params.jobId} candidateId={candidateId} />}
         </Route>
         <Route path="/applications">
           <ApplicationsPage ready={ready} />

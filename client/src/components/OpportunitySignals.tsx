@@ -35,7 +35,18 @@ function priorityBadge(fit: OpportunityFitAnalysis): { label: string; className:
   return { label: `Priority ${score}`, className: "bg-ios-separator text-ios-text-secondary" };
 }
 
-export function FitSection({ fit }: { fit: OpportunityFitAnalysis | null }) {
+export function FitSection({
+  fit,
+  variant = "card",
+}: {
+  fit: OpportunityFitAnalysis | null;
+  /**
+   * "card" is the compact list rendering; "detail" labels the two advisory
+   * lists (why it matches / potential gaps) so the job detail page can show
+   * them as named sections without a second copy of this copy.
+   */
+  variant?: "card" | "detail";
+}) {
   if (fit === null) {
     return <p className="mt-2 text-xs text-ios-text-secondary italic">Fit analysis pending</p>;
   }
@@ -71,7 +82,15 @@ export function FitSection({ fit }: { fit: OpportunityFitAnalysis | null }) {
 
       {shownSkills.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-ios-text-secondary">Missing:</span>
+          <span
+            className={
+              variant === "detail"
+                ? "text-xs font-semibold text-black"
+                : "text-xs text-ios-text-secondary"
+            }
+          >
+            {variant === "detail" ? "Potential gaps:" : "Missing:"}
+          </span>
           {shownSkills.map((skill, i) => (
             <span key={`${skill}-${i}`} className="px-2 py-0.5 bg-ios-separator rounded text-xs">
               {skill}
@@ -84,11 +103,16 @@ export function FitSection({ fit }: { fit: OpportunityFitAnalysis | null }) {
       )}
 
       {fit.topReasons.length > 0 && (
-        <ul className="list-disc list-inside text-xs text-ios-text-secondary space-y-0.5">
-          {fit.topReasons.slice(0, MAX_TOP_REASONS_SHOWN).map((reason, i) => (
-            <li key={`${reason}-${i}`}>{reason}</li>
-          ))}
-        </ul>
+        <div>
+          {variant === "detail" && (
+            <p className="text-xs font-semibold text-black">Why this matches</p>
+          )}
+          <ul className="list-disc list-inside text-xs text-ios-text-secondary space-y-0.5">
+            {fit.topReasons.slice(0, MAX_TOP_REASONS_SHOWN).map((reason, i) => (
+              <li key={`${reason}-${i}`}>{reason}</li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
