@@ -24,7 +24,15 @@ export type OpportunityAutoApplyStatus =
   | "in_progress"
   | "action_required"
   | "completed"
-  | "failed";
+  | "failed"
+  /**
+   * application_attempts.status = 'submitting': the submission boundary was
+   * crossed, so an external attempt may have begun, but no authoritative
+   * confirmation is stored. Deliberately NOT 'not_started' (that would say
+   * nothing happened) and NOT 'completed' (that would claim acceptance we
+   * cannot evidence).
+   */
+  | "needs_verification";
 
 export interface OpportunitySalary {
   min: number | null;
@@ -234,6 +242,8 @@ function mapAutoApplyStatus(row: OpportunityRow): OpportunityAutoApplyStatus {
       return "in_progress";
     case "action_required":
       return "action_required";
+    case "submitting":
+      return "needs_verification";
     case "succeeded":
       return "completed";
     case "failed":

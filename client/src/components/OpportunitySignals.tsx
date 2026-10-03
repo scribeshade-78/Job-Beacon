@@ -195,6 +195,8 @@ export function autoApplyStatusBadge(status: OpportunitySummary["autoApplyStatus
       return "apply_queued";
     case "in_progress":
       return "apply_in_progress";
+    case "needs_verification":
+      return "apply_needs_verification";
     case "action_required":
       return "apply_action_required";
     case "completed":
