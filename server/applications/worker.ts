@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { AtsSubmissionError } from "./adapters/errors.js";
 import { createActionRequiredEvent } from "./actionRequired.js";
 import { isVacancyDismissed } from "./dismissalGate.js";
+import { ACCEPTANCE_EVIDENCE_TYPE } from "../../shared/pipelineStages.js";
 import {
   ActionRequiredSubmissionError,
   AuthorizationWithdrawnError,
@@ -146,10 +147,16 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
     // "Applied" true; the status is an index into it. Writing the status first
     // and hoping the evidence follows is exactly how a bare 'succeeded' row —
     // and therefore a false Applied — was produced before.
+    // THE CANONICAL ACCEPTANCE RECORD. The adapter's own evidenceType is
+    // adapter-chosen (ApplicationSubmissionResult leaves it to the adapter), so
+    // it cannot be what a reader keys on: a second adapter returning
+    // "confirmation_id" would silently stop counting as acceptance. The worker
+    // writes ONE canonical type — the same constant the reader uses — and keeps
+    // the adapter's own type and payload inside it as provenance.
     const evidenceInsert = await client.from("application_evidence").insert({
       application_attempt_id: attempt.id,
-      evidence_type: result.evidenceType,
-      payload: result.payload,
+      evidence_type: ACCEPTANCE_EVIDENCE_TYPE,
+      payload: { adapterEvidenceType: result.evidenceType, ...result.payload },
     });
 
     if (evidenceInsert.error) {

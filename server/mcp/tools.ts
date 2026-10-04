@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   countByPipelineStage,
+  isTrustworthyAcceptanceEvidence,
   matchesPipelineStage,
   PIPELINE_STAGES,
   pipelineStageOf,
@@ -211,6 +212,40 @@ export async function getCandidatePipeline(
 
   const plans = (data ?? []) as unknown as PlanRow[];
 
+  // WHICH ATTEMPTS CARRY A TRUSTWORTHY CONFIRMATION — read separately rather
+  // than embedded, so the rule stays the shared one and this query cannot drift
+  // into its own idea of confirmation.
+  //
+  // EXPLICITLY SCOPED. The service-role client bypasses RLS, so the attempt ids
+  // are taken from plans already filtered by candidate_id; that IS the ownership
+  // boundary here.
+  //
+  // A QUERY ERROR THROWS. Swallowing it would report every application as
+  // unverified, which is a silent downgrade of a candidate's real submissions.
+  const attemptIds = plans.flatMap((plan) => (plan.application_attempts ?? []).map((attempt) => attempt.id));
+  const acceptedAttemptIds = new Set<string>();
+
+  if (attemptIds.length > 0) {
+    const { data: evidenceRows, error: evidenceError } = await client
+      .from("application_evidence")
+      .select("application_attempt_id, evidence_type, payload")
+      .in("application_attempt_id", attemptIds);
+
+    if (evidenceError) {
+      throw evidenceError;
+    }
+
+    for (const row of (evidenceRows ?? []) as Array<{
+      application_attempt_id: string;
+      evidence_type: string;
+      payload: unknown;
+    }>) {
+      if (isTrustworthyAcceptanceEvidence(row)) {
+        acceptedAttemptIds.add(row.application_attempt_id);
+      }
+    }
+  }
+
   const summaries: PipelineApplicationSummary[] = plans.map((plan) => ({
     planId: plan.id,
     vacancyId: plan.vacancy_id,
@@ -219,7 +254,11 @@ export async function getCandidatePipeline(
     sourceCode: plan.vacancies?.source_code ?? "",
     trustStatus: plan.vacancies?.trust_status ?? null,
     eligible: plan.gate_results?.eligible ?? false,
-    attempts: (plan.application_attempts ?? []).map((attempt) => ({ status: attempt.status })),
+    attempts: (plan.application_attempts ?? []).map((attempt) => ({
+      status: attempt.status,
+      // Supplied per attempt from its own rows — never a shared flag.
+      acceptedEvidence: acceptedAttemptIds.has(attempt.id),
+    })),
     lastError:
       (plan.application_attempts ?? []).map((attempt) => attempt.last_error).find((value) => value !== null) ?? null,
     responseCategories: responseCategoriesOf(plan),
