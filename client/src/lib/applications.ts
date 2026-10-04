@@ -6,6 +6,7 @@ import {
 } from "./applicationEvidence";
 import { isResponseCategory, type ResponseCategory } from "../../../shared/priorityScore";
 import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
+import { isTrustworthyAcceptanceEvidence } from "../../../shared/pipelineStages";
 
 /**
  * §16.4 worker lifecycle states (application_attempts.status check
@@ -20,6 +21,9 @@ export const APPLICATION_ATTEMPT_STATUSES = [
   // lease a row in it until the candidate approves.
   "pending_review",
   "leased",
+  // Batch A: the submission boundary was crossed and an external attempt may
+  // have begun. NOT 'succeeded' — that claim needs a stored receipt.
+  "submitting",
   "succeeded",
   "failed",
   "action_required",
@@ -39,7 +43,8 @@ export type ApplicationAttemptStatus = (typeof APPLICATION_ATTEMPT_STATUSES)[num
 export const ATTEMPT_STATUS_LABELS: Record<ApplicationAttemptStatus, string> = {
   pending: "Queued",
   pending_review: "Awaiting your review",
-  leased: "Submitting",
+  leased: "Preparing to submit",
+  submitting: "Submission needs verification",
   succeeded: "Submitted",
   failed: "Could not be submitted",
   action_required: "Needs your input",
@@ -60,6 +65,13 @@ export interface ApplicationAttemptSummary {
    * which is the normal state before any submission has run.
    */
   evidence: ApplicationEvidenceView[];
+  /**
+   * Whether a trustworthy acceptance confirmation is persisted against THIS
+   * attempt. This is what makes an application "Applied" — the status alone is
+   * a claim the worker made, and the old unchecked write could make it without
+   * storing any receipt. Absent evidence is false, never assumed true.
+   */
+  acceptedEvidence: boolean;
 }
 
 export interface ApplicationSummary {
@@ -216,6 +228,10 @@ export async function listApplications(
           createdAt: attempt.created_at,
           updatedAt: attempt.updated_at,
           evidence: describeApplicationEvidence(attempt.application_evidence),
+          // Supplied for THIS attempt only, from its own embedded rows.
+          acceptedEvidence: (attempt.application_evidence ?? []).some(
+            isTrustworthyAcceptanceEvidence,
+          ),
         })),
       })),
     };

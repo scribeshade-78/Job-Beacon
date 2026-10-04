@@ -11,12 +11,26 @@ import type { ApplicationSummary } from "./applications";
 import type { ResponseCategory } from "../../../shared/priorityScore";
 import { GENERIC_INELIGIBLE_REASON, ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 
-type AttemptStatus = "pending" | "leased" | "succeeded" | "failed" | "action_required" | "cancelled";
+type AttemptStatus =
+  | "pending"
+  | "pending_review"
+  | "leased"
+  | "submitting"
+  | "succeeded"
+  | "failed"
+  | "action_required"
+  | "cancelled";
 
+/**
+ * acceptedEvidence defaults to TRUE for a succeeded attempt, which is what a
+ * real confirmation looks like. Tests about bare success pass an explicit
+ * false — the point of the parameter is that the two are distinguishable here.
+ */
 function application(
   statuses: AttemptStatus[],
   responseCategories: ResponseCategory[] = [],
   eligible = true,
+  acceptedEvidence: (status: AttemptStatus) => boolean = (status) => status === "succeeded",
 ): ApplicationSummary {
   return {
     planId: "plan-1",
@@ -37,6 +51,7 @@ function application(
       createdAt: "2026-09-17T00:00:00Z",
       updatedAt: "2026-09-17T00:00:00Z",
       evidence: [],
+      acceptedEvidence: acceptedEvidence(status),
     })),
   };
 }
@@ -47,6 +62,8 @@ describe("PIPELINE_STAGES", () => {
       "all",
       "in_progress",
       "ineligible",
+      "reconciliation_pending",
+      "needs_verification",
       "applied",
       "interview",
       "offer",
@@ -184,6 +201,8 @@ describe("countByPipelineStage", () => {
       rejection: 1,
       in_progress: 2,
       ineligible: 0,
+      reconciliation_pending: 0,
+      needs_verification: 0,
     });
     expect(
       counts.applied +
@@ -204,6 +223,8 @@ describe("countByPipelineStage", () => {
       rejection: 0,
       in_progress: 0,
       ineligible: 0,
+      reconciliation_pending: 0,
+      needs_verification: 0,
     });
   });
 

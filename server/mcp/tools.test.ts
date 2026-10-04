@@ -189,7 +189,7 @@ describe("getCandidatePipeline", () => {
     const result = await getCandidatePipeline(pipelineClient());
 
     expect(result.stages.map((stage) => stage.stage)).toEqual(PIPELINE_STAGES.map((stage) => stage.id));
-    expect(result.stages).toHaveLength(7);
+    expect(result.stages).toHaveLength(9);
   });
 
   it("classifies each application into exactly one mutually exclusive stage", async () => {
@@ -200,7 +200,13 @@ describe("getCandidatePipeline", () => {
       all: 5,
       in_progress: 2,
       ineligible: 0,
-      applied: 1,
+      // The fixture's 'applied' row carries a succeeded attempt with NO evidence
+      // row, which is now an unverified acceptance claim rather than Applied.
+      // server/mcp/tools.ts does not yet load evidence, so nothing here can be
+      // promoted to Applied — the conservative direction, pending that wiring.
+      reconciliation_pending: 0,
+      needs_verification: 1,
+      applied: 0,
       interview: 1,
       offer: 0,
       rejection: 1,

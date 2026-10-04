@@ -51,8 +51,24 @@
  * ApplicationSummary and the MCP server's own row shape can use these
  * functions without shared/ depending on either.
  */
+/**
+ * One attempt, as the classification needs to see it.
+ *
+ * acceptedEvidence IS THE POINT OF THIS SHAPE. "The worker wrote
+ * status='succeeded'" and "we hold a trustworthy persisted confirmation for
+ * this attempt" are different facts, and only the second means the application
+ * was actually submitted. It is OPTIONAL so a caller that cannot load evidence
+ * degrades to NOT Applied rather than to a false Applied: absent, unreadable or
+ * unloaded evidence must never establish acceptance.
+ */
+export interface PipelineAttemptInput {
+  status: string;
+  /** True only for a trustworthy confirmation persisted against THIS attempt. */
+  acceptedEvidence?: boolean;
+}
+
 export interface PipelineStageInput {
-  attempts: ReadonlyArray<{ status: string }>;
+  attempts: ReadonlyArray<PipelineAttemptInput>;
   responseCategories: readonly string[];
   /**
    * gate_results.eligible: whether the eligibility gates let this plan queue.
@@ -73,6 +89,8 @@ export const PIPELINE_STAGES = [
   { id: "all", label: "All" },
   { id: "in_progress", label: "In Progress" },
   { id: "ineligible", label: "Not eligible" },
+  { id: "reconciliation_pending", label: "Reconciliation pending" },
+  { id: "needs_verification", label: "Submission needs verification" },
   { id: "applied", label: "Applied" },
   { id: "interview", label: "Interview" },
   { id: "offer", label: "Offer" },
@@ -84,6 +102,43 @@ export type PipelineStageId = (typeof PIPELINE_STAGES)[number]["id"];
 /** Every stage except the All aggregate — each application is exactly one of these. */
 export type CategorizedPipelineStageId = Exclude<PipelineStageId, "all">;
 
+/**
+ * The evidence_type the submission path writes ONLY after an adapter returns a
+ * confirmed acceptance. Nothing else in this repository writes it, and
+ * authenticated holds no INSERT grant on application_evidence, so a candidate
+ * cannot produce one — that write permission, not a payload shape, is the
+ * provenance this classification trusts.
+ */
+export const ACCEPTANCE_EVIDENCE_TYPE = "submission_confirmation";
+
+/**
+ * Whether one evidence row is a trustworthy acceptance confirmation.
+ *
+ * DELIBERATELY NOT A FIELD CHECKLIST. The adapter contract is
+ * { evidenceType, payload } with an adapter-chosen payload (see
+ * ApplicationSubmissionResult), so requiring a specific receipt field would
+ * invent a contract that does not exist. What is checked instead: the type is
+ * the one only the service-role submission path writes, the payload is a
+ * non-empty object (a null, array or empty payload is malformed and proves
+ * nothing), and the row must belong to the attempt being classified — the
+ * caller supplies rows for ONE attempt, so cross-attempt evidence cannot leak in.
+ */
+export function isTrustworthyAcceptanceEvidence(
+  row: { evidence_type?: unknown; payload?: unknown } | null | undefined,
+): boolean {
+  if (row === null || row === undefined || row.evidence_type !== ACCEPTANCE_EVIDENCE_TYPE) {
+    return false;
+  }
+
+  const payload = row.payload;
+
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return false;
+  }
+
+  return Object.keys(payload as Record<string, unknown>).length > 0;
+}
+
 /** Ordered strongest first. The first match wins. */
 const RESPONSE_PRECEDENCE = ["offer", "rejection", "interview"] as const;
 
@@ -91,6 +146,8 @@ const RESPONSE_PRECEDENCE = ["offer", "rejection", "interview"] as const;
 export const CATEGORIZED_STAGE_IDS: readonly CategorizedPipelineStageId[] = [
   "in_progress",
   "ineligible",
+  "reconciliation_pending",
+  "needs_verification",
   "applied",
   "interview",
   "offer",
@@ -117,8 +174,31 @@ export function pipelineStageOf(application: PipelineStageInput): CategorizedPip
     }
   }
 
-  if (application.attempts.some((attempt) => attempt.status === "succeeded")) {
-    return "applied";
+  // THE BOUNDARY STATES, checked before the ordinary branches.
+  //
+  // 'submitting' means an external attempt may have begun. With a stored
+  // confirmation it is only awaiting finalization; without one the outcome is
+  // unknown. Neither is Applied, and neither may be reported as "never
+  // submitted" — both are things a human may need to check.
+  const submitting = application.attempts.filter((attempt) => attempt.status === "submitting");
+
+  if (submitting.some((attempt) => attempt.acceptedEvidence === true)) {
+    return "reconciliation_pending";
+  }
+
+  if (submitting.length > 0) {
+    return "needs_verification";
+  }
+
+  // A 'succeeded' attempt is Applied ONLY with a trustworthy persisted
+  // confirmation for that same attempt. Bare success — the shape the old
+  // unchecked evidence write produced — is an unverified acceptance claim.
+  const succeeded = application.attempts.filter((attempt) => attempt.status === "succeeded");
+
+  if (succeeded.length > 0) {
+    return succeeded.some((attempt) => attempt.acceptedEvidence === true)
+      ? "applied"
+      : "needs_verification";
   }
 
   if (!application.eligible) {
@@ -152,6 +232,8 @@ export function countByPipelineStage<T extends PipelineStageInput>(
     all: applications.length,
     in_progress: 0,
     ineligible: 0,
+    reconciliation_pending: 0,
+    needs_verification: 0,
     applied: 0,
     interview: 0,
     offer: 0,

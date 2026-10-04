@@ -88,6 +88,8 @@ describe("listApplications", () => {
               // No evidence row on this attempt: a 'failed' status with nothing
               // captured must render as no evidence, not as an absent field.
               evidence: [],
+              // And no acceptance confirmation, so nothing here can be Applied.
+              acceptedEvidence: false,
             },
           ],
         },
