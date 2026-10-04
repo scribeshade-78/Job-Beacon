@@ -136,7 +136,17 @@ export function isTrustworthyAcceptanceEvidence(
     return false;
   }
 
-  return Object.keys(payload as Record<string, unknown>).length > 0;
+  const keys = Object.keys(payload as Record<string, unknown>);
+
+  if (keys.length === 0) {
+    return false;
+  }
+
+  // THE WRAPPER MUST NOT MANUFACTURE ACCEPTANCE. The submission path stores the
+  // adapter's own type beside its payload as provenance, so a payload whose ONLY
+  // key is that provenance field means the adapter itself returned nothing
+  // confirming — an empty inner result wearing a non-empty outer object.
+  return !keys.every((key) => key === "adapterEvidenceType");
 }
 
 /** Ordered strongest first. The first match wins. */

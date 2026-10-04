@@ -153,6 +153,27 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
     // "confirmation_id" would silently stop counting as acceptance. The worker
     // writes ONE canonical type — the same constant the reader uses — and keeps
     // the adapter's own type and payload inside it as provenance.
+    // THE ADAPTER'S OWN CLAIM IS CHECKED BEFORE IT IS CANONICALIZED. Returning
+    // from submit() means the adapter reports success, but an adapter that
+    // returns an empty or non-object payload has confirmed nothing; writing the
+    // canonical acceptance type around it would turn "success" into evidence.
+    // This does not require a portal receipt field — it requires the adapter to
+    // have said SOMETHING, which is the minimum the existing contract allows us
+    // to verify.
+    const adapterPayload = result.payload;
+    const adapterPayloadIsConfirming =
+      typeof adapterPayload === "object" &&
+      adapterPayload !== null &&
+      !Array.isArray(adapterPayload) &&
+      Object.keys(adapterPayload).length > 0;
+
+    if (typeof result.evidenceType !== "string" || result.evidenceType.trim() === "" || !adapterPayloadIsConfirming) {
+      // Accepted in the adapter's view, but nothing durable proves it. Same
+      // terminal state as a failed receipt write: the attempt stays 'submitting'
+      // and no automatic resubmission is possible.
+      return { processed: true, applicationAttemptId: attempt.id, outcome: "needs_verification" };
+    }
+
     const evidenceInsert = await client.from("application_evidence").insert({
       application_attempt_id: attempt.id,
       evidence_type: ACCEPTANCE_EVIDENCE_TYPE,

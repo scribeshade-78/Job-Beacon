@@ -179,11 +179,72 @@ describe("getCandidatePipeline", () => {
               },
             ],
           }), // In Progress, NOT Rejection
+          // BARE SUCCESS: a succeeded attempt whose evidence row is malformed.
+          // It must NOT be Applied.
+          plan({
+            id: "p6",
+            application_attempts: [
+              { id: "a6", status: "succeeded", attempts: 1, max_attempts: 5, last_error: null, messages: [] },
+            ],
+          }),
+          // CONFIRMED BUT UNFINALIZED: the boundary was crossed and a canonical
+          // confirmation is stored, but the status write never landed.
+          plan({
+            id: "p7",
+            application_attempts: [
+              { id: "a7", status: "submitting", attempts: 1, max_attempts: 5, last_error: null, messages: [] },
+            ],
+          }),
+        ],
+        error: null,
+      },
+    ],
+    // ONE queue entry: getCandidatePipeline reads evidence once for all attempt
+    // ids, never once per card.
+    application_evidence: [
+      {
+        data: [
+          // a1: canonical confirmation -> Applied.
+          { application_attempt_id: "a1", evidence_type: "submission_confirmation", payload: { confirmationId: "c1" } },
+          // a6: the right evidence TYPE but a null payload — malformed, and
+          // therefore not acceptance. This is the case a non-empty outer object
+          // would wrongly paper over.
+          { application_attempt_id: "a6", evidence_type: "submission_confirmation", payload: null },
+          // a7: canonical confirmation on a still-'submitting' attempt.
+          {
+            application_attempt_id: "a7",
+            evidence_type: "submission_confirmation",
+            payload: { adapterEvidenceType: "confirmation_id", confirmationId: "c7" },
+          },
         ],
         error: null,
       },
     ],
     });
+
+  it("throws when the evidence read fails instead of reporting everything unverified", async () => {
+    // A swallowed error here would tell an agent every application is
+    // unverified, including ones the candidate genuinely submitted.
+    const client = makeClient({
+      candidate_profiles: [{ data: [{ id: CANDIDATE }], error: null }],
+      application_plans: [
+        {
+          data: [
+            plan({
+              id: "p1",
+              application_attempts: [
+                { id: "a1", status: "succeeded", attempts: 1, max_attempts: 5, last_error: null, messages: [] },
+              ],
+            }),
+          ],
+          error: null,
+        },
+      ],
+      application_evidence: [{ data: null, error: { message: "evidence unavailable" } }],
+    });
+
+    await expect(getCandidatePipeline(client)).rejects.toBeTruthy();
+  });
 
   it("returns every stage in chronological order, including empty ones", async () => {
     const result = await getCandidatePipeline(pipelineClient());
@@ -197,16 +258,16 @@ describe("getCandidatePipeline", () => {
     const counts = Object.fromEntries(result.stages.map((stage) => [stage.stage, stage.count]));
 
     expect(counts).toEqual({
-      all: 5,
+      all: 7,
       in_progress: 2,
       ineligible: 0,
-      // The fixture's 'applied' row carries a succeeded attempt with NO evidence
-      // row, which is now an unverified acceptance claim rather than Applied.
-      // server/mcp/tools.ts does not yet load evidence, so nothing here can be
-      // promoted to Applied — the conservative direction, pending that wiring.
-      reconciliation_pending: 0,
+      // a1 carries a canonical confirmation -> genuinely Applied.
+      applied: 1,
+      // a7 is 'submitting' WITH a confirmation: accepted, awaiting finalization.
+      reconciliation_pending: 1,
+      // a6 is 'succeeded' with a MALFORMED confirmation (null payload): the right
+      // evidence type is not enough, so this is not Applied.
       needs_verification: 1,
-      applied: 0,
       interview: 1,
       offer: 0,
       rejection: 1,
@@ -236,7 +297,9 @@ describe("getCandidatePipeline", () => {
     const failed = result.stages.find((stage) => stage.stage === "in_progress")!.applications.find((a) => a.planId === "p5")!;
 
     expect(failed.lastError).toBe("boom");
-    expect(failed.attempts).toEqual([{ status: "failed" }]);
+    // acceptedEvidence is part of the attempt contract now: an attempt that
+    // cannot be checked for a confirmation is not silently treated as verified.
+    expect(failed.attempts).toEqual([{ status: "failed", acceptedEvidence: false }]);
   });
 
   it("returns an all-zero pipeline when the candidate has no applications", async () => {

@@ -280,6 +280,38 @@ describe("runOneApplicationAttempt", () => {
       expect(attemptStatuses(attemptUpdates)).toEqual([]);
     });
 
+    it("does not canonicalize an adapter success that carries no confirming payload", async () => {
+      // Returning from submit() is the adapter's claim of success, but an empty
+      // payload confirms nothing. Writing the canonical acceptance type around
+      // it would turn a claim into evidence.
+      vi.mocked(submitApplicationAttempt).mockResolvedValueOnce({
+        evidenceType: "confirmation_id",
+        payload: {},
+      });
+
+      const { client, log, attemptUpdates } = makeClient();
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result.outcome).toBe("needs_verification");
+      expect(log).toEqual([]);
+      expect(attemptStatuses(attemptUpdates)).toEqual([]);
+    });
+
+    it("does not canonicalize an adapter success with a blank evidence type", async () => {
+      vi.mocked(submitApplicationAttempt).mockResolvedValueOnce({
+        evidenceType: "   ",
+        payload: { confirmationId: "c1" },
+      });
+
+      const { client, log } = makeClient();
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result.outcome).toBe("needs_verification");
+      expect(log).toEqual([]);
+    });
+
     it("reports verification rather than success when the status write fails", async () => {
       vi.mocked(submitApplicationAttempt).mockResolvedValueOnce({
         evidenceType: "submission_confirmation",
