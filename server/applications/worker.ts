@@ -304,6 +304,27 @@ export async function runOneApplicationAttempt(client: SupabaseClient): Promise<
     // policy applies unchanged: a validation rejection is terminal on the FIRST
     // attempt, and a provider-classified transient failure is safe to retry
     // because the provider told us it did NOT accept the submission.
+    // RETRY ONLY WHEN THE ADAPTER HAS ESTABLISHED NON-ACCEPTANCE.
+    //
+    // The error class proves nothing: an ATS error can be raised after the
+    // request reached the portal. 'retryable' means "another attempt might
+    // succeed", NOT "nothing was accepted", so on its own it is not a licence to
+    // resubmit — no provider idempotency key exists here, and a duplicate
+    // application is worse than a delayed one. Without that establishment the
+    // attempt keeps the boundary state and is surfaced for verification.
+    if (!atsError.nonAcceptanceEstablished) {
+      const unknownUpdate = await client
+        .from("application_attempts")
+        .update({ last_error: message, updated_at: new Date().toISOString() })
+        .eq("id", attempt.id);
+
+      if (unknownUpdate.error) {
+        throw unknownUpdate.error;
+      }
+
+      return { processed: true, applicationAttemptId: attempt.id, outcome: "needs_verification" };
+    }
+
     const retryable = atsError.retryable;
 
     // A validation rejection is terminal on the FIRST attempt, not after

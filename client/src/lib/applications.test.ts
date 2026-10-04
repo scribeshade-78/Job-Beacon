@@ -169,7 +169,67 @@ describe("listApplications", () => {
       expect(attempt.evidence[0].kind).toBe("submission");
       // The disclosure boundary holds all the way through the mapping.
       expect(JSON.stringify(attempt.evidence)).not.toContain("internal.example.com");
+      // A 'succeeded' attempt whose stored evidence is adapter-shaped and NOT the
+      // canonical confirmation is not acceptance. The loader must not hand the
+      // classifier a true here, whatever the status says.
+      expect(attempt.acceptedEvidence).toBe(false);
     }
+  });
+
+  it("reports acceptedEvidence only for the canonical confirmation, and never for a missing embed", async () => {
+    const row = (id: string, evidence: unknown) => ({
+      id,
+      vacancy_id: "vac-" + id,
+      gate_results: { eligible: true },
+      created_at: "2026-08-18T00:00:00Z",
+      vacancies: { raw_title: "Data Engineer", authoritative_url: "https://example.com/jobs/" + id },
+      application_attempts: [
+        {
+          id: "attempt-" + id,
+          status: "succeeded",
+          attempts: 1,
+          max_attempts: 5,
+          last_error: null,
+          created_at: "2026-08-18T00:01:00Z",
+          updated_at: "2026-08-18T00:05:00Z",
+          application_evidence: evidence,
+        },
+      ],
+    });
+
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        // The canonical type with a confirming payload -> acceptance.
+        row("confirmed", [
+          {
+            id: "ev-c",
+            evidence_type: "submission_confirmation",
+            payload: { adapterEvidenceType: "confirmation_id", confirmationId: "c1" },
+            captured_at: "2026-08-18T00:05:00Z",
+          },
+        ]),
+        // The embed came back null: a retrieval failure for THIS attempt must
+        // never be read as acceptance.
+        row("missing", null),
+        // A malformed confirmation is not acceptance either.
+        row("malformed", [
+          { id: "ev-m", evidence_type: "submission_confirmation", payload: null, captured_at: "2026-08-18T00:05:00Z" },
+        ]),
+      ],
+      error: null,
+    });
+    const select = vi.fn(() => ({ order }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Parameters<typeof listApplications>[0];
+
+    const result = await listApplications(client);
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const byId = Object.fromEntries(result.applications.map((a) => [a.planId, a.attempts[0].acceptedEvidence]));
+
+    expect(byId).toEqual({ confirmed: true, missing: false, malformed: false });
   });
 
   it("derives response categories from the classifications reachable through its attempts", async () => {

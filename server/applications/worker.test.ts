@@ -187,7 +187,9 @@ describe("runOneApplicationAttempt", () => {
       // Worker B now holds a valid lease on the same row with a different token.
       // Worker A still holds the claim it read earlier (token-a), so the database
       // refuses A's transition and A must not reach the adapter.
-      const { client, rpc } = makeClient({ boundaryRpcResult: { data: false, error: null } });
+      const { client, rpc, attemptUpdates } = makeClient({
+        boundaryRpcResult: { data: false, error: null },
+      });
 
       const result = await runOneApplicationAttempt(client);
 
@@ -200,6 +202,10 @@ describe("runOneApplicationAttempt", () => {
         applicationAttemptId: claimedAttempt.id,
         outcome: "cancelled",
       });
+      // NO STATUS WRITE AT ALL. The newer lease holder owns this row; a losing
+      // worker must not stamp 'cancelled' (or anything else) over it. The
+      // boundary is an RPC that matched zero rows, so nothing was mutated.
+      expect(attemptUpdates).toEqual([]);
       expect(submitApplicationAttempt).not.toHaveBeenCalled();
     });
 
@@ -362,7 +368,12 @@ describe("runOneApplicationAttempt", () => {
   describe("provider-classified outcomes keep the existing policy", () => {
     it("reschedules with backoff on a retryable ATS failure", async () => {
       vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(
-        new AtsSubmissionError("rate limited", { retryable: true, reasonCode: "RATE_LIMITED", status: 429 }),
+        new AtsSubmissionError("rate limited", {
+          retryable: true,
+          nonAcceptanceEstablished: true,
+          reasonCode: "RATE_LIMITED",
+          status: 429,
+        }),
       );
 
       const { client, attemptUpdates } = makeClient();
@@ -375,9 +386,31 @@ describe("runOneApplicationAttempt", () => {
       expect(reschedule.leased_until).toBeTruthy();
     });
 
+    it("does NOT resubmit a retryable ATS error that has not established non-acceptance", async () => {
+      // 'retryable' says another attempt might help. It does NOT say the portal
+      // refused this one — a 502 after the request was sent looks exactly like
+      // this — so resubmitting could duplicate a real application.
+      vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(
+        new AtsSubmissionError("bad gateway", { retryable: true, reasonCode: "UPSTREAM", status: 502 }),
+      );
+
+      const { client, attemptUpdates } = makeClient();
+
+      const result = await runOneApplicationAttempt(client);
+
+      expect(result.outcome).toBe("needs_verification");
+      expect(attemptUpdates.some((update) => update.status === "leased")).toBe(false);
+      expect(attemptUpdates.some((update) => update.status === "pending")).toBe(false);
+    });
+
     it("dead-letters a non-retryable ATS rejection immediately", async () => {
       vi.mocked(submitApplicationAttempt).mockRejectedValueOnce(
-        new AtsSubmissionError("validation", { retryable: false, reasonCode: "VALIDATION", status: 422 }),
+        new AtsSubmissionError("validation", {
+          retryable: false,
+          nonAcceptanceEstablished: true,
+          reasonCode: "VALIDATION",
+          status: 422,
+        }),
       );
 
       const { client, attemptUpdates } = makeClient();

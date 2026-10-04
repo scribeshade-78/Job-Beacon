@@ -25,6 +25,17 @@ export class AtsSubmissionError extends Error {
   readonly retryAfterSeconds: number | null;
   readonly reasonCode: string;
 
+  /**
+   * WHETHER THE ADAPTER HAS ESTABLISHED THAT THE PORTAL DID NOT ACCEPT THE
+   * SUBMISSION. Defaults to false, and false means "unknown", so the attempt is
+   * not resubmitted automatically.
+   *
+   * retryable is NOT this: it says retrying might help, not that nothing was
+   * accepted. An adapter that saw a 502 after the request was sent cannot set
+   * this; one that failed validation before sending can.
+   */
+  readonly nonAcceptanceEstablished: boolean;
+
   constructor(
     message: string,
     options: {
@@ -32,11 +43,14 @@ export class AtsSubmissionError extends Error {
       reasonCode: string;
       status?: number | null;
       retryAfterSeconds?: number | null;
+      /** True ONLY when the adapter knows the portal did not accept this submission. */
+      nonAcceptanceEstablished?: boolean;
     },
   ) {
     super(message);
     this.name = "AtsSubmissionError";
     this.retryable = options.retryable;
+    this.nonAcceptanceEstablished = options.nonAcceptanceEstablished ?? false;
     this.status = options.status ?? null;
     this.retryAfterSeconds = options.retryAfterSeconds ?? null;
     this.reasonCode = options.reasonCode;

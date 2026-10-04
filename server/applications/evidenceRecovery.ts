@@ -161,15 +161,24 @@ export async function recoverAcceptedAttempts(
       result.outcomes.push({
         applicationAttemptId: attempt.id,
         outcome: "would_finalize",
-        detail: confirmation.captured_at ?? "unknown acceptance time",
+        detail:
+          confirmation.captured_at === null
+            ? "evidence capture time unavailable"
+            : "evidence captured " + confirmation.captured_at,
       });
       continue;
     }
 
-    // succeeded_at comes from the CONFIRMATION's own captured_at when the
-    // adapter recorded one — that is the authoritative acceptance moment. The
-    // reconciliation time is written to updated_at instead, so a repair does not
-    // rewrite history with today's clock.
+    // TIMESTAMP SEMANTICS, STATED HONESTLY. application_evidence.captured_at is
+    // a DATABASE insertion default (now()), not a provider-reported acceptance
+    // time: ApplicationSubmissionResult carries { evidenceType, payload } and no
+    // acceptance timestamp, so no contract establishes an external one. What
+    // captured_at IS is the earliest moment we can prove the receipt existed,
+    // which is the closest available record of when the submission completed.
+    // succeeded_at therefore takes that value — deliberately NOT the
+    // reconciliation time, so a repair does not rewrite the submission date with
+    // today's clock — and the reconciliation moment goes to updated_at. Neither
+    // value is presented as a provider-reported acceptance time.
     const update: Record<string, unknown> = {
       status: "succeeded",
       updated_at: new Date().toISOString(),
@@ -207,7 +216,10 @@ export async function recoverAcceptedAttempts(
     result.outcomes.push({
       applicationAttemptId: attempt.id,
       outcome: "finalized",
-      detail: confirmation.captured_at ?? "unknown acceptance time",
+      detail:
+        confirmation.captured_at === null
+          ? "evidence capture time unavailable"
+          : "evidence captured " + confirmation.captured_at,
     });
   }
 
