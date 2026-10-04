@@ -46,6 +46,7 @@ export type StatusBadgeStatus =
   | "apply_queued"
   | "apply_in_progress"
   | "apply_needs_verification"
+  | "apply_reconciliation_pending"
   | "apply_action_required"
   | "apply_completed"
   | "apply_failed"
@@ -267,6 +268,12 @@ const STATUS_CONFIG: Record<StatusBadgeStatus, StatusConfig> = {
     bg: "bg-status-verified/8",
     fg: "text-status-verified-fg",
     Icon: CheckIcon,
+  },
+  apply_reconciliation_pending: {
+    label: "Confirming submission",
+    bg: "bg-status-under-review/8",
+    fg: "text-status-under-review-fg",
+    Icon: ClockIcon,
   },
   apply_needs_verification: {
     label: "Submission needs verification",

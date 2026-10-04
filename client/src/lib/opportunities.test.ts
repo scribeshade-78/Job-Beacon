@@ -302,14 +302,49 @@ describe("listOpportunities — mapping", () => {
       { attempt_status: "pending", plan_gate_results: eligible, expected: "queued" },
       { attempt_status: "leased", plan_gate_results: eligible, expected: "in_progress" },
       { attempt_status: "action_required", plan_gate_results: eligible, expected: "action_required" },
-      { attempt_status: "succeeded", plan_gate_results: eligible, expected: "completed" },
+      // 'succeeded' is the worker's CLAIM. Only a stored confirmation makes it
+      // Applied; the bare row is an unverified acceptance claim.
+      {
+        attempt_status: "succeeded",
+        attempt_accepted_evidence: true,
+        plan_gate_results: eligible,
+        expected: "completed",
+      },
+      {
+        attempt_status: "succeeded",
+        attempt_accepted_evidence: false,
+        plan_gate_results: eligible,
+        expected: "needs_verification",
+      },
+      {
+        // An un-migrated database returns NULL for the new column. NULL must
+        // never be read as accepted.
+        attempt_status: "succeeded",
+        attempt_accepted_evidence: null,
+        plan_gate_results: eligible,
+        expected: "needs_verification",
+      },
+      {
+        attempt_status: "submitting",
+        attempt_accepted_evidence: true,
+        plan_gate_results: eligible,
+        expected: "reconciliation_pending",
+      },
+      {
+        attempt_status: "submitting",
+        attempt_accepted_evidence: false,
+        plan_gate_results: eligible,
+        expected: "needs_verification",
+      },
       { attempt_status: "failed", plan_gate_results: eligible, expected: "failed" },
       { attempt_status: "cancelled", plan_gate_results: eligible, expected: "failed" },
       { attempt_status: "status_added_later", plan_gate_results: eligible, expected: "not_started" },
     ];
 
-    for (const { attempt_status, plan_gate_results, expected } of cases) {
-      const { client } = makeClient({ data: [viewRow({ attempt_status, plan_gate_results })] });
+    for (const { attempt_status, plan_gate_results, attempt_accepted_evidence, expected } of cases) {
+      const { client } = makeClient({
+        data: [viewRow({ attempt_status, plan_gate_results, attempt_accepted_evidence })],
+      });
       const result = await listOpportunities(client);
 
       if (result.kind !== "success") throw new Error("expected success");

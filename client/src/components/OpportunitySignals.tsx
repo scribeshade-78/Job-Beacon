@@ -197,6 +197,8 @@ export function autoApplyStatusBadge(status: OpportunitySummary["autoApplyStatus
       return "apply_in_progress";
     case "needs_verification":
       return "apply_needs_verification";
+    case "reconciliation_pending":
+      return "apply_reconciliation_pending";
     case "action_required":
       return "apply_action_required";
     case "completed":

@@ -32,7 +32,13 @@ export type OpportunityAutoApplyStatus =
    * nothing happened) and NOT 'completed' (that would claim acceptance we
    * cannot evidence).
    */
-  | "needs_verification";
+  | "needs_verification"
+  /**
+   * The submission boundary was crossed and a confirmation IS stored, but the
+   * finalizing status write has not landed. Accepted, awaiting reconciliation —
+   * distinct from needs_verification, where no confirmation exists at all.
+   */
+  | "reconciliation_pending";
 
 export interface OpportunitySalary {
   min: number | null;
@@ -148,6 +154,12 @@ interface OpportunityRow {
   plan_gate_results: { eligible: boolean } | null;
   /** Latest application_attempts.status for this candidate's plan, if any. */
   attempt_status: string | null;
+  /**
+   * Whether THAT SAME attempt has a trustworthy acceptance confirmation
+   * (candidate_opportunities.attempt_accepted_evidence, 20261001180000). NULL
+   * on an un-migrated database, which must be read as NOT accepted.
+   */
+  attempt_accepted_evidence: boolean | null;
 
   technical_fit_score: number | null;
   practical_eligibility_score: number | null;
@@ -243,9 +255,11 @@ function mapAutoApplyStatus(row: OpportunityRow): OpportunityAutoApplyStatus {
     case "action_required":
       return "action_required";
     case "submitting":
-      return "needs_verification";
+      return row.attempt_accepted_evidence === true ? "reconciliation_pending" : "needs_verification";
     case "succeeded":
-      return "completed";
+      // 'succeeded' is the worker's claim; the confirmation is the proof. A bare
+      // success — or a missing field on an un-migrated database — is NOT Applied.
+      return row.attempt_accepted_evidence === true ? "completed" : "needs_verification";
     case "failed":
     case "cancelled":
       return "failed";
@@ -285,6 +299,7 @@ const VIEW_COLUMNS = [
   "company_domain",
   "plan_gate_results",
   "attempt_status",
+  "attempt_accepted_evidence",
   "technical_fit_score",
   "practical_eligibility_score",
   "eligibility_capped",
