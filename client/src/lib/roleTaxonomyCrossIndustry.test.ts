@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ROLE_CATEGORIES, ROLE_TAXONOMY, searchRoles } from "../../../shared/roleTaxonomy";
-import { isTitleRelevantToRole } from "../../../shared/roleTaxonomy";
+import { isTitleRelevantToRole, relatedRoles, roleMatchKindOf } from "../../../shared/roleTaxonomy";
 
 /**
  * D1 — the cross-industry catalog and the AI/ML distinction.
@@ -36,8 +36,35 @@ describe("cross-industry coverage", () => {
 
   it("finds Accountant by name, by alias and by typo", () => {
     expect(titles("Accountant")).toContain("Accountant");
-    expect(titles("bookkeeper")).toContain("Accountant");
+    expect(titles("financial accountant")).toContain("Accountant");
     expect(titles("accountent")).toContain("Accountant");
+  });
+
+  it("keeps Bookkeeper a distinct occupation rather than an Accountant alias", () => {
+    // These are different jobs: folding one into the other's alias list meant a
+    // candidate asking for bookkeeping was saved as "Accountant".
+    expect(titles("bookkeeper")).toContain("Bookkeeper");
+    expect(titles("bookkeeping")).toContain("Bookkeeper");
+
+    const accountant = ROLE_TAXONOMY.find((entry) => entry.title === "Accountant")!;
+    expect(accountant.aliases).not.toContain("bookkeeper");
+
+    // ...and they are RELATED, with an authored explanation, not synonyms.
+    const related = relatedRoles(accountant);
+    expect(related.map((item) => item.entry.title)).toContain("Bookkeeper");
+    expect(related[0].explanation.length).toBeGreaterThan(20);
+  });
+
+  it("treats a licensed designation as related, never as an alias that implies the licence", () => {
+    const accountant = ROLE_TAXONOMY.find((entry) => entry.title === "Accountant")!;
+
+    expect(accountant.aliases).not.toContain("chartered accountant");
+    // A query using the licensed term still reaches the occupation by token, as
+    // a PARTIAL match, so the candidate is never told they hold the designation.
+    const results = searchRoles("chartered accountant");
+    expect(results.map((entry) => entry.title)).toContain("Accountant");
+    expect(roleMatchKindOf(accountant, "chartered accountant")).toBe("partial");
+    expect(roleMatchKindOf(accountant, "Accountant")).toBe("exact");
   });
 
   it("finds Teacher by name and alias", () => {

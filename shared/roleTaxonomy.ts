@@ -24,12 +24,52 @@ export const ROLE_CATEGORIES = [
 
 export type RoleCategory = (typeof ROLE_CATEGORIES)[number];
 
+/**
+ * An explicitly RELATED occupation — not a synonym.
+ *
+ * Relationships are authored, keyed by the stable taxonomy id (so a retitle
+ * cannot break them) and carry their own explanation. Word overlap does NOT
+ * establish one: two roles sharing "engineer" are not thereby related, and the
+ * whole point of this field is that the catalog says WHY in words a candidate
+ * can read.
+ */
+export interface RoleRelationship {
+  /** The related entry's stable id. */
+  toId: string;
+  /** One concrete sentence: how the two occupations differ and overlap. */
+  explanation: string;
+}
+
 export interface RoleTaxonomyEntry {
   id: string;
   title: string;
   category: RoleCategory;
   aliases: string[];
   skills: string[];
+  /** Optional, authored, and never applied automatically — see RoleRelationship. */
+  related?: RoleRelationship[];
+}
+
+/**
+ * How a query matched an entry. Exact/alias matches are what the candidate
+ * asked for; a partial match is keyword overlap only, and MUST be offered as an
+ * alternative rather than substituted for the requested role.
+ */
+export type RoleMatchKind = "exact" | "partial";
+
+export interface RoleSearchResult {
+  entry: RoleTaxonomyEntry;
+  match: RoleMatchKind;
+}
+
+/** The entries explicitly related to `entry`, resolved and still declared. */
+export function relatedRoles(entry: RoleTaxonomyEntry): Array<{ entry: RoleTaxonomyEntry; explanation: string }> {
+  return (entry.related ?? [])
+    .map((relationship) => {
+      const related = ROLE_TAXONOMY.find((candidate) => candidate.id === relationship.toId);
+      return related === undefined ? null : { entry: related, explanation: relationship.explanation };
+    })
+    .filter((value): value is { entry: RoleTaxonomyEntry; explanation: string } => value !== null);
 }
 
 export const ROLE_TAXONOMY: RoleTaxonomyEntry[] = [
@@ -151,8 +191,34 @@ export const ROLE_TAXONOMY: RoleTaxonomyEntry[] = [
     id: "accountant",
     title: "Accountant",
     category: "Finance",
-    aliases: ["accounting", "chartered accountant", "staff accountant", "bookkeeper"],
-    skills: ["accounting", "gaap", "reconciliation", "excel", "bookkeeping", "tax"],
+    // "bookkeeper" was an alias here, which collapsed a genuinely different
+    // occupation into this one. "chartered accountant" is a LICENSED
+    // designation, not a synonym: selecting "Accountant" must never imply the
+    // candidate holds it. Both are removed; a query containing "accountant"
+    // still reaches this entry by token.
+    aliases: ["accounting", "staff accountant", "management accountant", "financial accountant"],
+    skills: ["accounting", "gaap", "reconciliation", "excel", "month-end close", "tax"],
+    related: [
+      {
+        toId: "bookkeeper",
+        explanation:
+          "Bookkeeping records day-to-day transactions; accounting interprets them into statements, controls and tax positions. Related work, different scope — and neither implies a professional licence.",
+      },
+    ],
+  },
+  {
+    id: "bookkeeper",
+    title: "Bookkeeper",
+    category: "Finance",
+    aliases: ["bookkeeping", "accounts assistant", "accounts clerk"],
+    skills: ["bookkeeping", "accounts payable", "accounts receivable", "payroll", "excel", "reconciliation"],
+    related: [
+      {
+        toId: "accountant",
+        explanation:
+          "Many bookkeepers progress into accounting, and the two roles share ledgers and reconciliation. Accountancy adds reporting, controls and tax judgement.",
+      },
+    ],
   },
 
   // Education
@@ -533,6 +599,26 @@ function taxonomyEntryFor(roleName: string): RoleTaxonomyEntry | null {
  * An unrecognised role name still works — it is matched as its own phrase, which
  * is exactly what a candidate-entered custom role is.
  */
+/**
+ * Whether a search result is what the candidate asked for, or merely keyword
+ * overlap. "exact" covers a title or alias match; everything else that
+ * searchRoles() returned is "partial" and must be presented as an alternative,
+ * never substituted for the requested role.
+ */
+export function roleMatchKindOf(entry: RoleTaxonomyEntry, query: string): RoleMatchKind {
+  const normalized = normalizeSearchText(query);
+
+  if (normalized === "") {
+    return "partial";
+  }
+
+  if (normalizeSearchText(entry.title) === normalized) {
+    return "exact";
+  }
+
+  return entry.aliases.some((alias) => normalizeSearchText(alias) === normalized) ? "exact" : "partial";
+}
+
 export function isTitleRelevantToRole(title: string, roleName: string): boolean {
   const titleWords = tokensOf(title);
 
