@@ -67,6 +67,7 @@ const ineligibleOutcome: EligibilityGateOutcome = {
     application_support: { status: "fail", reasonCode: "APPLICATION_SUPPORT_NOT_IMPLEMENTED" },
     rate_and_abuse_controls: { status: "fail", reasonCode: "RATE_CONTROLS_NOT_IMPLEMENTED" },
     dismissed: { status: "pass" },
+    preferred_qualifiers: { status: "pass", detail: { qualifiers: [], label: null } },
   },
 };
 
@@ -83,6 +84,7 @@ const eligibleOutcome: EligibilityGateOutcome = {
     application_support: { status: "pass" },
     rate_and_abuse_controls: { status: "pass" },
     dismissed: { status: "pass" },
+    preferred_qualifiers: { status: "pass", detail: { qualifiers: [], label: null } },
   },
 };
 

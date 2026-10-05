@@ -7,6 +7,7 @@ import {
 import { isTitleRelevantToRole } from "../../shared/roleTaxonomy.js";
 import { loadSearchPreferencesForCandidate } from "./searchPreferences.js";
 import { evaluateDismissal } from "./dismissalGate.js";
+import { loadPreferredQualifiers } from "./preferredQualifiers.js";
 import { loadAutomationEntitlement } from "../billing/automationEntitlement.js";
 
 export type GateStatus = "pass" | "fail";
@@ -69,6 +70,16 @@ export interface EligibilityGates {
    * into candidate_exclusions — those are global categories, not a listing.
    */
   dismissed: GateResult;
+  /**
+   * ADVISORY ONLY — this always passes.
+   *
+   * The candidate's raw-phrase preferences ("Azure preferred") rank otherwise
+   * relevant postings and never gate anything. It occupies a gate-shaped slot so
+   * the explanation travels in the same ledger as every other reason, and its
+   * detail carries the label the UI shows. A request naming a preference we have
+   * no evidence for is still eligible, by construction.
+   */
+  preferred_qualifiers: GateResult;
   /**
    * SearchPreferences gates (Phase 1 Task 6). OPTIONAL because application_plans
    * rows written before this shipped have no such keys; the gate always writes
@@ -158,6 +169,7 @@ export async function evaluateEligibilityGates(
     companyProfileResult,
     automationEntitlement,
     dismissalGate,
+    preferredQualifierSummary,
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
@@ -182,6 +194,7 @@ export async function evaluateEligibilityGates(
     // the request.
     loadAutomationEntitlement(client, candidateId),
     evaluateDismissal(client, candidateId, vacancyId),
+    loadPreferredQualifiers(client, candidateId),
   ]);
 
   if (companyResult.error) {
@@ -217,6 +230,13 @@ export async function evaluateEligibilityGates(
     application_support: evaluateApplicationSupport(vacancy, candidateId),
     rate_and_abuse_controls: rateAndAbuseControlsGate,
     dismissed: dismissalGate,
+    preferred_qualifiers: {
+      status: "pass",
+      detail: {
+        qualifiers: preferredQualifierSummary.qualifiers,
+        label: preferredQualifierSummary.label,
+      },
+    },
     excluded_company: preferenceLedger.gates.excluded_company,
     excluded_industry: preferenceLedger.gates.excluded_industry,
     work_mode: preferenceLedger.gates.work_mode,
