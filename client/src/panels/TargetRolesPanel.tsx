@@ -2,10 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
-import { listSelectedRoles, removeRole, selectRole, type SelectedRole } from "../lib/candidateSelectedRoles";
+import {
+  listSelectedRoles,
+  removeRole,
+  replaceRoleIntent,
+  selectRole,
+  type SelectedRole,
+} from "../lib/candidateSelectedRoles";
 import { listExtractedFacts, type ExtractedFact } from "../lib/resumeExtraction";
 import { suggestRoles, type SuggestionTier } from "../lib/roleSuggestions";
-import { searchRoles } from "../lib/roleTaxonomy";
+import { relatedRoles, roleMatchKindOf, searchRoles } from "../lib/roleTaxonomy";
+import { qualifierPreferenceLabel, preferredQualifiers } from "../../../shared/candidateQualifiers";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 
 interface TargetRolesPanelProps {
@@ -18,12 +25,29 @@ const TIER_LABELS: Record<SuggestionTier, string> = {
   related: "Related roles",
 };
 
+const NOT_RECORDED = "Preference not recorded";
+
+/** How a saved selection's recorded intent reads. NULL is "not recorded", never inferred. */
+function describeIntent(role: SelectedRole): string {
+  const qualifiers = preferredQualifiers(role.rawRoleName, role.roleName);
+
+  if (role.rawRoleName === null) {
+    return NOT_RECORDED;
+  }
+
+  const label = qualifierPreferenceLabel(qualifiers);
+  return label === null ? 'Asked for "' + role.rawRoleName + '"' : 'Asked for "' + role.rawRoleName + '" · ' + label;
+}
+
 export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
   const [selectedRoles, setSelectedRoles] = useState<SelectedRole[] | null>(null);
   const [facts, setFacts] = useState<ExtractedFact[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   async function refresh() {
     const client = getSupabaseBrowserClient();
@@ -68,41 +92,109 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
     [rawSearchResults, selectedTitles],
   );
 
-  async function handleSelect(title: string) {
+  /**
+   * The phrase the candidate typed, when it says something the canonical role
+   * does not. Offered for CONFIRMATION — never saved on its own, because a query
+   * that returned several roles is not each role's intent.
+   */
+  /**
+   * The TOP-RANKED result, not an "exact" one.
+   *
+   * "Azure Data Engineer" is deliberately a PARTIAL match against "Data
+   * Engineer": the matcher ranks the closest occupation first and the extra word
+   * is what the candidate wants on top of it. Requiring an exact match here made
+   * the confirmation unreachable for precisely the case it exists for.
+   */
+  const topResult = rawSearchResults.length > 0 ? rawSearchResults[0] : null;
+
+  const intentOffer = useMemo(() => {
+    if (topResult === null || trimmedQuery === "") {
+      return null;
+    }
+
+    const qualifiers = preferredQualifiers(trimmedQuery, topResult.title);
+
+    if (qualifiers.length === 0) {
+      return null;
+    }
+
+    return { entry: topResult, qualifiers, label: qualifierPreferenceLabel(qualifiers) };
+  }, [topResult, trimmedQuery]);
+
+  /** Related roles for the top result. Shown, never auto-selected. */
+  const relatedForQuery = useMemo(
+    () => (topResult === null ? [] : relatedRoles(topResult)),
+    [topResult],
+  );
+
+  async function handleSelect(title: string, rawRoleName?: string, normalizedRoleId?: string) {
     setError(null);
+    setNotice(null);
+
+    // A DUPLICATE IS NOT A SAVE. The row already exists, and selectRole
+    // deliberately leaves its recorded intent alone, so claiming the new phrase
+    // was stored would be false. Show what IS recorded instead.
+    const existing = (selectedRoles ?? []).find((role) => role.roleName === title);
+
+    if (existing !== undefined) {
+      setNotice(title + ' is already in your list. Saved intent: ' + describeIntent(existing) + ".");
+      return;
+    }
+
     setBusyKey(title);
 
-    const result = await selectRole(getSupabaseBrowserClient(), candidateId, title);
+    const result = await selectRole(getSupabaseBrowserClient(), candidateId, title, {
+      rawRoleName: rawRoleName ?? null,
+      normalizedRoleId: normalizedRoleId ?? null,
+    });
 
     if (result.kind === "error") {
       setError(result.message);
     } else {
+      setSearchQuery("");
       await refresh();
     }
 
     setBusyKey(null);
   }
 
-  /**
-   * A custom role is any name the candidate types: candidate_selected_roles
-   * has no CHECK constraint, so this is the same write as picking a taxonomy
-   * entry, just with the query as the name.
-   */
   async function handleAddCustomRole() {
     const title = searchQuery.trim();
     if (title === "") return;
 
     setError(null);
+    setNotice(null);
     setBusyKey(title);
 
     const result = await selectRole(getSupabaseBrowserClient(), candidateId, title);
 
     if (result.kind === "error") {
+      // The query is deliberately NOT cleared: a failed save must not lose what
+      // the candidate typed.
       setError(result.message);
     } else {
-      // A custom name is not a taxonomy title, so leaving the query in place
-      // would keep reporting zero results right after a successful add.
       setSearchQuery("");
+      await refresh();
+    }
+
+    setBusyKey(null);
+  }
+
+  async function handleSaveIntent(role: SelectedRole, rawRoleName: string) {
+    setError(null);
+    setNotice(null);
+    setBusyKey(role.id);
+
+    const result = await replaceRoleIntent(getSupabaseBrowserClient(), role.id, {
+      rawRoleName,
+      normalizedRoleId: role.normalizedRoleId,
+    });
+
+    if (result.kind === "error") {
+      setError(result.message);
+    } else {
+      setNotice(describeIntent({ ...role, rawRoleName: rawRoleName.trim() === "" ? null : rawRoleName.trim() }));
+      setEditingId(null);
       await refresh();
     }
 
@@ -111,6 +203,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
 
   async function handleRemove(id: string) {
     setError(null);
+    setNotice(null);
     setBusyKey(id);
 
     const result = await removeRole(getSupabaseBrowserClient(), id);
@@ -135,6 +228,11 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
             {error}
           </p>
         )}
+        {notice !== null && (
+          <p role="status" className="text-sm text-ios-text-secondary">
+            {notice}
+          </p>
+        )}
 
         <section>
           <h3 className="text-sm font-semibold text-black">Selected roles</h3>
@@ -147,17 +245,51 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
             {selectedRoles?.map((role) => (
               <li
                 key={role.id}
-                className="flex items-center justify-between gap-2 rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
+                className="rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
               >
-                <span>{role.roleName}</span>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  disabled={busyKey === role.id}
-                  onClick={() => void handleRemove(role.id)}
-                >
-                  Remove
-                </Button>
+                <div className="flex items-center justify-between gap-2">
+                  <span>{role.roleName}</span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setEditingId(editingId === role.id ? null : role.id);
+                        setEditValue(role.rawRoleName ?? "");
+                      }}
+                    >
+                      Edit preference
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={busyKey === role.id}
+                      onClick={() => void handleRemove(role.id)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-ios-text-secondary">{describeIntent(role)}</p>
+
+                {editingId === role.id && (
+                  <div className="mt-2 space-y-2">
+                    <Input
+                      value={editValue}
+                      onChange={(event) => setEditValue(event.target.value)}
+                      aria-label={"Preferred phrase for " + role.roleName}
+                      placeholder="e.g. Azure Data Engineer"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, editValue)}>
+                        Save preference
+                      </Button>
+                      <Button size="sm" variant="secondary" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, "")}>
+                        Clear preference
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -172,27 +304,84 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
             aria-label="Search target roles"
             className="mt-2"
           />
+
           {searchResults.length > 0 && (
             <ul className="mt-2 space-y-2">
-              {searchResults.map((entry) => (
-                <li
-                  key={entry.id}
-                  className="flex items-center justify-between gap-2 rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
-                >
-                  <span>
-                    {entry.title} <span className="text-ios-text-secondary">· {entry.category}</span>
-                  </span>
-                  <Button size="sm" disabled={busyKey === entry.title} onClick={() => void handleSelect(entry.title)}>
-                    Add
-                  </Button>
-                </li>
-              ))}
+              {searchResults.map((entry) => {
+                const kind = roleMatchKindOf(entry, searchQuery);
+
+                return (
+                  <li
+                    key={entry.id}
+                    className="flex items-center justify-between gap-2 rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
+                  >
+                    <span>
+                      {entry.title} <span className="text-ios-text-secondary">· {entry.category}</span>
+                      <span className="ml-2 text-xs text-ios-text-secondary">
+                        {kind === "exact" ? "Exact match" : "Partial match · keyword only"}
+                      </span>
+                    </span>
+                    <Button
+                      size="sm"
+                      disabled={busyKey === entry.title}
+                      onClick={() => void handleSelect(entry.title, undefined, entry.id)}
+                    >
+                      Add
+                    </Button>
+                  </li>
+                );
+              })}
             </ul>
           )}
 
-          {/* Zero results is a state, not an empty list. Before this the panel
-              simply showed nothing here and left the default tiers below, which
-              is why a query the taxonomy cannot serve looked like no change. */}
+          {/* Phrase confirmation. The query is NOT saved as intent unless the
+              candidate presses this, and the canonical occupation it maps to is
+              shown beside it. */}
+          {intentOffer !== null && (
+            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
+              <p className="font-medium">Save this preference?</p>
+              <p className="mt-1 text-ios-text-secondary">
+                You searched for <span className="font-medium text-black">“{trimmedQuery}”</span>, which maps to{" "}
+                <span className="font-medium text-black">{intentOffer.entry.title}</span> · {intentOffer.label}.
+                Jobs matching {intentOffer.entry.title} will be ranked, not filtered, by this preference.
+              </p>
+              <Button
+                size="sm"
+                className="mt-2"
+                disabled={busyKey === intentOffer.entry.title}
+                onClick={() => void handleSelect(intentOffer.entry.title, trimmedQuery, intentOffer.entry.id)}
+              >
+                Save “{trimmedQuery}” as {intentOffer.entry.title}
+              </Button>
+            </div>
+          )}
+
+          {/* Related occupations: an explanation, and an explicit Add. They are
+              never selected on the candidate's behalf. */}
+          {relatedForQuery.length > 0 && (
+            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
+              <p className="font-medium">Related roles</p>
+              <ul className="mt-2 space-y-2">
+                {relatedForQuery.map((related) => (
+                  <li key={related.entry.id}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{related.entry.title}</span>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyKey === related.entry.title}
+                        onClick={() => void handleSelect(related.entry.title, undefined, related.entry.id)}
+                      >
+                        Add
+                      </Button>
+                    </div>
+                    <p className="text-xs text-ios-text-secondary">{related.explanation}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {trimmedQuery !== "" && rawSearchResults.length === 0 && (
             <div className="mt-2 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
               <p className="font-medium">No matching roles found.</p>
@@ -216,9 +405,6 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
           )}
         </section>
 
-        {/* The default tiers are hidden while a query is active: they are not
-            answers to the query, and showing them under it is exactly what made
-            an empty result look like an unchanged default. */}
         {trimmedQuery === "" &&
           (["primary", "strong", "related"] as const).map((tier) =>
           suggestionsByTier[tier].length > 0 ? (
@@ -237,7 +423,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
                       size="sm"
                       variant="secondary"
                       disabled={busyKey === suggestion.entry.title}
-                      onClick={() => void handleSelect(suggestion.entry.title)}
+                      onClick={() => void handleSelect(suggestion.entry.title, undefined, suggestion.entry.id)}
                     >
                       Add
                     </Button>
