@@ -14,6 +14,12 @@ export const ROLE_CATEGORIES = [
   "Sales",
   "Operations",
   "Customer/Support",
+  // Cross-industry coverage. The catalog is a curated starting set, not a claim
+  // of exhaustiveness; uncommon occupations still go through the custom-role
+  // path, which stores the candidate's own words.
+  "Healthcare",
+  "Finance",
+  "Education",
 ] as const;
 
 export type RoleCategory = (typeof ROLE_CATEGORIES)[number];
@@ -111,8 +117,51 @@ export const ROLE_TAXONOMY: RoleTaxonomyEntry[] = [
     id: "machine-learning-engineer",
     title: "Machine Learning Engineer",
     category: "Data",
-    aliases: ["ml engineer", "ai engineer"],
+    // "ai engineer" is deliberately NOT an alias here. An AI Engineer builds
+    // model-backed systems; an ML Engineer trains and ships models. Treating the
+    // two as one string meant a candidate who asked for AI engineering was
+    // silently given the ML Engineer role, and their saved role_name said
+    // "Machine Learning Engineer" — a substitution they never made.
+    aliases: ["ml engineer", "machine learning developer", "mlops engineer"],
     skills: ["python", "machine learning", "tensorflow", "pytorch", "mlops"],
+  },
+  {
+    id: "ai-engineer",
+    title: "AI Engineer",
+    category: "Data",
+    aliases: ["artificial intelligence engineer", "ai developer", "llm engineer", "genai engineer"],
+    skills: ["python", "llm", "prompt engineering", "rag", "vector databases", "openai"],
+  },
+
+  // Healthcare
+  {
+    id: "registered-nurse",
+    title: "Registered Nurse",
+    category: "Healthcare",
+    aliases: ["nurse", "rn", "staff nurse", "icu nurse"],
+    // Skills only: nothing here encodes a licence, a registration or a
+    // qualification, and selecting this role must never be read as evidence of
+    // one. Those are candidate facts, confirmed by the candidate, not inferred
+    // from a role choice.
+    skills: ["patient care", "clinical", "triage", "emr", "medication administration"],
+  },
+
+  // Finance
+  {
+    id: "accountant",
+    title: "Accountant",
+    category: "Finance",
+    aliases: ["accounting", "chartered accountant", "staff accountant", "bookkeeper"],
+    skills: ["accounting", "gaap", "reconciliation", "excel", "bookkeeping", "tax"],
+  },
+
+  // Education
+  {
+    id: "teacher",
+    title: "Teacher",
+    category: "Education",
+    aliases: ["educator", "instructor", "classroom teacher", "school teacher"],
+    skills: ["curriculum", "lesson planning", "classroom management", "assessment"],
   },
 
   // Product
