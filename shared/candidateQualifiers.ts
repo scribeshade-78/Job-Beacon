@@ -29,22 +29,22 @@
  * re-deriving it.
  */
 
+import { tokenizeText } from "./evidenceTokens.js";
+
 /** Words that carry no qualification and must never become a preference. */
 const STOP_WORDS = new Set([
   "a", "an", "and", "the", "of", "for", "with", "in", "on", "at", "to", "or",
   "senior", "junior", "lead", "staff", "principal", "mid", "entry", "level",
 ]);
 
+/**
+ * Qualifier tokenisation: the SHARED tokenizer (shared/evidenceTokens.ts) with
+ * filler/seniority words removed. Evidence tokens use the same algorithm, which
+ * is what lets SQL compare qualifier and evidence tokens by equality instead of
+ * re-matching text at read time.
+ */
 function tokensOf(value: string): string[] {
-  return value
-    .toLowerCase()
-    // '.' is NOT preserved: it is allowed inside tokens like "node.js" but it
-    // also ends sentences, so keeping it made "Snowflake." a token that never
-    // matched "snowflake". Splitting it out costs a rare compound term and
-    // avoids silently failing to see evidence that is plainly there.
-    .split(/[^a-z0-9+#]+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
+  return tokenizeText(value).filter((token) => !STOP_WORDS.has(token));
 }
 
 /**
