@@ -1,8 +1,30 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/**
+ * The candidate's selected target roles, including WHAT THEY ACTUALLY ASKED FOR.
+ *
+ * role_name keeps its established meaning — it is what every matcher reads — and
+ * raw_role_name/normalized_role_id are additive metadata recorded alongside it
+ * (20261001200000_candidate_selected_roles_raw_intent.sql).
+ *
+ * NULL MEANS NOT RECORDED, NEVER "same as role_name". Legacy rows have no raw
+ * intent, and reconstructing one from role_name would invent a request the
+ * candidate never made. The UI must present null as unknown.
+ *
+ * OFFICIAL SCHEMA ORDERING: this module selects and writes the two new columns,
+ * so it requires the migration. There is deliberately NO fallback query that
+ * drops them on 42703: silently discarding the metadata would look exactly like
+ * "the candidate never recorded a phrase", which is the one reading that must
+ * not be faked. Against an un-migrated database the load fails loudly.
+ */
+
 export interface SelectedRole {
   id: string;
   roleName: string;
+  /** The candidate's own phrase, or null when not recorded (legacy rows). */
+  rawRoleName: string | null;
+  /** Stable shared/roleTaxonomy.ts id, or null for a custom role / legacy row. */
+  normalizedRoleId: string | null;
   createdAt: string;
 }
 
@@ -14,15 +36,24 @@ export type ListSelectedRolesResult =
   | { kind: "success"; roles: SelectedRole[] }
   | { kind: "error"; message: string };
 
+function stringOrNull(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
 /**
- * candidate_selected_roles RLS scopes SELECT to the signed-in candidate's
- * own rows — direct browser->Supabase read, same shape as listExclusions.
+ * candidate_selected_roles RLS scopes SELECT to the signed-in candidate's own
+ * rows — direct browser->Supabase read, same shape as listExclusions.
  */
 export async function listSelectedRoles(client: Pick<SupabaseClient, "from">): Promise<ListSelectedRolesResult> {
   try {
     const { data, error } = await client
       .from("candidate_selected_roles")
-      .select("id, role_name, created_at")
+      .select("id, role_name, raw_role_name, normalized_role_id, created_at")
       .order("created_at", { ascending: true });
 
     if (error || !data) {
@@ -31,7 +62,13 @@ export async function listSelectedRoles(client: Pick<SupabaseClient, "from">): P
 
     return {
       kind: "success",
-      roles: data.map((row) => ({ id: row.id, roleName: row.role_name, createdAt: row.created_at })),
+      roles: data.map((row) => ({
+        id: row.id,
+        roleName: row.role_name,
+        rawRoleName: stringOrNull(row.raw_role_name),
+        normalizedRoleId: stringOrNull(row.normalized_role_id),
+        createdAt: row.created_at,
+      })),
     };
   } catch {
     return { kind: "error", message: GENERIC_LIST_FAILURE_MESSAGE };
@@ -40,19 +77,41 @@ export async function listSelectedRoles(client: Pick<SupabaseClient, "from">): P
 
 export type SelectRoleResult = { kind: "success" } | { kind: "error"; message: string };
 
+export interface SelectRoleOptions {
+  /**
+   * The candidate's own phrase. Written ONLY from an explicit selection or
+   * confirmation — never copied from a search box on the candidate's behalf,
+   * because a query that returned several roles is not each role's intent.
+   */
+  rawRoleName?: string | null;
+  /** The catalog id the selection came from, when it came from the catalog. */
+  normalizedRoleId?: string | null;
+}
+
 /**
  * Selecting a role already selected (unique (candidate_id, role_name)) is
  * treated as success, same idempotent-on-duplicate pattern as setExclusion.
+ *
+ * IT DELIBERATELY DOES NOT UPDATE ON CONFLICT. The uniqueness key is
+ * (candidate_id, role_name), so one row holds ONE raw phrase per canonical role;
+ * allowing that phrase to be part of the key would let the same role be selected
+ * twice with different intents, which the schema cannot express. Given the
+ * conflict, the previously recorded intent is the candidate's actual earlier
+ * request and must not be silently overwritten by a later generic query.
  */
 export async function selectRole(
   client: Pick<SupabaseClient, "from">,
   candidateId: string,
   roleName: string,
+  options: SelectRoleOptions = {},
 ): Promise<SelectRoleResult> {
   try {
-    const { error } = await client
-      .from("candidate_selected_roles")
-      .insert({ candidate_id: candidateId, role_name: roleName });
+    const { error } = await client.from("candidate_selected_roles").insert({
+      candidate_id: candidateId,
+      role_name: roleName,
+      raw_role_name: stringOrNull(options.rawRoleName),
+      normalized_role_id: stringOrNull(options.normalizedRoleId),
+    });
 
     if (error && error.code !== POSTGRES_UNIQUE_VIOLATION) {
       return { kind: "error", message: GENERIC_MUTATE_FAILURE_MESSAGE };

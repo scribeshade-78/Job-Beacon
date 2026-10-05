@@ -15,7 +15,17 @@ describe("listSelectedRoles", () => {
 
     expect(result).toEqual({
       kind: "success",
-      roles: [{ id: "role-1", roleName: "Software Engineer", createdAt: "2026-08-24T00:00:00Z" }],
+      roles: [
+        {
+          id: "role-1",
+          roleName: "Software Engineer",
+          // The row predates raw-intent recording, so both are UNKNOWN — not
+          // derived from roleName.
+          rawRoleName: null,
+          normalizedRoleId: null,
+          createdAt: "2026-08-24T00:00:00Z",
+        },
+      ],
     });
   });
 
@@ -52,7 +62,12 @@ describe("selectRole", () => {
     const result = await selectRole(client, "candidate-1", "Software Engineer");
 
     expect(result).toEqual({ kind: "success" });
-    expect(insert).toHaveBeenCalledWith({ candidate_id: "candidate-1", role_name: "Software Engineer" });
+    expect(insert).toHaveBeenCalledWith({
+      candidate_id: "candidate-1",
+      role_name: "Software Engineer",
+      raw_role_name: null,
+      normalized_role_id: null,
+    });
   });
 
   it("treats a duplicate insert (23505) as success, not an error", async () => {
