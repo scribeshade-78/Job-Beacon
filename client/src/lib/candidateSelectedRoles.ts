@@ -123,6 +123,48 @@ export async function selectRole(
   }
 }
 
+export type ReplaceRoleIntentResult = { kind: "success" } | { kind: "error"; message: string };
+
+/**
+ * DELIBERATE replacement of a recorded intent, by row id.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM selectRole. selectRole deliberately refuses to
+ * touch an existing row on a 23505 conflict, because the earlier phrase is the
+ * candidate's actual request and a later generic query must not silently replace
+ * it. That refusal leaves a real need: a candidate who genuinely wants to change
+ * what they recorded. This is the explicit, opt-in path for that — it never runs
+ * as a side effect of a normal selection.
+ *
+ * SCOPED BY RLS. The update is by primary key, and
+ * candidate_selected_roles_update_own scopes it to the caller's own rows, so one
+ * candidate cannot rewrite another's intent and no extra policy or grant is
+ * required. role_name is NOT changed: this replaces the recorded phrase, not the
+ * occupation the candidate selected.
+ */
+export async function replaceRoleIntent(
+  client: Pick<SupabaseClient, "from">,
+  id: string,
+  options: SelectRoleOptions = {},
+): Promise<ReplaceRoleIntentResult> {
+  try {
+    const { error } = await client
+      .from("candidate_selected_roles")
+      .update({
+        raw_role_name: stringOrNull(options.rawRoleName),
+        normalized_role_id: stringOrNull(options.normalizedRoleId),
+      })
+      .eq("id", id);
+
+    if (error) {
+      return { kind: "error", message: GENERIC_MUTATE_FAILURE_MESSAGE };
+    }
+
+    return { kind: "success" };
+  } catch {
+    return { kind: "error", message: GENERIC_MUTATE_FAILURE_MESSAGE };
+  }
+}
+
 export type RemoveRoleResult = { kind: "success" } | { kind: "error"; message: string };
 
 /** Delete by row id — candidate_selected_roles_delete_own RLS still scopes this to the caller's own rows. */
