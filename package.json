@@ -13,6 +13,7 @@
     "worker:applications": "node --env-file-if-exists=.env --import=tsx server/applications/cli.ts",
     "worker:daemon": "node --env-file-if-exists=.env --import=tsx server/applications/daemon.ts",
     "worker:recover-accepted": "node --env-file-if-exists=.env --import=tsx server/applications/recoverCli.ts",
+    "worker:materialize-role-matches": "node --env-file-if-exists=.env --import=tsx server/opportunities/materializeRoleMatchesCli.ts",
     "scheduler": "node --env-file-if-exists=.env --import=tsx server/scheduler.ts",
     "mcp": "node --env-file-if-exists=.env --import=tsx server/mcp/index.ts",
     "mcp:smoke": "node --env-file-if-exists=.env --import=tsx server/mcp/smoke.ts",
