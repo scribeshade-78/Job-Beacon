@@ -24,6 +24,13 @@ vi.mock("../lib/resumeExtraction", () => ({
 }));
 vi.mock("../lib/supabaseClient", () => ({ getSupabaseBrowserClient: () => ({}) }));
 
+const rankingApi = vi.hoisted(() => ({ runRankingRefresh: vi.fn() }));
+
+vi.mock("../lib/feedRankingRefresh", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/feedRankingRefresh")>();
+  return { ...actual, runRankingRefresh: rankingApi.runRankingRefresh };
+});
+
 import { TargetRolesPanel } from "./TargetRolesPanel";
 
 function selected(overrides: Partial<Record<string, unknown>> = {}) {
@@ -42,6 +49,8 @@ beforeEach(() => {
   api.selectRole.mockResolvedValue({ kind: "success" });
   api.replaceRoleIntent.mockResolvedValue({ kind: "success" });
   api.removeRole.mockResolvedValue({ kind: "success" });
+  // Default: the bounded poll simply hit its cap. Individual tests override it.
+  rankingApi.runRankingRefresh.mockResolvedValue({ kind: "timeout", result: null });
 });
 
 afterEach(() => {
@@ -215,5 +224,37 @@ describe("custom roles", () => {
     await waitFor(() =>
       expect(api.selectRole).toHaveBeenCalledWith(expect.anything(), "candidate-1", "Marine Biologist"),
     );
+  });
+});
+
+describe("ranking refresh reporting", () => {
+  it("reports the SAVE as succeeded even when the follow-up ranking refresh fails", async () => {
+    rankingApi.runRankingRefresh.mockResolvedValue({
+      kind: "done",
+      result: {
+        outcome: "failed",
+        phase: "matching",
+        state: "updating",
+        identity: "id-1",
+        attempts: 1,
+        retryable: true,
+        lastError: "db down",
+        deadlineReached: false,
+      },
+    });
+
+    render(<TargetRolesPanel candidateId="candidate-1" />);
+    await screen.findByText(/No target roles yet/);
+
+    await search("Azure Data Engineer");
+    fireEvent.click(screen.getByRole("button", { name: /Save “Azure Data Engineer” as Data Engineer/ }));
+
+    // The save happened and IS reported; the refresh is a separate, retryable line.
+    await waitFor(() => expect(api.selectRole).toHaveBeenCalled());
+    await waitFor(() => expect(rankingApi.runRankingRefresh).toHaveBeenCalledWith(expect.objectContaining({ force: true })));
+    expect(await screen.findByText(/Preference ranking could not be updated/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
+    // NEVER re-reported as a save failure.
+    expect(screen.queryByText(/Could not update your target roles/i)).toBeNull();
   });
 });

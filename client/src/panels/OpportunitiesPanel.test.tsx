@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Router } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
@@ -62,6 +62,13 @@ const fixtures = vi.hoisted(() => ({
 
 vi.mock("../lib/supabaseClient", () => ({ getSupabaseBrowserClient: () => ({}) }));
 
+const rankingApi = vi.hoisted(() => ({ runRankingRefresh: vi.fn() }));
+
+vi.mock("../lib/feedRankingRefresh", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/feedRankingRefresh")>();
+  return { ...actual, runRankingRefresh: rankingApi.runRankingRefresh };
+});
+
 vi.mock("../lib/opportunities", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/opportunities")>();
   return {
@@ -104,6 +111,13 @@ import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { listOpportunities } from "../lib/opportunities";
 
 afterEach(cleanup);
+
+beforeEach(() => {
+  // The panel now asks the server to do real refresh work when its state is not
+  // current. Default the poll to its cap so no test reaches the network; the
+  // refresh-specific tests override this.
+  rankingApi.runRankingRefresh.mockResolvedValue({ kind: "timeout", result: null });
+});
 
 function renderPanel() {
   return render(
@@ -201,5 +215,25 @@ describe("OpportunitiesPanel — ranking generation identity", () => {
 
     await waitFor(() => expect(screen.queryByText("Teacher Role")).toBeNull());
     expect(screen.getByText("Azure Data Engineer")).toBeTruthy();
+  });
+});
+
+describe("OpportunitiesPanel — real ranking refresh", () => {
+  it("requests the refresh when the loaded state is updating, and Retry forces the real path", async () => {
+    rankingApi.runRankingRefresh.mockResolvedValue({ kind: "timeout", result: null });
+
+    renderPanel();
+    await screen.findByText("Azure Data Engineer");
+
+    await waitFor(() =>
+      expect(rankingApi.runRankingRefresh).toHaveBeenCalledWith(expect.objectContaining({ force: false })),
+    );
+
+    rankingApi.runRankingRefresh.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+
+    await waitFor(() =>
+      expect(rankingApi.runRankingRefresh).toHaveBeenCalledWith(expect.objectContaining({ force: true })),
+    );
   });
 });

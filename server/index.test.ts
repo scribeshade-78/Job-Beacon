@@ -10,6 +10,7 @@ import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
@@ -63,6 +64,13 @@ vi.mock("./mailbox/matchBatch.js", () => ({
 // server/opportunities/runner.test.ts.
 vi.mock("./opportunities/runner.js", () => ({
   runFitAnalysisBatch: vi.fn(),
+}));
+
+// POST /api/opportunities/ranking-refresh — internals covered by
+// server/opportunities/rankingRefresh.test.ts; here only auth-gating, identity
+// derivation and status mapping.
+vi.mock("./opportunities/rankingRefresh.js", () => ({
+  runRankingRefresh: vi.fn(),
 }));
 
 // Task H1 billing. The pure logic is covered directly by
@@ -4228,3 +4236,70 @@ function unreadyReadinessClient() {
     },
   } as never;
 }
+
+describe("POST /api/opportunities/ranking-refresh", () => {
+  const mockedRunRankingRefresh = vi.mocked(runRankingRefresh);
+
+  beforeEach(() => {
+    mockedRunRankingRefresh.mockReset();
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/opportunities/ranking-refresh`, { method: "POST" });
+
+      expect(response.status).toBe(401);
+      expect(mockedRunRankingRefresh).not.toHaveBeenCalled();
+    });
+  });
+
+  it("derives the candidate ONLY from the verified session, never from the body", async () => {
+    const result = {
+      outcome: "succeeded" as const,
+      phase: "matching" as const,
+      state: "current",
+      identity: "id-1",
+      attempts: 0,
+      retryable: false,
+      lastError: null,
+      evidenceIndexed: 0,
+      scanned: 0,
+      matched: 0,
+      deadlineReached: false,
+    };
+    mockedRunRankingRefresh.mockResolvedValueOnce(result);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/ranking-refresh`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token", "Content-Type": "application/json" },
+          // A forged candidate id must be ignored.
+          body: JSON.stringify({ force: true, candidateId: "someone-else" }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(result);
+        expect(mockedRunRankingRefresh).toHaveBeenCalledWith(expect.anything(), "user-123", { force: true });
+      },
+    );
+  });
+
+  it("returns 500 with a generic message when the workflow throws", async () => {
+    mockedRunRankingRefresh.mockRejectedValueOnce(new Error("lease unavailable"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/ranking-refresh`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "Failed to refresh preference ranking" });
+      },
+    );
+  });
+});

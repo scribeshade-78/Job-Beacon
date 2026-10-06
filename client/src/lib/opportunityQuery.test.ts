@@ -195,26 +195,14 @@ describe("applyPreferenceExclusions", () => {
 });
 
 describe("applyOpportunitySort", () => {
-  it("orders best match by priority, recency then id, so paging is stable", () => {
+  it("always leads best match with the qualifier count, then priority, recency and id", () => {
     const { query, calls } = recorder();
     const result = applyOpportunitySort(query, "best_match");
 
-    // The fallback (ranking not current) OMITS the qualifier key: it is exactly
-    // the existing priority order plus the deterministic id tie-break.
-    expect(calls).toEqual([
-      "order:priority_score:desc",
-      "order:last_seen_at:desc",
-      "order:id:asc",
-    ]);
-    expect(result.applied).toBe("best_match");
-  });
-
-  it("prepends the qualifier count for best match ONLY when ranking is current", () => {
-    const { query, calls } = recorder();
-    const result = applyOpportunitySort(query, "best_match", { rankingCurrent: true });
-
-    // Before paging, so a stronger match on a later page still outranks a weaker
-    // one on page one; priority is the first tie-break.
+    // UNCONDITIONAL. When ranking is not current the view returns NULL for every
+    // row, so the first key is a no-op and the order is the priority order; when
+    // it is current it is the real preference order, applied before paging. This
+    // is what removes the need for a separate status read to choose the ORDER BY.
     expect(calls).toEqual([
       "order:matched_qualifier_count:desc",
       "order:priority_score:desc",
@@ -226,7 +214,7 @@ describe("applyOpportunitySort", () => {
 
   it("never applies the qualifier key to an explicit alternative sort", () => {
     const { query, calls } = recorder();
-    applyOpportunitySort(query, "newest", { rankingCurrent: true });
+    applyOpportunitySort(query, "newest");
 
     expect(calls).toEqual(["order:discovered_at:desc", "order:last_seen_at:desc"]);
   });
@@ -250,6 +238,7 @@ describe("applyOpportunitySort", () => {
       const result = applyOpportunitySort(query, sortId);
 
       expect(calls).toEqual([
+        "order:matched_qualifier_count:desc",
         "order:priority_score:desc",
         "order:last_seen_at:desc",
         "order:id:asc",

@@ -229,40 +229,33 @@ describe("formatSalary", () => {
 });
 
 describe("listOpportunities — query shape", () => {
-  it("reads the ranking status and then the RANKED view, never the base view", async () => {
-    const { client, recorded } = makeClient({ data: [] });
+  it("reads rows from the RANKED view and never the base view", async () => {
+    const { client, recorded } = makeClient({ data: [viewRow()] });
     await listOpportunities(client);
 
-    // The status is informational; the rows come from the ranked read model.
-    expect(recorded.tables).toContain("candidate_ranking_status");
-    expect(recorded.tables).toContain("candidate_ranked_opportunities");
     expect(recorded.table).toBe("candidate_ranked_opportunities");
     expect(recorded.tables).not.toContain("candidate_opportunities");
   });
 
-  it("falls back to priority, recency then id when ranking is not current", async () => {
+  it("does not need the status view at all when the page has rows", async () => {
+    const { client, recorded } = makeClient({ data: [viewRow()] });
+    await listOpportunities(client);
+
+    // State and identity come from the rows, in the same snapshot, so an earlier
+    // status read cannot describe a different generation than the rows.
+    expect(recorded.tables).not.toContain("candidate_ranking_status");
+  });
+
+  it("leads best match with the qualifier count, then priority, recency and id", async () => {
     const { client, recorded } = makeClient({ data: [] });
     await listOpportunities(client);
 
-    expect(recorded.orders[0]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
-    expect(recorded.orders[1]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
-    // Deterministic final tie-break, so "Load more" cannot repeat or skip a row.
-    expect(recorded.orders[2]).toEqual(["id", { ascending: true, nullsFirst: false }]);
-  });
-
-  it("orders by qualifier count FIRST, before paging, when ranking is current", async () => {
-    const { client, recorded } = makeClient(
-      { data: [] },
-      { status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current" } },
-    );
-    await listOpportunities(client);
-
-    expect(recorded.orders[0]).toEqual([
-      "matched_qualifier_count",
-      { ascending: false, nullsFirst: false },
-    ]);
+    // Always first, before paging. It is a no-op NULL when ranking is not current,
+    // so one ORDER BY serves both states and no earlier read chooses it.
+    expect(recorded.orders[0]).toEqual(["matched_qualifier_count", { ascending: false, nullsFirst: false }]);
     expect(recorded.orders[1]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
-    expect(recorded.range).toEqual([0, OPPORTUNITIES_PAGE_SIZE - 1]);
+    expect(recorded.orders[2]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
+    expect(recorded.orders[3]).toEqual(["id", { ascending: true, nullsFirst: false }]);
   });
 
   it("requests the default page when no options are given", async () => {
@@ -291,14 +284,14 @@ describe("listOpportunities — query shape", () => {
     const { client, recorded } = makeClient({ data: [] });
     await listOpportunities(client);
 
-    // Excluded in the query rather than after the fetch, so a page still
-    // returns a full page of real rows instead of a short one.
     expect(recorded.nots).toContainEqual(["source_code", "eq", "local_fixture"]);
   });
 
-  it("returns the exact filtered count and the ranking identity", async () => {
-    const { client } = makeClient({ data: [viewRow()], count: 42 }, {
-      status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current|cv=7" },
+  it("returns the exact filtered count and takes state and identity from the rows", async () => {
+    const row = viewRow({ ranking_state: "current", ranking_identity: "state=current|cv=7" });
+    const { client } = makeClient({ data: [row], count: 42 }, {
+      // A DIFFERENT status snapshot on purpose: it must not win.
+      status: { ...DEFAULT_STATUS, state: "updating", ranking_identity: "state=updating" },
     });
     const result = await listOpportunities(client);
 
@@ -306,6 +299,18 @@ describe("listOpportunities — query shape", () => {
     expect(result.totalCount).toBe(42);
     expect(result.ranking.state).toBe("current");
     expect(result.ranking.identity).toBe("state=current|cv=7");
+  });
+
+  it("consults the status view only for an empty page", async () => {
+    const { client, recorded } = makeClient({ data: [] }, {
+      status: { ...DEFAULT_STATUS, state: "updating", ranking_identity: "status-identity" },
+    });
+    const result = await listOpportunities(client);
+
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(recorded.tables).toContain("candidate_ranking_status");
+    expect(result.ranking.state).toBe("updating");
+    expect(result.ranking.identity).toBe("status-identity");
   });
 
   it("surfaces a status read failure as an error, never as a default state", async () => {
@@ -695,10 +700,13 @@ describe("listOpportunities — the ranked path does not re-sort locally", () =>
   }
 
   it("preserves SQL's ranked order instead of re-sorting by refreshed urgency", async () => {
-    const { client } = makeClient(
-      { data: urgentVsFlat(), count: 2 },
-      { status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current" } },
-    );
+    // State now comes FROM THE ROWS, so the current path is marked on them.
+    const rows = urgentVsFlat().map((row) => ({
+      ...row,
+      ranking_state: "current",
+      ranking_identity: "state=current",
+    }));
+    const { client } = makeClient({ data: rows, count: 2 });
     const result = await listOpportunities(client);
 
     if (result.kind !== "success") throw new Error("expected success");

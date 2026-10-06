@@ -97,6 +97,7 @@ import { runApplicationBatch } from "./applications/runner.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
 import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
 import {
@@ -685,6 +686,42 @@ export function createApp(options: CreateAppOptions = {}) {
         const message = error instanceof Error ? error.message : String(error);
         console.error("Opportunity refresh failed:", message);
         response.status(500).json({ error: "Failed to refresh opportunities" });
+      }
+    },
+  );
+
+  /**
+   * The MANUAL preference-ranking refresh, driven by the feed and the target-roles
+   * page — never by a cron. Each call runs BOUNDED work to a wall-clock deadline
+   * and persists progress; the client polls until the workflow settles.
+   *
+   * IDENTITY COMES ONLY FROM THE VERIFIED SESSION. request.user.id is the JWT
+   * subject, which equals candidate_profiles.id; a body-supplied candidate id is
+   * never read, so one candidate cannot make the server do work for another.
+   *
+   * IT REQUIRES NOTHING BUT A SESSION. Manual browsing and matching need no
+   * automation consent, no paid plan and no parsed resume — this route calls only
+   * the tokenizer/indexer/materialiser, never a model or a provider, and never
+   * submits anything. It shares the ingestion limiter because both are
+   * candidate-triggered background work and one budget is easier to reason about.
+   */
+  app.post(
+    "/api/opportunities/ranking-refresh",
+    requireAuth,
+    ingestionRefreshRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+
+      try {
+        const result = await runRankingRefresh(resolveServiceClient(), request.user!.id, {
+          force: body.force === true,
+        });
+        response.set("Cache-Control", "no-store");
+        response.status(200).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Ranking refresh failed:", message);
+        response.status(500).json({ error: "Failed to refresh preference ranking" });
       }
     },
   );

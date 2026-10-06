@@ -331,23 +331,28 @@ export function applyPreferenceExclusions<Q extends FilterableQuery>(
  * Applies a sort. An unavailable sort falls back to the default rather than
  * ordering arbitrarily.
  *
- * THE QUALIFIER KEY IS FOR BEST MATCH ONLY, AND ONLY WHEN RANKING IS CURRENT.
- * In the fallback it is omitted, so the order is exactly the existing priority
- * order. On the ranked path it comes FIRST, before paging, so a stronger match
- * on a later page still ranks ahead of a weaker one on page one; priority is the
- * tie-break and the shared spec's id tie-break makes paging deterministic.
+ * THE QUALIFIER KEY IS FOR BEST MATCH ONLY, AND IT IS ALWAYS FIRST. When ranking
+ * is current the ranked view returns the real matched count, so this orders by
+ * preference BEFORE paging and a stronger match on a later page still outranks a
+ * weaker one on page one. When ranking is NOT current the view returns NULL for
+ * every row, so this key is a no-op and the order is exactly the priority order.
+ *
+ * WHY UNCONDITIONAL. Deciding whether to include it from a separate status read
+ * meant the ORDER BY could be chosen from an older snapshot than the rows. A NULL
+ * column is the same as omitting it, so including it always removes that coupling
+ * with no behavioural cost, and priority plus the shared id tie-break keep paging
+ * deterministic.
  */
 export function applyOpportunitySort<Q extends FilterableQuery>(
   query: Q,
   sortId: SortId = DEFAULT_SORT,
-  options: { rankingCurrent?: boolean } = {},
 ): { query: Q; applied: SortId } {
   const requested = SORT_FIELDS_BY_ID[sortId];
   const effective = requested.orderBy.length > 0 ? requested : SORT_FIELDS_BY_ID[DEFAULT_SORT];
 
   let next = query;
 
-  if (effective.id === "best_match" && options.rankingCurrent === true) {
+  if (effective.id === "best_match") {
     next = next.order("matched_qualifier_count", { ascending: false, nullsFirst: false }) as Q;
   }
 

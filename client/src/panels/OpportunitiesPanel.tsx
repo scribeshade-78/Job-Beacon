@@ -54,6 +54,7 @@ import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { describeRankingRefresh, runRankingRefresh } from "../lib/feedRankingRefresh";
 import { formatSalary } from "../lib/opportunities";
 import { formatDistanceToNow } from "date-fns";
 
@@ -132,6 +133,103 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const requestSeq = useRef(0);
   /** Bumped by a Retry control to force the single read effect to run again. */
   const [reloadToken, setReloadToken] = useState(0);
+  /**
+   * The state of the real ranking refresh this panel requested. Kept apart from
+   * "querying" so a refresh is never confused with a page load.
+   */
+  const [feedRefresh, setFeedRefresh] = useState<
+    | { kind: "idle" }
+    | { kind: "running"; text: string }
+    | { kind: "done"; text: string }
+    | { kind: "failed"; text: string; retryable: boolean }
+    | { kind: "stalled"; text: string }
+  >({ kind: "idle" });
+  const feedRefreshAbort = useRef<AbortController | null>(null);
+  /** The ranking identity+state a refresh was last started for, so it is not restarted per render. */
+  const feedRefreshKey = useRef<string | null>(null);
+
+  const startRankingRefresh = useCallback(
+    (force: boolean) => {
+      feedRefreshAbort.current?.abort();
+      const controller = new AbortController();
+      feedRefreshAbort.current = controller;
+
+      setFeedRefresh({ kind: "running", text: "Updating your preference ranking…" });
+
+      void runRankingRefresh({
+        force,
+        signal: controller.signal,
+        onUpdate: (result) => {
+          if (!controller.signal.aborted && result.outcome === "running") {
+            setFeedRefresh({ kind: "running", text: describeRankingRefresh(result) });
+          }
+        },
+      })
+        .then((run) => {
+          if (controller.signal.aborted) return;
+
+          if (run.kind === "timeout") {
+            // Bounded polling stopped; the candidate can retry. Never a silent loop.
+            setFeedRefresh({ kind: "stalled", text: "Still updating your ranking…" });
+            return;
+          }
+
+          if (run.kind === "error") {
+            setFeedRefresh({ kind: "failed", text: run.message, retryable: run.retryable });
+            return;
+          }
+
+          if (run.result.outcome === "failed") {
+            setFeedRefresh({
+              kind: "failed",
+              text: describeRankingRefresh(run.result),
+              retryable: run.result.retryable,
+            });
+            return;
+          }
+
+          setFeedRefresh({ kind: "done", text: describeRankingRefresh(run.result) });
+          // Re-read page one so the rows reflect the freshly derived ranking.
+          setReloadToken((value) => value + 1);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setFeedRefresh({ kind: "failed", text: "Could not update your ranking.", retryable: true });
+          }
+        });
+    },
+    [],
+  );
+
+  useEffect(() => () => feedRefreshAbort.current?.abort(), []);
+
+  /**
+   * THE ONE TRIGGER. A refresh is requested ONLY when the loaded rows say the
+   * ranking is updating or unavailable, and only once per (identity, state): a
+   * page of pagination or a re-render never restarts it. It becomes current after
+   * the reload, which resets the key, so the loop terminates.
+   */
+  useEffect(() => {
+    const state = ranking?.state;
+
+    if (state !== "updating" && state !== "unavailable") {
+      feedRefreshKey.current = null;
+      return;
+    }
+
+    if (feedRefresh.kind === "running" || feedRefresh.kind === "stalled") {
+      return;
+    }
+
+    const key = (ranking?.identity ?? "") + ":" + state;
+
+    if (feedRefreshKey.current === key) {
+      return;
+    }
+
+    feedRefreshKey.current = key;
+    startRankingRefresh(false);
+  }, [ranking?.state, ranking?.identity, feedRefresh.kind, startRankingRefresh]);
 
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
@@ -719,12 +817,16 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             role="status"
             className="mb-3 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
           >
-            {ranking.state === "unavailable"
-              ? "Preference ranking is unavailable right now — showing priority order."
-              : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}{" "}
+            {feedRefresh.kind === "running" || feedRefresh.kind === "stalled"
+              ? feedRefresh.text
+              : ranking.state === "unavailable"
+                ? "Preference ranking is unavailable right now — showing priority order."
+                : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}
+            {feedRefresh.kind === "failed" && <> {feedRefresh.text}</>}{" "}
+            {/* Retry invokes the REAL refresh path, not a reload of the same stale view. */}
             <button
               type="button"
-              onClick={() => setReloadToken((value) => value + 1)}
+              onClick={() => startRankingRefresh(true)}
               className="font-medium text-ios-blue hover:underline"
             >
               Retry

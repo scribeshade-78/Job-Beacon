@@ -479,21 +479,42 @@ function mapOpportunityRow(row: OpportunityRow): OpportunitySummary {
   };
 }
 
+/** The ranking state and identity carried by the ROWS themselves. */
+function rankingFromRows(row: OpportunityRow): RankingInfo {
+  return {
+    state: row.ranking_state,
+    identity: row.ranking_identity,
+    // Generation details exist only on candidate_ranking_status. They are null on
+    // the row path on purpose: inventing them from an older read is the exact
+    // snapshot mismatch this loader now avoids.
+    roleMatchGeneration: null,
+    corpusVersion: null,
+    matcherVersion: null,
+    qualifierGeneration: null,
+    tokenizerVersion: null,
+    evidenceIndexedAt: null,
+    evidenceRowCount: null,
+  };
+}
+
 /**
  * Reads the candidate_ranked_opportunities view (20261001340000), layered on
- * candidate_opportunities: same verified + active filter and same
- * security_invoker candidate scoping, plus the ranking columns.
+ * candidate_opportunities: same verified + active filter and same security_invoker
+ * candidate scoping, plus the ranking columns.
  *
- * ORDERING AND PAGING HAPPEN IN SQL, BEFORE THE RANGE. When ranking is current
- * the best-match order is matched_qualifier_count DESC, priority_score DESC NULLS
- * LAST, last_seen_at DESC NULLS LAST, id ASC — so a stronger match on a later
- * page still ranks ahead of a weaker one on page one. There is NO local re-sort
- * on that path: re-sorting a fetched page can contradict the promised order and
- * the exact count. The fallback (not current) omits the qualifier key and keeps
- * the existing priority order.
+ * ROWS, STATE AND IDENTITY COME FROM ONE SNAPSHOT. The ranked view recomputes the
+ * ranking state for the same rows it returns, so this function takes state and
+ * identity FROM THE ROWS rather than from an earlier status read. A status change
+ * between two requests therefore cannot make the ORDER BY, the labels, or the page
+ * identity describe a different snapshot than the rows. The status view is
+ * consulted only when the page is EMPTY, where no row can carry them.
  *
- * COUNTS ARE EXACT for the same filtered eligible set, taken before the range,
- * so hasMore cannot disagree with the page.
+ * Ordering and paging happen in SQL, before the range. Best match always leads
+ * with matched_qualifier_count (a no-op NULL when ranking is not current), then
+ * priority, recency and the deterministic id tie-break — so a stronger match on a
+ * later page still outranks a weaker one on page one. There is NO local reordering
+ * on the current ranked path; the local urgency re-sort is confined to the
+ * fallback and is decided from the rows' own state.
  */
 export async function listOpportunities(
   client: Pick<SupabaseClient, "from">,
@@ -503,11 +524,6 @@ export async function listOpportunities(
   const offset = options.offset ?? 0;
 
   try {
-    const ranking = await readRankingStatus(client);
-    const rankingCurrent = ranking.state === "current";
-
-    // Filter, then exclude, then sort, then page — the order the clauses are
-    // documented in shared/opportunityQuery.ts, and the order a log should show.
     const selected = client
       .from("candidate_ranked_opportunities")
       .select(VIEW_COLUMNS, { count: "exact" }) as unknown as FilterableQuery;
@@ -515,11 +531,6 @@ export async function listOpportunities(
     const filtered = applyOpportunityFilters(selected, options.filters ?? EMPTY_FILTERS);
 
     const { query: excluded } = applySearchPreferenceConstraints(
-      // The [MOCK] local-fixture postings are real rows in this view, so they
-      // are excluded here rather than deleted — the application-engine fixtures
-      // depend on them, and removing production rows is a separate decision.
-      // Applied BEFORE paging on purpose: filtering after range() would make a
-      // page silently return fewer than OPPORTUNITIES_PAGE_SIZE rows.
       filtered.not("source_code", "eq", FIXTURE_SOURCE_CODE) as FilterableQuery,
       options.searchPreferences ?? null,
     );
@@ -530,13 +541,8 @@ export async function listOpportunities(
         ? excluded
         : (excluded.not("id", "in", inList(excludeIds)) as FilterableQuery);
 
-    const { query: sorted, applied: appliedSort } = applyOpportunitySort(withoutDismissed, options.sort, {
-      rankingCurrent,
-    });
+    const { query: sorted, applied: appliedSort } = applyOpportunitySort(withoutDismissed, options.sort);
 
-    // The structural FilterableQuery type describes only what this module needs;
-    // range() is not part of it because nothing in the filter or sort logic
-    // pages, so it is reached through the real builder here.
     const paged = sorted as unknown as {
       range(
         from: number,
@@ -553,9 +559,9 @@ export async function listOpportunities(
     const rows = data as unknown as OpportunityRow[];
     const opportunities = rows.map(mapOpportunityRow);
 
-    // The local urgency re-sort is CONFINED TO THE FALLBACK. On the ranked path
-    // SQL's order is the answer, and re-sorting a page would contradict it.
-    if (appliedSort === "best_match" && !rankingCurrent) {
+    const ranking = rows.length > 0 ? rankingFromRows(rows[0]) : await readRankingStatus(client);
+
+    if (appliedSort === "best_match" && ranking.state !== "current") {
       sortByPriority(opportunities);
     }
 
@@ -576,20 +582,18 @@ export async function listOpportunities(
 /**
  * Reads specific vacancies by id from the SAME ranked read model, so a by-id row
  * carries the same ranking state, evidence marker and score semantics as a paged
- * one.
+ * one. State and identity come from the rows for the same reason as above.
  *
  * NO ORDERING IS IMPOSED. The caller has an explicit id list; it must not treat
- * the result as globally ranked, and the panel no longer prepends it to a paged
- * list (that would imply a global order this query never produced).
+ * the result as globally ranked.
  */
 export async function listOpportunitiesByIds(
   client: Pick<SupabaseClient, "from">,
   vacancyIds: readonly string[],
 ): Promise<ListOpportunitiesResult> {
   try {
-    const ranking = await readRankingStatus(client);
-
     if (vacancyIds.length === 0) {
+      const ranking = await readRankingStatus(client);
       return { kind: "success", opportunities: [], hasMore: false, totalCount: 0, ranking };
     }
 
@@ -603,6 +607,7 @@ export async function listOpportunitiesByIds(
     }
 
     const rows = data as unknown as OpportunityRow[];
+    const ranking = rows.length > 0 ? rankingFromRows(rows[0]) : await readRankingStatus(client);
 
     return {
       kind: "success",

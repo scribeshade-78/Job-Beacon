@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -14,6 +14,7 @@ import { suggestRoles, type SuggestionTier } from "../lib/roleSuggestions";
 import { relatedRoles, roleMatchKindOf, searchRoles } from "../lib/roleTaxonomy";
 import { qualifierPreferenceLabel, preferredQualifiers } from "../../../shared/candidateQualifiers";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { describeRankingRefresh, runRankingRefresh } from "../lib/feedRankingRefresh";
 
 interface TargetRolesPanelProps {
   candidateId: string;
@@ -26,6 +27,17 @@ const TIER_LABELS: Record<SuggestionTier, string> = {
 };
 
 const NOT_RECORDED = "Preference not recorded";
+
+/**
+ * The ranking refresh is reported SEPARATELY from the role save. A save that
+ * succeeded is a success even if the derived refresh afterwards fails, so the two
+ * never share an error slot.
+ */
+type RankingRefreshState =
+  | { kind: "idle" }
+  | { kind: "running"; text: string }
+  | { kind: "done"; text: string }
+  | { kind: "failed"; text: string; retryable: boolean };
 
 /** How a saved selection's recorded intent reads. NULL is "not recorded", never inferred. */
 function describeIntent(role: SelectedRole): string {
@@ -48,6 +60,62 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [rankingRefresh, setRankingRefresh] = useState<RankingRefreshState>({ kind: "idle" });
+  const refreshAbort = useRef<AbortController | null>(null);
+
+  /**
+   * Fires the REAL refresh path (an authenticated server call), then polls it to
+   * completion. It is deliberately independent of the save: the save result is
+   * already reported, and this only adds a ranking status beside it. Polling stops
+   * on completion, on the local cap, or when the panel unmounts (the abort signal).
+   */
+  const startRankingRefresh = useCallback((force: boolean) => {
+    refreshAbort.current?.abort();
+    const controller = new AbortController();
+    refreshAbort.current = controller;
+
+    setRankingRefresh({ kind: "running", text: "Your preference is saved. Updating your ranking…" });
+
+    void runRankingRefresh({
+      force,
+      signal: controller.signal,
+      onUpdate: (result) => {
+        if (!controller.signal.aborted && result.outcome === "running") {
+          setRankingRefresh({ kind: "running", text: describeRankingRefresh(result) });
+        }
+      },
+    })
+      .then((run) => {
+        if (controller.signal.aborted) return;
+
+        if (run.kind === "done") {
+          if (run.result.outcome === "failed") {
+            setRankingRefresh({
+              kind: "failed",
+              text: describeRankingRefresh(run.result),
+              retryable: run.result.retryable,
+            });
+          } else {
+            setRankingRefresh({ kind: "done", text: describeRankingRefresh(run.result) });
+          }
+          return;
+        }
+
+        if (run.kind === "timeout") {
+          setRankingRefresh({ kind: "running", text: "Still updating your ranking…" });
+          return;
+        }
+
+        setRankingRefresh({ kind: "failed", text: run.message, retryable: run.retryable });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setRankingRefresh({ kind: "failed", text: "Could not update your ranking.", retryable: true });
+        }
+      });
+  }, []);
+
+  useEffect(() => () => refreshAbort.current?.abort(), []);
 
   async function refresh() {
     const client = getSupabaseBrowserClient();
@@ -153,6 +221,8 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
     } else {
       setSearchQuery("");
       await refresh();
+      // The save SUCCEEDED. The ranking refresh is separate and never changes that.
+      startRankingRefresh(true);
     }
 
     setBusyKey(null);
@@ -175,6 +245,8 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
     } else {
       setSearchQuery("");
       await refresh();
+      // The save SUCCEEDED. The ranking refresh is separate and never changes that.
+      startRankingRefresh(true);
     }
 
     setBusyKey(null);
@@ -196,6 +268,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
       setNotice(describeIntent({ ...role, rawRoleName: rawRoleName.trim() === "" ? null : rawRoleName.trim() }));
       setEditingId(null);
       await refresh();
+      startRankingRefresh(true);
     }
 
     setBusyKey(null);
@@ -212,6 +285,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
       setError(result.message);
     } else {
       await refresh();
+      startRankingRefresh(true);
     }
 
     setBusyKey(null);
@@ -231,6 +305,35 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
         {notice !== null && (
           <p role="status" className="text-sm text-ios-text-secondary">
             {notice}
+          </p>
+        )}
+
+        {/* SEPARATE FROM error/notice ON PURPOSE. A successful save is reported
+            above even when this refresh fails; a refresh failure is its own,
+            retryable condition and never reads as "your preference was not
+            saved". */}
+        {rankingRefresh.kind === "running" && (
+          <p role="status" aria-live="polite" className="text-sm text-ios-text-secondary">
+            {rankingRefresh.text}
+          </p>
+        )}
+        {rankingRefresh.kind === "done" && (
+          <p role="status" className="text-sm text-ios-text-secondary">
+            {rankingRefresh.text}
+          </p>
+        )}
+        {rankingRefresh.kind === "failed" && (
+          <p role="status" className="text-sm text-status-blocked-fg">
+            {rankingRefresh.text}{" "}
+            {rankingRefresh.retryable && (
+              <button
+                type="button"
+                onClick={() => startRankingRefresh(true)}
+                className="font-medium text-ios-blue hover:underline"
+              >
+                Retry
+              </button>
+            )}
           </p>
         )}
 
