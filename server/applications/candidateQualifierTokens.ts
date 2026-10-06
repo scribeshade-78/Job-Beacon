@@ -68,8 +68,30 @@ export interface RefreshQualifierTokensResult {
   candidateId: string;
   rolesConsidered: number;
   rowsWritten: number;
-  /** The generation just published; older generations are unreachable from here. */
   generation: string;
+  /**
+   * "published" when this generation became current. "stale" when the
+   * candidate's intent moved while this refresh was working, so a NEWER refresh
+   * owns publication and this one deliberately did not overwrite it. Stale is
+   * not an error: it is the race being lost safely.
+   */
+  outcome: "published" | "stale";
+}
+
+/**
+ * Fingerprint of a candidate's whole confirmed intent set.
+ *
+ * Sorted, so the same selections in a different order are the same intent, and
+ * it changes when a role is added, removed, edited or cleared — which is exactly
+ * what makes the publication compare-and-swap meaningful.
+ */
+export function intentFingerprintOf(roles: readonly SelectedRoleIntent[]): string {
+  const canonical = [...roles]
+    .map((role) => role.roleName + "\u0001" + (role.rawRoleName ?? ""))
+    .sort()
+    .join("\u0002");
+
+  return evidenceFingerprint({ title: canonical, description: null });
 }
 
 /** The generation a candidate's CURRENT preferences are published under. */
@@ -126,6 +148,7 @@ export async function refreshCandidateQualifierTokens(
   const rows = deriveCandidateQualifierRows(roles);
   const generation = randomUUID();
   const now = new Date().toISOString();
+  const derivedFingerprint = intentFingerprintOf(roles);
 
   if (rows.length > 0) {
     const { error: insertError } = await client.from("candidate_qualifier_tokens").insert(
@@ -147,18 +170,86 @@ export async function refreshCandidateQualifierTokens(
     }
   }
 
-  const { error: pointerError } = await client.from("candidate_qualifier_generations").upsert(
-    {
+  // RE-READ INTENT AT PUBLICATION TIME. This refresh may have been in flight
+  // while the candidate edited or cleared their preference. Publishing a
+  // derivation of the OLD intent would silently revert that edit while looking
+  // successful, so the derivation is compared against intent as it is NOW.
+  const { data: freshData, error: freshError } = await client
+    .from("candidate_selected_roles")
+    .select("role_name, raw_role_name")
+    .eq("candidate_id", candidateId);
+
+  if (freshError) {
+    throw freshError;
+  }
+
+  const freshRoles = ((freshData ?? []) as Array<{ role_name: string; raw_role_name: string | null }>).map((row) => ({
+    roleName: row.role_name,
+    rawRoleName: row.raw_role_name,
+  }));
+
+  if (intentFingerprintOf(freshRoles) !== derivedFingerprint) {
+    // The candidate's intent moved. A newer refresh owns publication; this one
+    // must not overwrite it, and losing this race is not an error.
+    return { candidateId, rolesConsidered: roles.length, rowsWritten: 0, generation, outcome: "stale" };
+  }
+
+  const { data: pointerData, error: pointerReadError } = await client
+    .from("candidate_qualifier_generations")
+    .select("candidate_id, intent_fingerprint")
+    .eq("candidate_id", candidateId)
+    .maybeSingle();
+
+  if (pointerReadError) {
+    throw pointerReadError;
+  }
+
+  const pointer = pointerData as { candidate_id: string; intent_fingerprint: string | null } | null;
+
+  if (pointer === null) {
+    const { error: insertPointerError } = await client.from("candidate_qualifier_generations").insert({
       candidate_id: candidateId,
       generation,
       tokenizer_version: TOKENIZER_VERSION,
+      intent_fingerprint: derivedFingerprint,
       published_at: now,
-    },
-    { onConflict: "candidate_id" },
-  );
+    });
 
-  if (pointerError) {
-    throw pointerError;
+    if (insertPointerError) {
+      // Another refresh published first (primary-key conflict) or the write
+      // failed. Either way this generation is not current and must not be
+      // presented as such.
+      return { candidateId, rolesConsidered: roles.length, rowsWritten: 0, generation, outcome: "stale" };
+    }
+  } else {
+    // COMPARE-AND-SWAP on the intent the current pointer was derived from. A
+    // pointer with a NULL fingerprint predates the guard, so it is unverifiable:
+    // one re-derivation is allowed to replace it, which is the conservative
+    // reading rather than treating an unverifiable generation as current.
+    const unverifiable = pointer.intent_fingerprint === null;
+
+    const swap = client.from("candidate_qualifier_generations").update({
+      generation,
+      tokenizer_version: TOKENIZER_VERSION,
+      intent_fingerprint: derivedFingerprint,
+      published_at: now,
+    });
+
+    const filtered = unverifiable
+      ? swap.eq("candidate_id", candidateId)
+      : swap.eq("candidate_id", candidateId).eq("intent_fingerprint", pointer.intent_fingerprint);
+
+    const { data: swapped, error: swapError } = await filtered.select("candidate_id");
+
+    if (swapError) {
+      throw swapError;
+    }
+
+    if (!Array.isArray(swapped) || swapped.length !== 1) {
+      // The pointer moved while this refresh was working. That is the race being
+      // LOST SAFELY: a newer generation is current and stays current.
+      return { candidateId, rolesConsidered: roles.length, rowsWritten: 0, generation, outcome: "stale" };
+    }
   }
 
   // Best effort, after publication: only now are older generations unreachable.
@@ -168,7 +259,7 @@ export async function refreshCandidateQualifierTokens(
     .eq("candidate_id", candidateId)
     .neq("generation", generation);
 
-  return { candidateId, rolesConsidered: roles.length, rowsWritten: rows.length, generation };
+  return { candidateId, rolesConsidered: roles.length, rowsWritten: rows.length, generation, outcome: "published" };
 }
 
 /**
