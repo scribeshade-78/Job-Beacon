@@ -9,6 +9,46 @@ import {
   type PriorityScore,
 } from "../../../shared/priorityScore";
 
+/**
+ * The ranking state the ranked read model reports for this candidate.
+ *
+ *   current         — applicable role coverage, qualifier generation and required
+ *                     posting evidence; qualifier preference orders the feed.
+ *   updating        — required derived data is missing/stale/incomplete; the feed
+ *                     falls back to priority order and says so.
+ *   unavailable     — a failed refresh or a query failure; retryable, never a
+ *                     silently empty feed.
+ *   no_target_roles — the candidate has chosen no roles; neutral, not a failure.
+ */
+export type RankingState = "current" | "updating" | "unavailable" | "no_target_roles";
+
+/** The applicability inputs and publication identities behind a page's order. */
+export interface RankingInfo {
+  state: RankingState;
+  /** Opaque identity; changes invalidate pages fetched under the old identity. */
+  identity: string;
+  roleMatchGeneration: string | null;
+  corpusVersion: number | null;
+  matcherVersion: string | null;
+  qualifierGeneration: string | null;
+  tokenizerVersion: string | null;
+  evidenceIndexedAt: string | null;
+  evidenceRowCount: number | null;
+}
+
+interface RankingStatusRow {
+  candidate_id: string | null;
+  state: RankingState;
+  ranking_identity: string;
+  role_match_generation: string | null;
+  corpus_version: number | null;
+  matcher_version: string | null;
+  qualifier_generation: string | null;
+  tokenizer_version: string | null;
+  evidence_indexed_at: string | null;
+  evidence_row_count: number | null;
+}
+
 export type OpportunityTrustStatus =
   | "VERIFIED"
   | "VERIFIED_INCOMPLETE"
@@ -121,6 +161,14 @@ export interface OpportunitySummary {
   autoApplyStatus: OpportunityAutoApplyStatus;
   /** null until the fit-analysis worker has produced a fit_analyses row for this candidate x vacancy. */
   fitAnalysis: OpportunityFitAnalysis | null;
+  /**
+   * Whether the posting's indexed evidence is current. "pending" means the
+   * ranking could not assess this posting's qualifier evidence — UNKNOWN, never
+   * "no qualifier evidence".
+   */
+  evidenceState: "current" | "pending" | null;
+  /** Matched preference qualifiers, or null when ranking is not current. */
+  matchedQualifierCount: number | null;
 }
 
 /**
@@ -174,6 +222,12 @@ interface OpportunityRow {
   priority_uncapped_score: number | null;
   priority_components: Record<PriorityFactor, PriorityFactorComponent> | null;
   priority_score_version: string | null;
+
+  /** Ranking columns added by candidate_ranked_opportunities (20261001340000). */
+  ranking_state: RankingState;
+  ranking_identity: string;
+  matched_qualifier_count: number | null;
+  evidence_state: "current" | "pending";
 }
 
 import type { SortId } from "../../../shared/opportunityQuery";
@@ -226,8 +280,12 @@ export type ListOpportunitiesResult =
   | {
       kind: "success";
       opportunities: OpportunitySummary[];
-      /** True when the view returned a full page, i.e. another page may exist. */
+      /** True when another page exists, derived from the exact filtered count. */
       hasMore: boolean;
+      /** Exact count of the filtered eligible set, before paging. */
+      totalCount: number;
+      /** Explicit ranking state and the identity the page was fetched under. */
+      ranking: RankingInfo;
     }
   | { kind: "error"; message: string };
 
@@ -311,6 +369,12 @@ const VIEW_COLUMNS = [
   "priority_uncapped_score",
   "priority_components",
   "priority_score_version",
+  // candidate_ranked_opportunities (20261001340000). Read from the ranked view
+  // everywhere, so a caller cannot accidentally page the unranked base view.
+  "ranking_state",
+  "ranking_identity",
+  "matched_qualifier_count",
+  "evidence_state",
 ].join(", ");
 
 /**
@@ -346,25 +410,90 @@ function buildFitAnalysis(row: OpportunityRow): OpportunityFitAnalysis | null {
 const FIXTURE_SOURCE_CODE = "local_fixture";
 
 /**
- * Phase 2.3c: reads the candidate_opportunities view, which has already
- * applied the verified + active filter, joined the company, plan and fit
- * columns, and (through security_invoker RLS) scoped the per-candidate ones
- * to the caller. One query, no merge step.
+ * Reads the informational ranking status for the caller.
  *
- * Ordering and paging happen in SQL. For the best-match sort that means the
- * STORED priority_score, and the displayed score is then refreshed for urgency
- * decay (see buildPriority) — which can move a row by at most urgency's weight,
- * so the page is re-sorted locally to stay visually monotonic. A row can still
- * sit on the "wrong" side of a page boundary by that much; correcting it would
- * mean duplicating the urgency ladder in SQL, which is not worth a 5% factor.
+ * A failure here is an ERROR, never a default: substituting a state would turn
+ * "cannot tell" into "current", which is the exact dishonesty the ranked model
+ * exists to prevent. The status decides only whether the ORDER BY includes the
+ * qualifier key; candidate_ranked_opportunities re-checks applicability inside
+ * the page query itself, so a stale status read can never authorize a page.
+ */
+async function readRankingStatus(client: Pick<SupabaseClient, "from">): Promise<RankingInfo> {
+  const { data, error } = await client
+    .from("candidate_ranking_status")
+    .select(
+      "candidate_id, state, ranking_identity, role_match_generation, corpus_version, matcher_version, qualifier_generation, tokenizer_version, evidence_indexed_at, evidence_row_count",
+    )
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (data === null) {
+    throw new Error("candidate_ranking_status returned no row");
+  }
+
+  const row = data as RankingStatusRow;
+
+  return {
+    state: row.state,
+    identity: row.ranking_identity,
+    roleMatchGeneration: row.role_match_generation,
+    corpusVersion: row.corpus_version,
+    matcherVersion: row.matcher_version,
+    qualifierGeneration: row.qualifier_generation,
+    tokenizerVersion: row.tokenizer_version,
+    evidenceIndexedAt: row.evidence_indexed_at,
+    evidenceRowCount: row.evidence_row_count,
+  };
+}
+
+/** One ranked-view row to the candidate-facing summary. One mapper, one contract. */
+function mapOpportunityRow(row: OpportunityRow): OpportunitySummary {
+  return {
+    id: row.id,
+    title: row.raw_title,
+    url: row.authoritative_url,
+    companyName: row.company_name,
+    companyDomain: row.company_domain,
+    location: formatLocation(row),
+    country: row.country,
+    city: row.city,
+    remoteType: row.remote_type,
+    trustStatus: row.trust_status ?? "UNDER_REVIEW",
+    sourceCode: row.source_code,
+    salary: {
+      min: row.salary_min,
+      max: row.salary_max,
+      currency: row.currency,
+      interval: row.salary_interval,
+      source: row.salary_source,
+    },
+    discoveredAt: row.discovered_at,
+    lastSeenAt: row.last_seen_at,
+    autoApplyStatus: mapAutoApplyStatus(row),
+    fitAnalysis: buildFitAnalysis(row),
+    evidenceState: row.evidence_state ?? null,
+    matchedQualifierCount: row.matched_qualifier_count,
+  };
+}
+
+/**
+ * Reads the candidate_ranked_opportunities view (20261001340000), layered on
+ * candidate_opportunities: same verified + active filter and same
+ * security_invoker candidate scoping, plus the ranking columns.
  *
- * THAT LOCAL RE-SORT IS CONFINED TO BEST MATCH, and the confinement is the
- * point. Task I added four other sorts, and re-sorting every page by priority
- * regardless of which one was asked for meant SQL selected the page in the
- * requested order and this function then scrambled it back — so "Newest" and
- * "Highest salary" returned the right ROWS in the wrong ORDER, while the panel
- * labelled them as sorted. The urgency-decay rationale above only ever applied
- * to the one sort that orders by that score.
+ * ORDERING AND PAGING HAPPEN IN SQL, BEFORE THE RANGE. When ranking is current
+ * the best-match order is matched_qualifier_count DESC, priority_score DESC NULLS
+ * LAST, last_seen_at DESC NULLS LAST, id ASC — so a stronger match on a later
+ * page still ranks ahead of a weaker one on page one. There is NO local re-sort
+ * on that path: re-sorting a fetched page can contradict the promised order and
+ * the exact count. The fallback (not current) omits the qualifier key and keeps
+ * the existing priority order.
+ *
+ * COUNTS ARE EXACT for the same filtered eligible set, taken before the range,
+ * so hasMore cannot disagree with the page.
  */
 export async function listOpportunities(
   client: Pick<SupabaseClient, "from">,
@@ -374,13 +503,16 @@ export async function listOpportunities(
   const offset = options.offset ?? 0;
 
   try {
-    // Task I. Filter, then exclude, then sort, then page — the order the clauses
-    // are documented in shared/opportunityQuery.ts, and the order that makes an
-    // emitted query readable in a log.
-    const filtered = applyOpportunityFilters(
-      client.from("candidate_opportunities").select(VIEW_COLUMNS) as unknown as FilterableQuery,
-      options.filters ?? EMPTY_FILTERS,
-    );
+    const ranking = await readRankingStatus(client);
+    const rankingCurrent = ranking.state === "current";
+
+    // Filter, then exclude, then sort, then page — the order the clauses are
+    // documented in shared/opportunityQuery.ts, and the order a log should show.
+    const selected = client
+      .from("candidate_ranked_opportunities")
+      .select(VIEW_COLUMNS, { count: "exact" }) as unknown as FilterableQuery;
+
+    const filtered = applyOpportunityFilters(selected, options.filters ?? EMPTY_FILTERS);
 
     const { query: excluded } = applySearchPreferenceConstraints(
       // The [MOCK] local-fixture postings are real rows in this view, so they
@@ -398,82 +530,71 @@ export async function listOpportunities(
         ? excluded
         : (excluded.not("id", "in", inList(excludeIds)) as FilterableQuery);
 
-    const { query: sorted, applied: appliedSort } = applyOpportunitySort(withoutDismissed, options.sort);
+    const { query: sorted, applied: appliedSort } = applyOpportunitySort(withoutDismissed, options.sort, {
+      rankingCurrent,
+    });
 
     // The structural FilterableQuery type describes only what this module needs;
     // range() is not part of it because nothing in the filter or sort logic
     // pages, so it is reached through the real builder here.
     const paged = sorted as unknown as {
-      range(from: number, to: number): PromiseLike<{ data: unknown; error: unknown }>;
+      range(
+        from: number,
+        to: number,
+      ): PromiseLike<{ data: unknown; error: unknown; count?: number | null }>;
     };
 
-    const { data, error } = await paged.range(offset, offset + limit - 1);
+    const { data, error, count } = await paged.range(offset, offset + limit - 1);
 
     if (error || !data) {
       return { kind: "error", message: FAILURE_MESSAGE };
     }
 
     const rows = data as unknown as OpportunityRow[];
+    const opportunities = rows.map(mapOpportunityRow);
 
-    const opportunities: OpportunitySummary[] = rows.map((row) => ({
-      id: row.id,
-      title: row.raw_title,
-      url: row.authoritative_url,
-      companyName: row.company_name,
-      companyDomain: row.company_domain,
-      location: formatLocation(row),
-      country: row.country,
-      city: row.city,
-      remoteType: row.remote_type,
-      trustStatus: row.trust_status ?? "UNDER_REVIEW",
-      sourceCode: row.source_code,
-      salary: {
-        min: row.salary_min,
-        max: row.salary_max,
-        currency: row.currency,
-        interval: row.salary_interval,
-        source: row.salary_source,
-      },
-      discoveredAt: row.discovered_at,
-      lastSeenAt: row.last_seen_at,
-      autoApplyStatus: mapAutoApplyStatus(row),
-      fitAnalysis: buildFitAnalysis(row),
-    }));
-
-    // Only best match re-sorts locally; see the note above. For every other sort
-    // SQL's ordering IS the answer and touching it again would undo the request.
-    if (appliedSort === "best_match") {
+    // The local urgency re-sort is CONFINED TO THE FALLBACK. On the ranked path
+    // SQL's order is the answer, and re-sorting a page would contradict it.
+    if (appliedSort === "best_match" && !rankingCurrent) {
       sortByPriority(opportunities);
     }
 
-    return { kind: "success", opportunities, hasMore: rows.length === limit };
+    const totalCount = typeof count === "number" ? count : offset + rows.length;
+
+    return {
+      kind: "success",
+      opportunities,
+      hasMore: offset + rows.length < totalCount,
+      totalCount,
+      ranking,
+    };
   } catch {
     return { kind: "error", message: FAILURE_MESSAGE };
   }
 }
 
 /**
- * Reads specific vacancies by id.
+ * Reads specific vacancies by id from the SAME ranked read model, so a by-id row
+ * carries the same ranking state, evidence marker and score semantics as a paged
+ * one.
  *
- * Needed because a vacancy just ingested has no fit_analysis yet, so its
- * priority_score is NULL and it sorts below every scored row — it is not on
- * page 1 at all. "Fetch latest jobs" therefore cannot make new jobs visible by
- * re-reading page 1 and hoping; it has to ask for the ids it just created.
- *
- * Deliberately no ordering: the caller has an explicit id list and decides the
- * order (the newest fetch goes on top).
+ * NO ORDERING IS IMPOSED. The caller has an explicit id list; it must not treat
+ * the result as globally ranked, and the panel no longer prepends it to a paged
+ * list (that would imply a global order this query never produced).
  */
 export async function listOpportunitiesByIds(
   client: Pick<SupabaseClient, "from">,
   vacancyIds: readonly string[],
 ): Promise<ListOpportunitiesResult> {
-  if (vacancyIds.length === 0) {
-    return { kind: "success", opportunities: [], hasMore: false };
-  }
-
   try {
+    const ranking = await readRankingStatus(client);
+
+    if (vacancyIds.length === 0) {
+      return { kind: "success", opportunities: [], hasMore: false, totalCount: 0, ranking };
+    }
+
     const { data, error } = await client
-      .from("candidate_opportunities")
+      .from("candidate_ranked_opportunities")
       .select(VIEW_COLUMNS)
       .in("id", [...vacancyIds]);
 
@@ -485,31 +606,10 @@ export async function listOpportunitiesByIds(
 
     return {
       kind: "success",
-      opportunities: rows.map((row) => ({
-        id: row.id,
-        title: row.raw_title,
-        url: row.authoritative_url,
-        companyName: row.company_name,
-        companyDomain: row.company_domain,
-        location: formatLocation(row),
-        country: row.country,
-        city: row.city,
-        remoteType: row.remote_type,
-        trustStatus: row.trust_status ?? "UNDER_REVIEW",
-        sourceCode: row.source_code,
-        salary: {
-          min: row.salary_min,
-          max: row.salary_max,
-          currency: row.currency,
-          interval: row.salary_interval,
-          source: row.salary_source,
-        },
-        discoveredAt: row.discovered_at,
-        lastSeenAt: row.last_seen_at,
-        autoApplyStatus: mapAutoApplyStatus(row),
-        fitAnalysis: buildFitAnalysis(row),
-      })),
+      opportunities: rows.map(mapOpportunityRow),
       hasMore: false,
+      totalCount: rows.length,
+      ranking,
     };
   } catch {
     return { kind: "error", message: FAILURE_MESSAGE };

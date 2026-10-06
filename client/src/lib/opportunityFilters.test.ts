@@ -26,6 +26,8 @@ function opportunity(remoteType: string | null): OpportunitySummary {
     lastSeenAt: "2026-09-17T00:00:00Z",
     autoApplyStatus: "not_started",
     fitAnalysis: null,
+    evidenceState: null,
+    matchedQualifierCount: null,
   };
 }
 

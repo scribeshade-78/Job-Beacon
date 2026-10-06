@@ -76,14 +76,27 @@ interface TokenRow {
  * Ordered newest-first and reduced in memory so ONE query serves the whole
  * batch; a per-vacancy lookup would be exactly the per-card query pattern this
  * design exists to avoid.
+ *
+ * DETERMINISTIC BY (created_at, id). The ranked read model compares a token
+ * row's recorded snapshot to this same rule, computed in SQL; without a
+ * tie-break two snapshots created in the same instant would resolve differently
+ * on each side and a row would flicker in and out of "current".
  */
+export function isNewerSnapshot(candidate: SnapshotRow, existing: SnapshotRow): boolean {
+  if (candidate.created_at !== existing.created_at) {
+    return candidate.created_at > existing.created_at;
+  }
+
+  return candidate.id > existing.id;
+}
+
 export function latestSnapshotByVacancy(rows: readonly SnapshotRow[]): Map<string, SnapshotRow> {
   const latest = new Map<string, SnapshotRow>();
 
   for (const row of rows) {
     const existing = latest.get(row.vacancy_id);
 
-    if (existing === undefined || row.created_at > existing.created_at) {
+    if (existing === undefined || isNewerSnapshot(row, existing)) {
       latest.set(row.vacancy_id, row);
     }
   }
@@ -196,6 +209,10 @@ export async function indexVacancyEvidence(
         jd_snapshot_id: snapshot === null ? null : snapshot.id,
         tokenizer_version: TOKENIZER_VERSION,
         evidence_fingerprint: fingerprint,
+        // SQL-comparable copies of the EXACT inputs tokenized, so the ranked view
+        // can prove they still match the current title and selected snapshot.
+        input_title: input.title,
+        input_clean_text: input.description,
         tokens: evidenceTokens(input),
         indexed_at: new Date().toISOString(),
       });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   listOpportunities,
+  listOpportunitiesByIds,
   formatSalary,
   OPPORTUNITIES_PAGE_SIZE,
   type OpportunitySalary,
@@ -13,18 +14,42 @@ import {
 
 interface Recorded {
   table?: string;
+  tables: string[];
   columns?: string;
   orders: Array<[string, unknown]>;
   nots: Array<[string, string, unknown]>;
   range?: [number, number];
+  statusReads: number;
 }
 
 /**
- * Records the query the lib builds against candidate_opportunities and
- * resolves to `result`. order() is chained twice, then range().
+ * The informational status row the loader reads before building the page query.
+ * Defaults to "updating" (the honest fallback), so the page-local ordering tests
+ * below still exercise the fallback path they were written for.
  */
-function makeClient(result: { data: unknown; error?: unknown }) {
-  const recorded: Recorded = { orders: [], nots: [] };
+const DEFAULT_STATUS: Record<string, unknown> = {
+  candidate_id: "cand-1",
+  state: "updating",
+  ranking_identity: "state=updating|q=-|r=-|cv=-|mv=-|tv=-|ei=-|ec=0",
+  role_match_generation: null,
+  corpus_version: null,
+  matcher_version: null,
+  qualifier_generation: null,
+  tokenizer_version: null,
+  evidence_indexed_at: null,
+  evidence_row_count: 0,
+};
+
+/**
+ * Records the queries the lib builds. candidate_ranking_status resolves through
+ * maybeSingle(); candidate_ranked_opportunities chains select/not/order/range and
+ * reports an exact count, like PostgREST does with count: "exact".
+ */
+function makeClient(
+  result: { data: unknown; error?: unknown; count?: number | null },
+  options: { status?: unknown; statusError?: unknown } = {},
+) {
+  const recorded: Recorded = { tables: [], orders: [], nots: [], statusReads: 0 };
 
   const builder: Record<string, unknown> = {
     select: (columns: string) => {
@@ -39,15 +64,32 @@ function makeClient(result: { data: unknown; error?: unknown }) {
       recorded.orders.push([column, opts]);
       return builder;
     },
+    in: () => builder,
     range: (from: number, to: number) => {
       recorded.range = [from, to];
       return builder;
     },
-    then: (resolve: (v: unknown) => void) => resolve({ error: null, ...result }),
+    then: (resolve: (v: unknown) => void) =>
+      resolve({
+        error: null,
+        count: result.count ?? (Array.isArray(result.data) ? result.data.length : 0),
+        ...result,
+      }),
+  };
+
+  const statusBuilder: Record<string, unknown> = {
+    select: () => statusBuilder,
+    maybeSingle: async () => {
+      recorded.statusReads += 1;
+      if (options.statusError) return { data: null, error: options.statusError };
+      return { data: options.status ?? DEFAULT_STATUS, error: null };
+    },
   };
 
   const client = {
     from: vi.fn((table: string) => {
+      recorded.tables.push(table);
+      if (table === "candidate_ranking_status") return statusBuilder;
       recorded.table = table;
       return builder;
     }),
@@ -91,6 +133,11 @@ function viewRow(over: Record<string, unknown> = {}) {
     priority_uncapped_score: null,
     priority_components: null,
     priority_score_version: null,
+    // candidate_ranked_opportunities columns (20261001340000).
+    ranking_state: "updating",
+    ranking_identity: "state=updating",
+    matched_qualifier_count: null,
+    evidence_state: "current",
     ...over,
   };
 }
@@ -182,25 +229,40 @@ describe("formatSalary", () => {
 });
 
 describe("listOpportunities — query shape", () => {
-  it("reads the candidate_opportunities view, not the vacancies table", async () => {
+  it("reads the ranking status and then the RANKED view, never the base view", async () => {
     const { client, recorded } = makeClient({ data: [] });
     await listOpportunities(client);
 
-    expect(recorded.table).toBe("candidate_opportunities");
+    // The status is informational; the rows come from the ranked read model.
+    expect(recorded.tables).toContain("candidate_ranking_status");
+    expect(recorded.tables).toContain("candidate_ranked_opportunities");
+    expect(recorded.table).toBe("candidate_ranked_opportunities");
+    expect(recorded.tables).not.toContain("candidate_opportunities");
   });
 
-  it("orders by the stored priority_score descending, nulls last, then last_seen_at", async () => {
+  it("falls back to priority, recency then id when ranking is not current", async () => {
     const { client, recorded } = makeClient({ data: [] });
     await listOpportunities(client);
 
     expect(recorded.orders[0]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
-    // Task I moved the ordering into shared/opportunityQuery.ts, which declares
-    // nullsFirst on EVERY clause rather than only on the one whose column is
-    // nullable. The tiebreak therefore now states nullsFirst: false explicitly
-    // where it previously inherited Postgres's default — which differs between
-    // ASC and DESC, and relying on it is how a descending sort silently puts
-    // nulls first. The assertion stays exact; only the expected shape changed.
     expect(recorded.orders[1]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
+    // Deterministic final tie-break, so "Load more" cannot repeat or skip a row.
+    expect(recorded.orders[2]).toEqual(["id", { ascending: true, nullsFirst: false }]);
+  });
+
+  it("orders by qualifier count FIRST, before paging, when ranking is current", async () => {
+    const { client, recorded } = makeClient(
+      { data: [] },
+      { status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current" } },
+    );
+    await listOpportunities(client);
+
+    expect(recorded.orders[0]).toEqual([
+      "matched_qualifier_count",
+      { ascending: false, nullsFirst: false },
+    ]);
+    expect(recorded.orders[1]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
+    expect(recorded.range).toEqual([0, OPPORTUNITIES_PAGE_SIZE - 1]);
   });
 
   it("requests the default page when no options are given", async () => {
@@ -232,6 +294,25 @@ describe("listOpportunities — query shape", () => {
     // Excluded in the query rather than after the fetch, so a page still
     // returns a full page of real rows instead of a short one.
     expect(recorded.nots).toContainEqual(["source_code", "eq", "local_fixture"]);
+  });
+
+  it("returns the exact filtered count and the ranking identity", async () => {
+    const { client } = makeClient({ data: [viewRow()], count: 42 }, {
+      status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current|cv=7" },
+    });
+    const result = await listOpportunities(client);
+
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(result.totalCount).toBe(42);
+    expect(result.ranking.state).toBe("current");
+    expect(result.ranking.identity).toBe("state=current|cv=7");
+  });
+
+  it("surfaces a status read failure as an error, never as a default state", async () => {
+    const { client } = makeClient({ data: [] }, { statusError: { message: "status down" } });
+    const result = await listOpportunities(client);
+
+    expect(result.kind).toBe("error");
   });
 });
 
@@ -482,19 +563,21 @@ describe("listOpportunities — page-local ordering", () => {
 });
 
 describe("listOpportunities — pagination", () => {
-  it("reports hasMore when the page came back full", async () => {
-    const rows = Array.from({ length: 3 }, (_, i) => viewRow({ id: `vac-${i}` }));
-    const { client } = makeClient({ data: rows });
+  it("derives hasMore from the EXACT count, not from a full page", async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => viewRow({ id: "vac-" + i }));
+    // A full first page whose exact total is larger: another page exists.
+    const { client } = makeClient({ data: rows, count: 10 });
 
     const result = await listOpportunities(client, { limit: 3 });
 
     if (result.kind !== "success") throw new Error("expected success");
+    expect(result.totalCount).toBe(10);
     expect(result.hasMore).toBe(true);
   });
 
-  it("reports hasMore false on a short page", async () => {
-    const rows = Array.from({ length: 2 }, (_, i) => viewRow({ id: `vac-${i}` }));
-    const { client } = makeClient({ data: rows });
+  it("reports hasMore false when the exact count equals the rows returned", async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => viewRow({ id: "vac-" + i }));
+    const { client } = makeClient({ data: rows, count: 3 });
 
     const result = await listOpportunities(client, { limit: 3 });
 
@@ -502,8 +585,18 @@ describe("listOpportunities — pagination", () => {
     expect(result.hasMore).toBe(false);
   });
 
+  it("uses the offset when deciding hasMore, so page two cannot under-report", async () => {
+    const rows = [viewRow({ id: "vac-3" }), viewRow({ id: "vac-4" }), viewRow({ id: "vac-5" })];
+    const { client } = makeClient({ data: rows, count: 5 });
+
+    const result = await listOpportunities(client, { offset: 3, limit: 3 });
+
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(result.hasMore).toBe(false);
+  });
+
   it("reports hasMore false on an empty page", async () => {
-    const { client } = makeClient({ data: [] });
+    const { client } = makeClient({ data: [], count: 0 });
     const result = await listOpportunities(client, { limit: 3 });
 
     if (result.kind !== "success") throw new Error("expected success");
@@ -588,3 +681,61 @@ describe("Task I — the locally refreshed priority order is confined to best ma
   // not touch the other sorts.
 });
 
+
+describe("listOpportunities — the ranked path does not re-sort locally", () => {
+  function urgentVsFlat() {
+    const soon = new Date(Date.now() + 1 * 86_400_000).toISOString();
+    const flat = scoredRow(STORED_INPUT, { id: "flat", last_seen_at: "2026-01-20T10:00:00Z" });
+    const urgent = scoredRow(STORED_INPUT, {
+      id: "urgent",
+      expires_at: soon,
+      last_seen_at: "2026-01-19T10:00:00Z",
+    });
+    return [flat, urgent];
+  }
+
+  it("preserves SQL's ranked order instead of re-sorting by refreshed urgency", async () => {
+    const { client } = makeClient(
+      { data: urgentVsFlat(), count: 2 },
+      { status: { ...DEFAULT_STATUS, state: "current", ranking_identity: "state=current" } },
+    );
+    const result = await listOpportunities(client);
+
+    if (result.kind !== "success") throw new Error("expected success");
+    // Ordering a fetched page can contradict the promised database order, so the
+    // ranked path returns SQL's order untouched.
+    expect(result.opportunities.map((o) => o.id)).toEqual(["flat", "urgent"]);
+  });
+
+  it("still re-sorts the FALLBACK page by refreshed urgency", async () => {
+    const { client } = makeClient({ data: urgentVsFlat(), count: 2 }); // status: updating
+    const result = await listOpportunities(client);
+
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(result.opportunities.map((o) => o.id)).toEqual(["urgent", "flat"]);
+  });
+});
+
+describe("listOpportunities — evidence and by-id contract", () => {
+  it("keeps an unavailable qualifier count (null) distinct from a confirmed zero", async () => {
+    const unavailable = viewRow({ id: "a", matched_qualifier_count: null, evidence_state: "pending" });
+    const zero = viewRow({ id: "b", matched_qualifier_count: 0, evidence_state: "current" });
+    const { client } = makeClient({ data: [unavailable, zero], count: 2 });
+    const result = await listOpportunities(client);
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(result.opportunities[0].matchedQualifierCount).toBeNull();
+    expect(result.opportunities[0].evidenceState).toBe("pending");
+    expect(result.opportunities[1].matchedQualifierCount).toBe(0);
+    expect(result.opportunities[1].evidenceState).toBe("current");
+  });
+
+  it("reads by id from the same ranked view and returns the ranking contract", async () => {
+    const { client, recorded } = makeClient({ data: [viewRow({ id: "vac-9" })] });
+    const result = await listOpportunitiesByIds(client, ["vac-9"]);
+
+    if (result.kind !== "success") throw new Error("expected success");
+    expect(recorded.table).toBe("candidate_ranked_opportunities");
+    expect(result.ranking.state).toBe("updating");
+    expect(result.totalCount).toBe(1);
+  });
+});

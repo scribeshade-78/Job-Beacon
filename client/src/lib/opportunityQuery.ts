@@ -327,15 +327,30 @@ export function applyPreferenceExclusions<Q extends FilterableQuery>(
   return { query: next, unapplied };
 }
 
-/** Applies a sort. An unavailable sort falls back to the default rather than ordering arbitrarily. */
+/**
+ * Applies a sort. An unavailable sort falls back to the default rather than
+ * ordering arbitrarily.
+ *
+ * THE QUALIFIER KEY IS FOR BEST MATCH ONLY, AND ONLY WHEN RANKING IS CURRENT.
+ * In the fallback it is omitted, so the order is exactly the existing priority
+ * order. On the ranked path it comes FIRST, before paging, so a stronger match
+ * on a later page still ranks ahead of a weaker one on page one; priority is the
+ * tie-break and the shared spec's id tie-break makes paging deterministic.
+ */
 export function applyOpportunitySort<Q extends FilterableQuery>(
   query: Q,
   sortId: SortId = DEFAULT_SORT,
+  options: { rankingCurrent?: boolean } = {},
 ): { query: Q; applied: SortId } {
   const requested = SORT_FIELDS_BY_ID[sortId];
   const effective = requested.orderBy.length > 0 ? requested : SORT_FIELDS_BY_ID[DEFAULT_SORT];
 
   let next = query;
+
+  if (effective.id === "best_match" && options.rankingCurrent === true) {
+    next = next.order("matched_qualifier_count", { ascending: false, nullsFirst: false }) as Q;
+  }
+
   for (const clause of effective.orderBy) {
     next = next.order(clause.column, { ascending: clause.ascending, nullsFirst: clause.nullsFirst }) as Q;
   }

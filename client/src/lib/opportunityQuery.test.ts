@@ -195,12 +195,40 @@ describe("applyPreferenceExclusions", () => {
 });
 
 describe("applyOpportunitySort", () => {
-  it("orders best match by priority then recency, so paging is stable", () => {
+  it("orders best match by priority, recency then id, so paging is stable", () => {
     const { query, calls } = recorder();
     const result = applyOpportunitySort(query, "best_match");
 
-    expect(calls).toEqual(["order:priority_score:desc", "order:last_seen_at:desc"]);
+    // The fallback (ranking not current) OMITS the qualifier key: it is exactly
+    // the existing priority order plus the deterministic id tie-break.
+    expect(calls).toEqual([
+      "order:priority_score:desc",
+      "order:last_seen_at:desc",
+      "order:id:asc",
+    ]);
     expect(result.applied).toBe("best_match");
+  });
+
+  it("prepends the qualifier count for best match ONLY when ranking is current", () => {
+    const { query, calls } = recorder();
+    const result = applyOpportunitySort(query, "best_match", { rankingCurrent: true });
+
+    // Before paging, so a stronger match on a later page still outranks a weaker
+    // one on page one; priority is the first tie-break.
+    expect(calls).toEqual([
+      "order:matched_qualifier_count:desc",
+      "order:priority_score:desc",
+      "order:last_seen_at:desc",
+      "order:id:asc",
+    ]);
+    expect(result.applied).toBe("best_match");
+  });
+
+  it("never applies the qualifier key to an explicit alternative sort", () => {
+    const { query, calls } = recorder();
+    applyOpportunitySort(query, "newest", { rankingCurrent: true });
+
+    expect(calls).toEqual(["order:discovered_at:desc", "order:last_seen_at:desc"]);
   });
 
   it("orders newest by discovery", () => {
@@ -221,7 +249,11 @@ describe("applyOpportunitySort", () => {
       const { query, calls } = recorder();
       const result = applyOpportunitySort(query, sortId);
 
-      expect(calls).toEqual(["order:priority_score:desc", "order:last_seen_at:desc"]);
+      expect(calls).toEqual([
+        "order:priority_score:desc",
+        "order:last_seen_at:desc",
+        "order:id:asc",
+      ]);
       expect(result.applied).toBe("best_match");
     },
   );

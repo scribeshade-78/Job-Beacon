@@ -260,6 +260,20 @@ describe("materialisation", () => {
     expect(coverageUpserts.every((row) => row.candidate_id === "candidate-7")).toBe(true);
   });
 
+  it("records the canonical role inputs the scan used, for in-snapshot SQL equality", async () => {
+    const { client, coverageUpserts } = makeClient({
+      roles: ["Teacher", "Data Engineer"],
+      batches: [[{ id: "v1", raw_title: "Data Engineer" }]],
+    });
+
+    await materializeCandidateRoleMatches(client, "candidate-1");
+
+    expect(coverageUpserts[0].role_input_canonical).toEqual([
+      { role_name: "Data Engineer" },
+      { role_name: "Teacher" },
+    ]);
+  });
+
   it("resumes from the stored cursor only while the corpus version is unchanged", async () => {
     const { client, gtCalls } = makeClient({
       roles: ["Data Engineer"],

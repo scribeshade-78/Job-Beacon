@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isTitleRelevantToRole } from "../../shared/roleTaxonomy.js";
 import { evidenceFingerprint } from "../../shared/evidenceTokens.js";
+import { roleInputsCanonical, type RoleInputCanonicalEntry } from "../../shared/rankingInputs.js";
 
 /**
  * Materialises which of a candidate's SELECTED ROLES each BROWSEABLE vacancy
@@ -355,6 +356,7 @@ function runningCoverageRow(input: {
   generation: string;
   cursor: string | null;
   fingerprint: string;
+  roleInputCanonical: RoleInputCanonicalEntry[];
   corpusVersion: number;
   status: "running" | "failed";
   scanned: number;
@@ -367,6 +369,7 @@ function runningCoverageRow(input: {
     corpus_cursor: input.cursor,
     corpus_complete: false,
     role_input_fingerprint: input.fingerprint,
+    role_input_canonical: input.roleInputCanonical,
     matcher_version: ROLE_MATCHER_VERSION,
     running_corpus_version: input.corpusVersion,
     status: input.status,
@@ -390,6 +393,9 @@ export async function materializeCandidateRoleMatches(
   const roleInputs = await readSelectedRoles(client, candidateId);
   const roles = roleInputs.map((role) => role.roleName);
   const fingerprint = roleInputFingerprint(roleInputs);
+  // SQL-comparable copy of the inputs this scan used, so the ranked view can
+  // compare them with candidate_selected_roles inside its own snapshot.
+  const roleInputCanonical = roleInputsCanonical(roleInputs);
 
   // THE COVERAGE-LOADING PATH. The loader re-reads the current corpus version
   // and returns the verdict the restart/resume decision is made from.
@@ -451,6 +457,7 @@ export async function materializeCandidateRoleMatches(
           generation,
           cursor,
           fingerprint,
+          roleInputCanonical,
           corpusVersion,
           status: "running",
           scanned,
@@ -532,6 +539,7 @@ export async function materializeCandidateRoleMatches(
               generation,
               cursor: vacancies[vacancies.length - 1].id,
               fingerprint,
+              roleInputCanonical,
               corpusVersion,
               status: "running",
               scanned,
@@ -594,6 +602,7 @@ export async function materializeCandidateRoleMatches(
               generation,
               cursor,
               fingerprint,
+              roleInputCanonical,
               corpusVersion,
               status: "running",
               scanned,
@@ -622,6 +631,7 @@ export async function materializeCandidateRoleMatches(
             generation,
             cursor,
             fingerprint,
+            roleInputCanonical,
             corpusVersion,
             status: "failed",
             scanned,

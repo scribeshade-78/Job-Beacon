@@ -143,6 +143,77 @@ export function compareByQualifierPreference<T>(
   return bMatched - aMatched;
 }
 
+/** A qualifier together with the canonical role it belongs to. */
+export interface AssociatedQualifier {
+  roleName: string;
+  qualifier: string;
+}
+
+/**
+ * ASSOCIATION-PRESERVING assessment, the authoritative ranking contract.
+ *
+ * compareByQualifierPreference below counts a flat qualifier list, which loses
+ * the role a qualifier belongs to. That is wrong for ranking: an "azure"
+ * preference stored against Data Engineer must never boost a Teacher posting, so
+ * a qualifier may only count when the vacancy matches the ROLE it belongs to.
+ *
+ * DISTINCT BY QUALIFIER. The same qualifier attached to two matching roles still
+ * counts once, which is what the SQL `COUNT(DISTINCT qualifier)` computes; the
+ * two must agree, and a parity fixture asserts it.
+ */
+export function assessAssociatedQualifiers(
+  qualifiers: readonly AssociatedQualifier[],
+  evidence: QualifierEvidence,
+  vacancyMatchedRoles: ReadonlySet<string>,
+): QualifierAssessment {
+  const matched = new Set<string>();
+  const noEvidence: string[] = [];
+  const counted = new Set<string>();
+
+  for (const entry of qualifiers) {
+    // Role association FIRST: a qualifier from a role this vacancy does not match
+    // is simply not this vacancy's preference and must not consume the
+    // once-per-qualifier count.
+    if (!vacancyMatchedRoles.has(entry.roleName)) {
+      continue;
+    }
+
+    if (counted.has(entry.qualifier)) {
+      continue;
+    }
+
+    counted.add(entry.qualifier);
+
+    if (qualifierHasEvidence(entry.qualifier, evidence)) {
+      matched.add(entry.qualifier);
+    } else {
+      noEvidence.push(entry.qualifier);
+    }
+  }
+
+  return { matched: [...matched], noEvidence };
+}
+
+/**
+ * Orders two postings by ASSOCIATED qualifier preference. Same stability
+ * contract as compareByQualifierPreference: never excludes, returns 0 on equal
+ * preference so the caller's existing (priority) order is preserved.
+ */
+export function compareByAssociatedQualifierPreference<T>(
+  a: { evidence: QualifierEvidence; matchedRoles: ReadonlySet<string> },
+  b: { evidence: QualifierEvidence; matchedRoles: ReadonlySet<string> },
+  qualifiers: readonly AssociatedQualifier[],
+): number {
+  if (qualifiers.length === 0) {
+    return 0;
+  }
+
+  const aMatched = assessAssociatedQualifiers(qualifiers, a.evidence, a.matchedRoles).matched.length;
+  const bMatched = assessAssociatedQualifiers(qualifiers, b.evidence, b.matchedRoles).matched.length;
+
+  return bMatched - aMatched;
+}
+
 /**
  * Candidate-facing label. "preferred", never "only": the contract is a ranking
  * preference, and copy that implied a filter would misdescribe what the system

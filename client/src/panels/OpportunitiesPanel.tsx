@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "../components/ui/badge";
@@ -16,10 +16,10 @@ import {
 } from "../components/OpportunitySignals";
 import {
   listOpportunities,
-  listOpportunitiesByIds,
   type OpportunityFitAnalysis,
   type OpportunitySummary,
   type OpportunityTrustStatus,
+  type RankingInfo,
 } from "../lib/opportunities";
 import { describeBulkApplyResult, submitBulkApply } from "../lib/bulkApply";
 import {
@@ -29,7 +29,7 @@ import {
   type QueueCapabilityState,
 } from "../lib/queueCapability";
 import { describeDiscoveryResult, discoverLiveJobs } from "../lib/ingestion";
-import { matchesWorkplaceFilter, workplaceLabel, type WorkplaceValue } from "../lib/opportunityFilters";
+import { workplaceLabel } from "../lib/opportunityFilters";
 import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
 import {
   EMPTY_FILTERS,
@@ -57,31 +57,6 @@ import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { formatSalary } from "../lib/opportunities";
 import { formatDistanceToNow } from "date-fns";
 
-/**
- * The work-mode filter stores the column vocabulary (remote / hybrid / on_site);
- * the client-side predicate's options are the UI's hyphenated ones. Mapped in
- * one place so the two vocabularies cannot drift apart unnoticed.
- */
-const WORKPLACE_VALUE_BY_WORK_MODE: Record<string, WorkplaceValue> = {
-  remote: "remote",
-  hybrid: "hybrid",
-  on_site: "on-site",
-};
-
-function workplaceValuesFor(workModes: readonly string[]): WorkplaceValue[] {
-  const values: WorkplaceValue[] = [];
-
-  for (const mode of workModes) {
-    const value = WORKPLACE_VALUE_BY_WORK_MODE[mode];
-
-    if (value !== undefined) {
-      values.push(value);
-    }
-  }
-
-  return values;
-}
-
 interface RefreshNotice {
   tone: "info" | "error";
   text: string;
@@ -105,28 +80,12 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState<RefreshNotice | null>(null);
   /**
-   * The vacancies the most recent fetch created, fetched BY ID.
-   *
-   * ON HOLD FOR SCORED JOBS. Since Task A2 the backend scores new vacancies
-   * before responding, and a scored job ranks on its own merit — hoisting it
-   * would override the very ordering this was meant to fix. So this holds only
-   * the new vacancies that did NOT get a priority (the per-press bound was
-   * reached, or scoring failed). Those carry a NULL priority_score and sort
-   * below every scored row, several pages down, so without this they would be
-   * invisible. When everything was scored, this stays empty and the list is
-   * purely organic.
-   */
-  const [newlyDiscovered, setNewlyDiscovered] = useState<OpportunitySummary[]>([]);
-
-  /**
    * Every vacancy the last fetch created, whether or not it was scored.
    *
-   * Separate from newlyDiscovered because the two answer different questions:
-   * newlyDiscovered decides ORDER (an unscored row would otherwise be
-   * invisible), this decides LABELLING. A scored job ranks on merit and must
-   * not be moved — but the candidate still has no way to tell which three of
-   * eighty rows just arrived without a marker, and the toast alone sends them
-   * hunting for it.
+   * LABELLING ONLY — it never decides ORDER any more. Newly discovered rows are
+   * rendered where the paginated RANKED query places them; a separately ordered
+   * slice is deliberately not prepended, because that would imply the combined
+   * list is globally ranked when it is two differently ordered slices.
    */
   const [newVacancyIds, setNewVacancyIds] = useState<string[]>([]);
   /**
@@ -157,6 +116,22 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    * refuses a dismissed vacancy.
    */
   const [decisions, setDecisions] = useState<VacancyDecisions>(EMPTY_DECISIONS);
+
+  /**
+   * The ranking state and publication identity of the CURRENT page. Every page
+   * must be fetched under one identity; when it changes the pages are reset
+   * rather than mixed, because a score ranked under a superseded generation is
+   * not on the same scale as the page it would be appended to.
+   */
+  const [ranking, setRanking] = useState<RankingInfo | null>(null);
+  const [totalCount, setTotalCount] = useState(0);
+  /**
+   * Monotonic request token. Any response whose token is no longer current is
+   * OBSOLETE and is ignored, so a slow page can never overwrite a newer one.
+   */
+  const requestSeq = useRef(0);
+  /** Bumped by a Retry control to force the single read effect to run again. */
+  const [reloadToken, setReloadToken] = useState(0);
 
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
@@ -280,6 +255,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     if (filters === null) return;
 
     let cancelled = false;
+    const seq = ++requestSeq.current;
     setQuerying(true);
 
     listOpportunities(getSupabaseBrowserClient(), {
@@ -290,7 +266,10 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       // only. Applied as a query clause so paging still counts real rows.
       excludeVacancyIds: excludedFromFeed(decisions),
     }).then((result) => {
-      if (cancelled) return;
+      // Obsolete responses are ignored: a token from an older request (a previous
+      // filter, or a load-more this read superseded) must not overwrite the newer
+      // result, and must not mix pages from two ranking generations.
+      if (cancelled || seq !== requestSeq.current) return;
 
       setQuerying(false);
       setLoading(false);
@@ -298,6 +277,8 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       if (result.kind === "success") {
         setOpportunities(result.opportunities);
         setHasMore(result.hasMore);
+        setTotalCount(result.totalCount);
+        setRanking(result.ranking);
         setError(null);
       } else {
         setError(result.message);
@@ -307,14 +288,21 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [filters, searchPreferences, sort, decisions]);
+  }, [filters, searchPreferences, sort, decisions, reloadToken]);
 
-  // Phase 2.3c: paging is offset-based off the current row count. The view
-  // orders by the stored priority_score, so an urgency refresh can shuffle a
-  // row across a page boundary; appending rather than replacing keeps any
-  // such row visible instead of dropping it.
+  /**
+   * Loads the next page. Paging is offset-based from the loaded row count.
+   *
+   * ONE IDENTITY PER LIST. The page is fetched under the same filters, exclusions
+   * and sort as page one; if the ranking identity moved while it loaded, the page
+   * is DISCARDED and replaced with the fresh first page rather than appended, so
+   * two generations are never presented as one ordered list.
+   */
   async function loadMore() {
     setLoadingMore(true);
+    const seq = ++requestSeq.current;
+    const expectedIdentity = ranking?.identity ?? null;
+
     const result = await listOpportunities(getSupabaseBrowserClient(), {
       offset: opportunities?.length ?? 0,
       // The same filters, exclusions and sort as the first page. A page fetched
@@ -325,14 +313,33 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       sort,
       excludeVacancyIds: excludedFromFeed(decisions),
     });
+
     setLoadingMore(false);
 
-    if (result.kind === "success") {
-      setOpportunities((prev) => [...(prev ?? []), ...result.opportunities]);
-      setHasMore(result.hasMore);
-    } else {
-      setError(result.message);
+    if (seq !== requestSeq.current) {
+      // A newer request owns the list now; this page is obsolete.
+      return;
     }
+
+    if (result.kind !== "success") {
+      setError(result.message);
+      return;
+    }
+
+    if (expectedIdentity !== null && result.ranking.identity !== expectedIdentity) {
+      // The applicable generation changed. Reset to the fresh page instead of
+      // mixing rows scored under different identity.
+      setOpportunities(result.opportunities);
+      setHasMore(result.hasMore);
+      setTotalCount(result.totalCount);
+      setRanking(result.ranking);
+      return;
+    }
+
+    setOpportunities((prev) => [...(prev ?? []), ...result.opportunities]);
+    setHasMore(result.hasMore);
+    setTotalCount(result.totalCount);
+    setRanking(result.ranking);
   }
 
   /**
@@ -351,7 +358,6 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   async function handleRefresh() {
     setRefreshing(true);
     setRefreshNotice(null);
-    setNewlyDiscovered([]);
     setNewVacancyIds([]);
 
     try {
@@ -363,51 +369,29 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         return;
       }
 
-      const client = getSupabaseBrowserClient();
+      // RELOAD THROUGH THE PAGINATED RANKED QUERY. The previously hoisted,
+      // independently ordered "newly discovered" slice is deliberately gone: it
+      // implied the combined list was globally ranked when it was two differently
+      // ordered slices stacked together. Newly discovered rows now appear where
+      // the ranked query places them, and the "New" badge still marks them.
+      const seq = ++requestSeq.current;
 
-      // Only the ones that came back WITHOUT a priority score need hoisting.
-      // A scored vacancy is already ranked where it belongs.
-      const unscoredIds = outcome.result.newVacancyIds.slice(
-        // The backend scores in order, so the first fitAnalyzed ids are the ones
-        // that have a score. Slicing rather than re-deriving from the rows keeps
-        // this correct even when a fit analysis ran but produced no priority.
-        Math.max(outcome.result.fitAnalyzed, 0),
-      );
-
-      const [reloaded, discovered] = await Promise.all([
+      const reloaded = await listOpportunities(getSupabaseBrowserClient(), {
         // The SAME filters, exclusions and sort the list is currently showing.
         // Re-reading page 1 unfiltered here would silently replace a filtered list
         // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
-        listOpportunities(client, {
-          filters: filters ?? EMPTY_FILTERS,
-          searchPreferences,
-          sort,
-          excludeVacancyIds: excludedFromFeed(decisions),
-        }),
-        listOpportunitiesByIds(client, unscoredIds),
-      ]);
+        filters: filters ?? EMPTY_FILTERS,
+        searchPreferences,
+        sort,
+        excludeVacancyIds: excludedFromFeed(decisions),
+      });
+
+      if (seq !== requestSeq.current) {
+        // A newer request (a filter change, or another refresh) owns the list.
+        return;
+      }
 
       setNewVacancyIds(outcome.result.newVacancyIds);
-
-      if (discovered.kind === "success") {
-        // The by-id read does not go through the standing clauses, so the same
-        // ledger the client filter uses decides these too — otherwise a fetched
-        // job could appear here that the paged query would have excluded.
-        const eligibleDiscovered = searchPreferences
-          ? discovered.opportunities.filter(
-              (opportunity) => isEligibleForFeed(searchPreferences, opportunity),
-            )
-          : discovered.opportunities;
-
-        // The by-id read bypasses the paged query's clauses, so the dismissal
-        // rule is applied here too — otherwise a re-discovered job the candidate
-        // already rejected would surface at the top of the list.
-        const withoutDismissed = eligibleDiscovered.filter(
-          (opportunity) => !decisions.dismissed.has(opportunity.id),
-        );
-
-        setNewlyDiscovered(narrowToWorkMode(withoutDismissed));
-      }
 
       const text = describeDiscoveryResult(outcome.result);
 
@@ -425,6 +409,8 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       if (reloaded.kind === "success") {
         setOpportunities(reloaded.opportunities);
         setHasMore(reloaded.hasMore);
+        setTotalCount(reloaded.totalCount);
+        setRanking(reloaded.ranking);
         setError(null);
       } else {
         setError(reloaded.message);
@@ -456,57 +442,37 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   );
 
   /**
-   * NO CLIENT-SIDE WORKPLACE FILTERING ANY MORE. The old bar filtered the rows
-   * it had already loaded through matchesWorkplaceFilter; work mode is now a
-   * server-side clause on remote_type, so running that predicate over the
-   * fetched page as well would narrow the same rows twice — and would quietly
-   * override the server wherever the two vocabularies disagreed. The loaded rows
-   * are therefore shown exactly as returned.
-   *
-   * THE ONE REMAINING USE OF THE LOCAL PREDICATE. The freshly discovered
-   * vacancies are fetched BY ID, not through the filtered query, so they never
-   * passed the work-mode clause. Applying the existing predicate to that one
-   * bucket is not a double application — it is the only thing standing between a
-   * Remote-only filter (often seeded from the candidate's own preference) and an
-   * on-site listing hoisted to the top of the results. Every OTHER active filter
-   * is left to the server: re-implementing the query builder's clauses here
-   * would be a second copy of it that could only drift.
+   * NO CLIENT-SIDE WORKPLACE FILTERING. Work mode is a server-side clause on
+   * remote_type; running the predicate over the fetched page as well would narrow
+   * the same rows twice. The separately fetched discovered slice is gone, and
+   * with it the one remaining use of that predicate.
    */
-  const selectedWorkplaces = useMemo(
-    () => workplaceValuesFor(filters?.workModes ?? []),
-    [filters],
-  );
-
-  function narrowToWorkMode(rows: readonly OpportunitySummary[]): OpportunitySummary[] {
-    return rows.filter((opportunity) => matchesWorkplaceFilter(opportunity, selectedWorkplaces));
-  }
 
   /**
-   * Newly fetched jobs first, everything else untouched.
+   * The rows actually rendered.
    *
-   * They have no fit_analysis yet, so their priority_score is null and they
-   * sort below every scored row — with ~80 loaded that is several pages down,
-   * which is indistinguishable from "the fetch did nothing". Hoisting them is
-   * a deliberately local, temporary reorder: it lasts until the next fetch,
-   * and the sort line below says it is happening rather than quietly
-   * contradicting its own "sorted by" label.
+   * THE READY PATH HAS NO RENDER-TIME ROLE FILTER. When ranking is current the
+   * ranked query already enforced canonical-role relevance from the
+   * authoritative materialised matches, so the fetched page IS the answer;
+   * filtering it again here would be a second, weaker matcher.
+   *
+   * THE FALLBACK KEEPS THE EXISTING FILTER, explicitly confined to it: without
+   * applicable coverage SQL cannot enforce relevance, so the TypeScript matcher
+   * decides what is shown. That it filters the LOADED page rather than the
+   * database — and is therefore less complete than the ranked path — is reported
+   * in the UI rather than hidden.
    */
+  const rankingCurrent = ranking?.state === "current";
+
   const visibleOpportunities = useMemo(() => {
-    let merged: OpportunitySummary[];
+    const merged = opportunities ?? [];
 
-    if (newlyDiscovered.length === 0) {
-      merged = opportunities ?? [];
-    } else {
-      // The freshly fetched rows go on top; anything that is ALSO in the loaded
-      // page is dropped from its old position rather than rendered twice.
-      const freshIds = new Set(newlyDiscovered.map((opportunity) => opportunity.id));
-
-      merged = [...newlyDiscovered, ...(opportunities ?? []).filter((opportunity) => !freshIds.has(opportunity.id))];
+    if (rankingCurrent) {
+      return merged;
     }
 
-    // The one thing that narrows the fetched rows: target-role relevance.
     return filterOpportunitiesByRoleRelevance(merged, searchPreferences);
-  }, [opportunities, newlyDiscovered, searchPreferences]);
+  }, [opportunities, searchPreferences, rankingCurrent]);
 
   /**
    * What the feed's own constraints are hiding from the loaded page, so an
@@ -623,7 +589,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       <CardContent aria-labelledby="opportunities-title">
         {error && (
           <p role="alert" className="text-sm text-status-blocked-fg mb-4">
-            {error}
+            {error}{" "}
+            <button
+              type="button"
+              onClick={() => setReloadToken((value) => value + 1)}
+              className="font-medium text-ios-blue hover:underline"
+            >
+              Retry
+            </button>
           </p>
         )}
 
@@ -741,16 +714,42 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           </p>
         )}
 
+        {ranking != null && ranking.state !== "current" && ranking.state !== "no_target_roles" && (
+          <p
+            role="status"
+            className="mb-3 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
+          >
+            {ranking.state === "unavailable"
+              ? "Preference ranking is unavailable right now — showing priority order."
+              : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}{" "}
+            <button
+              type="button"
+              onClick={() => setReloadToken((value) => value + 1)}
+              className="font-medium text-ios-blue hover:underline"
+            >
+              Retry
+            </button>
+          </p>
+        )}
+
+        {ranking != null && ranking.state === "no_target_roles" && (
+          <p
+            role="status"
+            className="mb-3 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
+          >
+            Choose your target roles to rank these jobs by your preferences.{" "}
+            <Link href="/target-roles" className="text-ios-blue hover:underline">
+              Choose roles
+            </Link>
+          </p>
+        )}
+
         {visibleOpportunities.length > 0 && (
           <p className="text-xs text-ios-text-secondary mb-3">
-            {newlyDiscovered.length > 0 ? (
-              <>
-                Sorted by {SORT_FIELDS_BY_ID[sort].label} · {newlyDiscovered.length} newly fetched shown
-                first
-              </>
-            ) : (
-              <>Sorted by {SORT_FIELDS_BY_ID[sort].label}</>
-            )}
+            <>
+              Sorted by {SORT_FIELDS_BY_ID[sort].label}
+              {rankingCurrent ? " · ranked by your preferences" : ""}
+            </>
             {/* Three buckets, because they are three different claims. The old
                 line reported VERIFIED_INCOMPLETE as "verified", which is the
                 same overstatement the badge made. */}

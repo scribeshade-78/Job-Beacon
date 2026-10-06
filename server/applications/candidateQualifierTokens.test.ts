@@ -82,6 +82,8 @@ function makeClient(config: Config = {}) {
   const log: string[] = [];
   const inserts: Array<Array<Record<string, unknown>>> = [];
   const swaps: Array<Array<[string, unknown]>> = [];
+  const pointerInserts: Array<Record<string, unknown>> = [];
+  const pointerUpdates: Array<Record<string, unknown>> = [];
   let roleReads = 0;
 
   const from = vi.fn((table: string) => {
@@ -116,13 +118,15 @@ function makeClient(config: Config = {}) {
                 data: { ...config.pointer, generation: "generation-1", tokenizer_version: TOKENIZER_VERSION },
                 error: null,
               },
-        insert: async () => {
+        insert: async (payload: Record<string, unknown>) => {
           log.push("pointer-insert");
+          pointerInserts.push(payload);
           return { error: config.pointerInsertError ?? null };
         },
-        update: () => {
+        update: (payload: Record<string, unknown>) => {
           log.push("swap");
           swaps.push(filters);
+          pointerUpdates.push(payload);
           return builder;
         },
         then: (resolve: (value: unknown) => unknown) =>
@@ -151,7 +155,7 @@ function makeClient(config: Config = {}) {
     return builder;
   });
 
-  return { client: { from } as never, log, inserts, swaps };
+  return { client: { from } as never, log, inserts, swaps, pointerInserts, pointerUpdates };
 }
 
 const AZURE: Role[] = [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }];
@@ -174,6 +178,29 @@ describe("refreshCandidateQualifierTokens — publication guard", () => {
       qualifier: "azure",
       generation: result.generation,
     });
+  });
+
+  it("records the canonical intent the derivation used, for in-snapshot SQL equality", async () => {
+    const { client, pointerInserts } = makeClient({ roles: AZURE, pointer: null });
+
+    await refreshCandidateQualifierTokens(client, "candidate-1");
+
+    expect(pointerInserts[0].intent_canonical).toEqual([
+      { role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" },
+    ]);
+  });
+
+  it("records the canonical intent on a compare-and-swap publication too", async () => {
+    const { client, pointerUpdates } = makeClient({
+      roles: AZURE,
+      pointer: { candidate_id: "candidate-1", intent_fingerprint: intentFingerprintOf(AZURE_INTENT) },
+    });
+
+    await refreshCandidateQualifierTokens(client, "candidate-1");
+
+    expect(pointerUpdates[0].intent_canonical).toEqual([
+      { role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" },
+    ]);
   });
 
   it("REFUSES to publish a generation derived from older intent", async () => {

@@ -59,6 +59,16 @@ describe("latestSnapshotByVacancy", () => {
 
     expect(latest.get("v1")?.id).toBe("s1");
   });
+
+  it("breaks a created_at tie by id, the same rule the ranked SQL uses", () => {
+    const sameInstantA = { ...snapshot, id: "s-a", created_at: "2026-10-01T00:00:00Z" };
+    const sameInstantB = { ...snapshot, id: "s-b", created_at: "2026-10-01T00:00:00Z" };
+
+    // Without the tie-break the two sides could disagree about which snapshot is
+    // authoritative, and a token row would flicker in and out of "current".
+    expect(latestSnapshotByVacancy([sameInstantB, sameInstantA]).get("v1")?.id).toBe("s-b");
+    expect(latestSnapshotByVacancy([sameInstantA, sameInstantB]).get("v1")?.id).toBe("s-b");
+  });
 });
 
 describe("indexVacancyEvidence", () => {
@@ -76,6 +86,19 @@ describe("indexVacancyEvidence", () => {
       evidence_fingerprint: evidenceFingerprint({ title: "Data Engineer", description: "Azure data platform." }),
     });
     expect(upserts[0][0].tokens).toContain("azure");
+    // The EXACT inputs tokenized, so the ranked view can prove in its own
+    // snapshot that they still match the current title and selected snapshot.
+    expect(upserts[0][0].input_title).toBe("Data Engineer");
+    expect(upserts[0][0].input_clean_text).toBe("Azure data platform.");
+  });
+
+  it("records a null clean_text input when no description was indexed", async () => {
+    const { client, upserts } = makeClient({ vacancies: [vacancy], snapshots: [] });
+
+    await indexVacancyEvidence(client);
+
+    expect(upserts[0][0].input_title).toBe("Data Engineer");
+    expect(upserts[0][0].input_clean_text).toBeNull();
   });
 
   it("indexes from the title alone and reports it when no description was captured", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Router } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 
@@ -30,6 +30,19 @@ const fixtures = vi.hoisted(() => ({
     lastSeenAt: "2026-09-17T00:00:00Z",
     autoApplyStatus: "not_started",
     fitAnalysis: null,
+    evidenceState: "current",
+    matchedQualifierCount: 0,
+  },
+  ranking: {
+    state: "updating",
+    identity: "state=updating|q=-|r=-|cv=-|mv=-|tv=-|ei=-|ec=0",
+    roleMatchGeneration: null,
+    corpusVersion: null,
+    matcherVersion: null,
+    qualifierGeneration: null,
+    tokenizerVersion: null,
+    evidenceIndexedAt: null,
+    evidenceRowCount: 0,
   },
   preferences: {
     preferredCountries: [],
@@ -57,8 +70,16 @@ vi.mock("../lib/opportunities", async (importOriginal) => {
       kind: "success",
       opportunities: [fixtures.opportunity],
       hasMore: false,
+      totalCount: 1,
+      ranking: fixtures.ranking,
     })),
-    listOpportunitiesByIds: vi.fn(async () => ({ kind: "success", opportunities: [], hasMore: false })),
+    listOpportunitiesByIds: vi.fn(async () => ({
+      kind: "success",
+      opportunities: [],
+      hasMore: false,
+      totalCount: 0,
+      ranking: fixtures.ranking,
+    })),
     formatSalary: () => "USD 120,000-150,000/year (estimated)",
   };
 });
@@ -80,6 +101,7 @@ vi.mock("../lib/queueCapability", async (importOriginal) => {
 });
 
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
+import { listOpportunities } from "../lib/opportunities";
 
 afterEach(cleanup);
 
@@ -119,5 +141,65 @@ describe("OpportunitiesPanel job links", () => {
     expect(screen.getByText(/Some listings come from sources we can/)).toBeTruthy();
     // ...and the full paragraph is no longer repeated for every card.
     expect(screen.queryByText(/We haven/)).toBeNull();
+  });
+});
+
+describe("OpportunitiesPanel — ranking generation identity", () => {
+  const pageOneOpportunity = {
+    ...fixtures.opportunity,
+    id: "job-1",
+    title: "Azure Data Engineer",
+  };
+  const otherOpportunity = {
+    ...fixtures.opportunity,
+    id: "job-2",
+    title: "Teacher Role",
+  };
+  const rankingA = { ...fixtures.ranking, identity: "state=updating|q=a" };
+  const rankingB = { ...fixtures.ranking, identity: "state=updating|q=b" };
+
+  function page(opportunities: unknown[], ranking: unknown, hasMore: boolean) {
+    return { kind: "success", opportunities, hasMore, totalCount: opportunities.length, ranking };
+  }
+
+  it("resets to the fresh page when the ranking identity changes between pages", async () => {
+    vi.mocked(listOpportunities)
+      .mockResolvedValueOnce(page([pageOneOpportunity], rankingA, true) as never)
+      .mockResolvedValueOnce(page([otherOpportunity], rankingB, false) as never);
+
+    renderPanel();
+    await screen.findByText("Azure Data Engineer");
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    // The second page belongs to a different generation: it REPLACES page one
+    // rather than being appended to a list ranked under another identity.
+    await screen.findByText("Teacher Role");
+    expect(screen.queryByText("Azure Data Engineer")).toBeNull();
+  });
+
+  it("ignores an obsolete load-more response superseded by a newer read", async () => {
+    let resolveLoadMore: (value: unknown) => void = () => {};
+    const deferred = new Promise((resolve) => {
+      resolveLoadMore = resolve;
+    });
+
+    vi.mocked(listOpportunities)
+      .mockResolvedValueOnce(page([pageOneOpportunity], rankingA, true) as never)
+      .mockReturnValueOnce(deferred as never)
+      .mockResolvedValueOnce(page([pageOneOpportunity], rankingA, true) as never);
+
+    renderPanel();
+    await screen.findByText("Azure Data Engineer");
+
+    // Start a load-more, then force a NEWER read (Retry re-runs the one read
+    // effect), which makes the in-flight page obsolete.
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /retry/i }));
+
+    resolveLoadMore(page([otherOpportunity], rankingA, false));
+
+    await waitFor(() => expect(screen.queryByText("Teacher Role")).toBeNull());
+    expect(screen.getByText("Azure Data Engineer")).toBeTruthy();
   });
 });

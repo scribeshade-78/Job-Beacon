@@ -186,6 +186,10 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
     orderBy: [
       { column: "priority_score", ascending: false, nullsFirst: false },
       { column: "last_seen_at", ascending: false, nullsFirst: false },
+      // Deterministic final tie-break: without it "Load more" can repeat or skip
+      // a row whose score and last_seen_at are equal. The ranked view prepends
+      // matched_qualifier_count ahead of this when ranking is current.
+      { column: "id", ascending: true, nullsFirst: false },
     ],
     unavailableReason: null,
     caveat: "Listings we haven't scored yet sort last rather than being hidden: fit analysis hasn't run for them.",

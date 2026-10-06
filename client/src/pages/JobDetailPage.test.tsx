@@ -128,6 +128,25 @@ vi.mock("../lib/supabaseClient", () => ({
       builder.order = () => builder;
       builder.limit = () => builder;
       builder.maybeSingle = async () => {
+        if (table === "candidate_ranking_status") {
+          // The by-id read shares the ranked contract, so it reads the status
+          // first. "updating" keeps the fallback path (no qualifier ordering).
+          return {
+            data: {
+              candidate_id: "candidate-1",
+              state: "updating",
+              ranking_identity: "state=updating|q=-",
+              role_match_generation: null,
+              corpus_version: null,
+              matcher_version: null,
+              qualifier_generation: null,
+              tokenizer_version: null,
+              evidence_indexed_at: null,
+              evidence_row_count: 0,
+            },
+            error: null,
+          };
+        }
         if (table === "vacancy_jd_snapshots") {
           return { data: vacancyId === null ? null : fixtures.snapshots[vacancyId] ?? null, error: null };
         }
@@ -159,7 +178,7 @@ vi.mock("../lib/supabaseClient", () => ({
         // Saved/dismissed reads return what was inserted in this test, so the
         // page's re-read after a write reflects the decision like the real table.
         const data =
-          table === "candidate_opportunities"
+          table === "candidate_opportunities" || table === "candidate_ranked_opportunities"
             ? fixtures.jobs.filter((entry) => ids.includes(entry.id))
             : table === "saved_vacancies"
               ? fixtures.insertedSaves

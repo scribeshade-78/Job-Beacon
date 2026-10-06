@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { preferredQualifiers } from "../../shared/candidateQualifiers.js";
 import { TOKENIZER_VERSION, evidenceFingerprint } from "../../shared/evidenceTokens.js";
+import { intentCanonical } from "../../shared/rankingInputs.js";
 
 /**
  * Derives a candidate's preference tokens from CONFIRMED saved intent, keeping
@@ -149,6 +150,9 @@ export async function refreshCandidateQualifierTokens(
   const generation = randomUUID();
   const now = new Date().toISOString();
   const derivedFingerprint = intentFingerprintOf(roles);
+  // SQL-comparable copy of the intent this derivation used, so the ranked view
+  // can compare it with candidate_selected_roles inside its own snapshot.
+  const derivedIntentCanonical = intentCanonical(roles);
 
   if (rows.length > 0) {
     const { error: insertError } = await client.from("candidate_qualifier_tokens").insert(
@@ -212,6 +216,7 @@ export async function refreshCandidateQualifierTokens(
       generation,
       tokenizer_version: TOKENIZER_VERSION,
       intent_fingerprint: derivedFingerprint,
+      intent_canonical: derivedIntentCanonical,
       published_at: now,
     });
 
@@ -232,6 +237,7 @@ export async function refreshCandidateQualifierTokens(
       generation,
       tokenizer_version: TOKENIZER_VERSION,
       intent_fingerprint: derivedFingerprint,
+      intent_canonical: derivedIntentCanonical,
       published_at: now,
     });
 

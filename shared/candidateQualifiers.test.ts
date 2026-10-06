@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  assessAssociatedQualifiers,
   assessQualifiers,
+  compareByAssociatedQualifierPreference,
   compareByQualifierPreference,
   preferredQualifiers,
   qualifierPreferenceLabel,
@@ -113,5 +115,60 @@ describe("qualifierPreferenceLabel", () => {
     expect(qualifierPreferenceLabel(["azure", "snowflake"])).toBe("Azure Snowflake preferred");
     expect(qualifierPreferenceLabel([])).toBeNull();
     expect(qualifierPreferenceLabel(["azure"])).not.toContain("only");
+  });
+});
+
+describe("assessAssociatedQualifiers — the authoritative associated ranking rule", () => {
+  const evidence = {
+    title: "Data Engineer",
+    description: "Build pipelines on Azure with Snowflake.",
+  };
+
+  it("counts a qualifier only for the ROLE this vacancy matches", () => {
+    const associated = [
+      { roleName: "Data Engineer", qualifier: "azure" },
+      { roleName: "Teacher", qualifier: "azure" },
+    ];
+
+    expect(assessAssociatedQualifiers(associated, evidence, new Set(["Teacher"])).matched).toEqual([
+      "azure",
+    ]);
+    // The qualifier belongs to Teacher, which this vacancy matches, so it counts
+    // even though the phrase was phrased against Data Engineer too. The
+    // DISTINCT rule is what keeps it from counting twice.
+    expect(assessAssociatedQualifiers(associated, evidence, new Set(["Data Engineer", "Teacher"])).matched).toEqual([
+      "azure",
+    ]);
+  });
+
+  it("ignores a qualifier from a role the vacancy does NOT match", () => {
+    const associated = [{ roleName: "Teacher", qualifier: "azure" }];
+
+    expect(assessAssociatedQualifiers(associated, evidence, new Set(["Data Engineer"]))).toEqual({
+      matched: [],
+      noEvidence: [],
+    });
+  });
+
+  it("keeps a generic relevant posting with zero matched qualifiers", () => {
+    const generic = { title: "Data Engineer", description: "Build pipelines." };
+    const associated = [{ roleName: "Data Engineer", qualifier: "azure" }];
+
+    // Absence of evidence is reported, never a hard exclusion — and the two
+    // postings still order with the Azure one first.
+    expect(assessAssociatedQualifiers(associated, generic, new Set(["Data Engineer"])).matched).toEqual([]);
+    expect(compareByAssociatedQualifierPreference(
+      { evidence, matchedRoles: new Set(["Data Engineer"]) },
+      { evidence: generic, matchedRoles: new Set(["Data Engineer"]) },
+      associated,
+    )).toBeLessThan(0);
+  });
+
+  it("is stable with no preference recorded", () => {
+    expect(compareByAssociatedQualifierPreference(
+      { evidence, matchedRoles: new Set(["Data Engineer"]) },
+      { evidence, matchedRoles: new Set(["Data Engineer"]) },
+      [],
+    )).toBe(0);
   });
 });
