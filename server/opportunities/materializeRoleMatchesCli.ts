@@ -16,7 +16,14 @@ import {
  * operator action rather than a candidate-reachable route. It takes NO credential
  * argument and prints no secret. It is bounded and resumable: --batch-size caps
  * the work per database round trip and --max-batches the work per invocation,
- * NEITHER caps the corpus — the stored keyset cursor continues on the next run.
+ * NEITHER caps the corpus — the stored keyset cursor continues on the next run,
+ * and ONLY while the corpus version the scan started at is still current.
+ *
+ * IT REPORTS FRESHNESS. The materialiser uses loadRoleMatchCoverage() — the same
+ * read-time verdict the feed will consume — and prints it, so an operator can see
+ * whether a completed coverage is current, stale, partial, failed, legacy-unknown
+ * or absent. A scan that spans a corpus change is reported stale and publishes
+ * nothing; the next run restarts it.
  *
  * A candidate must be named explicitly: there is no "all candidates" mode, so a
  * run cannot silently sweep every account.
@@ -88,8 +95,10 @@ async function main() {
       (result.dryRun ? "DRY RUN — nothing written. " : "") +
       "candidate=" + result.candidateId +
       " status=" + result.status +
+      " coverage=" + result.coverageState +
       " generation=" + result.generation +
       (result.startedNewGeneration ? " (new generation)" : " (resumed)") +
+      " corpusVersion=" + result.corpusVersion +
       " batches=" + result.batches +
       " scanned=" + result.scanned +
       " matched=" + result.matched +
@@ -97,6 +106,12 @@ async function main() {
   );
 
   console.log("[materialize-role-matches] roles=" + result.roles.join(", "));
+
+  if (result.status === "stale") {
+    console.log(
+      "[materialize-role-matches] the corpus changed during the scan; nothing was published for this generation. Re-run to restart from the new corpus version.",
+    );
+  }
 
   if (result.error !== undefined) {
     console.error("[materialize-role-matches] failed: " + result.error);
