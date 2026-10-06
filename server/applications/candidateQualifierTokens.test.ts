@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { TOKENIZER_VERSION } from "../../shared/evidenceTokens.js";
 import {
   deriveCandidateQualifierRows,
+  loadPublishedQualifierGeneration,
   refreshCandidateQualifierTokens,
 } from "./candidateQualifierTokens.js";
 
 /**
  * MOCKED CLIENT, NOT DATABASE VALIDATION: the derivation is pure and asserted
- * directly, and the refresh's statements are asserted as EMITTED. The table, its
- * RLS policies and the composite key are unexecuted.
+ * directly, and publication is asserted as the ORDER of emitted statements. The
+ * tables, their RLS policies, the composite key and real concurrency are NOT
+ * exercised by anything here.
  */
 
 describe("deriveCandidateQualifierRows", () => {
@@ -46,8 +48,6 @@ describe("deriveCandidateQualifierRows", () => {
     const before = deriveCandidateQualifierRows([{ roleName: "Data Engineer", rawRoleName: "Azure Data Engineer" }]);
     const after = deriveCandidateQualifierRows([{ roleName: "Data Engineer", rawRoleName: "AWS Data Engineer" }]);
 
-    // Different evidence => different fingerprint, so a stale row is detectable
-    // rather than silently reused.
     expect(before[0].intentFingerprint).not.toBe(after[0].intentFingerprint);
   });
 
@@ -64,80 +64,127 @@ describe("deriveCandidateQualifierRows", () => {
 interface Config {
   roles?: Array<{ role_name: string; raw_role_name: string | null }>;
   rolesError?: unknown;
-  deleteError?: unknown;
   insertError?: unknown;
+  pointerError?: unknown;
 }
 
 function makeClient(config: Config = {}) {
-  const deletes: Array<[string, unknown]> = [];
+  /** Ordered log of the statements that matter, so publication ORDER is assertable. */
+  const log: string[] = [];
   const inserts: Array<Array<Record<string, unknown>>> = [];
-  const selects: string[] = [];
+  const pointers: Array<Record<string, unknown>> = [];
 
   const from = vi.fn((table: string) => {
     if (table === "candidate_selected_roles") {
       const builder: any = {
-        select: (columns: string) => {
-          selects.push(columns);
-          return builder;
-        },
+        select: () => builder,
         eq: () => builder,
         then: (resolve: (value: unknown) => unknown) =>
-          Promise.resolve(config.rolesError ? { data: null, error: config.rolesError } : { data: config.roles ?? [], error: null }).then(
-            resolve,
-          ),
+          Promise.resolve(
+            config.rolesError ? { data: null, error: config.rolesError } : { data: config.roles ?? [], error: null },
+          ).then(resolve),
+      };
+      return builder;
+    }
+
+    if (table === "candidate_qualifier_generations") {
+      const builder: any = {
+        upsert: async (row: Record<string, unknown>) => {
+          log.push("publish");
+          pointers.push(row);
+          return { error: config.pointerError ?? null };
+        },
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () =>
+          pointers.length === 0
+            ? { data: null, error: null }
+            : {
+                data: {
+                  candidate_id: pointers[0].candidate_id,
+                  generation: pointers[0].generation,
+                  tokenizer_version: pointers[0].tokenizer_version,
+                },
+                error: null,
+              },
       };
       return builder;
     }
 
     const builder: any = {
-      delete: () => builder,
-      eq: (column: string, value: unknown) => {
-        deletes.push([column, value]);
-        return builder;
-      },
       insert: async (rows: Array<Record<string, unknown>>) => {
+        log.push("insert");
         inserts.push(rows);
         return { error: config.insertError ?? null };
       },
-      then: (resolve: (value: unknown) => unknown) =>
-        Promise.resolve({ data: null, error: config.deleteError ?? null }).then(resolve),
+      delete: () => {
+        log.push("cleanup");
+        return builder;
+      },
+      eq: () => builder,
+      neq: () => builder,
+      then: (resolve: (value: unknown) => unknown) => Promise.resolve({ data: null, error: null }).then(resolve),
     };
     return builder;
   });
 
-  return { client: { from } as never, deletes, inserts, selects };
+  return { client: { from } as never, log, inserts, pointers };
 }
 
-describe("refreshCandidateQualifierTokens", () => {
-  it("reads confirmed intent, replaces the candidate's rows, and reports counts", async () => {
-    const { client, deletes, inserts, selects } = makeClient({
+describe("refreshCandidateQualifierTokens — staged publication", () => {
+  it("writes the new generation and publishes it AFTER the rows exist", async () => {
+    const { client, log, inserts, pointers } = makeClient({
       roles: [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }],
     });
 
     const result = await refreshCandidateQualifierTokens(client, "candidate-1");
 
-    expect(selects[0]).toContain("raw_role_name");
-    // Replace, not append: a cleared/edited phrase must remove the old rows.
-    expect(deletes).toEqual([["candidate_id", "candidate-1"]]);
+    // The order is the fix: rows first, pointer second, cleanup last.
+    expect(log).toEqual(["insert", "publish", "cleanup"]);
     expect(inserts[0][0]).toMatchObject({
       candidate_id: "candidate-1",
       role_name: "Data Engineer",
       qualifier: "azure",
       tokenizer_version: TOKENIZER_VERSION,
+      generation: result.generation,
     });
-    expect(result).toEqual({ candidateId: "candidate-1", rolesConsidered: 1, rowsWritten: 1 });
+    expect(pointers[0]).toMatchObject({
+      candidate_id: "candidate-1",
+      generation: result.generation,
+      tokenizer_version: TOKENIZER_VERSION,
+    });
+    expect(result).toEqual({
+      candidateId: "candidate-1",
+      rolesConsidered: 1,
+      rowsWritten: 1,
+      generation: result.generation,
+    });
   });
 
-  it("scopes every statement to the candidate, since service_role bypasses RLS", async () => {
-    const { client, deletes } = makeClient({ roles: [] });
+  it("NEVER deletes before publishing, so a failed insert cannot empty the cache", async () => {
+    const { client, log } = makeClient({
+      roles: [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }],
+      insertError: { message: "tokens unavailable" },
+    });
 
-    await refreshCandidateQualifierTokens(client, "candidate-9");
+    await expect(refreshCandidateQualifierTokens(client, "candidate-1")).rejects.toBeTruthy();
 
-    expect(deletes).toEqual([["candidate_id", "candidate-9"]]);
+    // No publish and no cleanup: the previously published generation is still
+    // what readers see, rather than a candidate left with no preferences.
+    expect(log).toEqual(["insert"]);
   });
 
-  it("writes nothing when no confirmed phrase exists, but still clears stale rows", async () => {
-    const { client, inserts } = makeClient({
+  it("does not publish when the pointer write fails", async () => {
+    const { client } = makeClient({
+      roles: [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }],
+      pointerError: { message: "pointer unavailable" },
+    });
+
+    await expect(refreshCandidateQualifierTokens(client, "candidate-1")).rejects.toBeTruthy();
+  });
+
+  it("publishes an explicitly EMPTY generation, so cleared intent is not 'never derived'", async () => {
+    const { client, log, inserts, pointers } = makeClient({
       roles: [{ role_name: "Data Engineer", raw_role_name: null }],
     });
 
@@ -145,23 +192,38 @@ describe("refreshCandidateQualifierTokens", () => {
 
     expect(result.rowsWritten).toBe(0);
     expect(inserts).toHaveLength(0);
+    // The pointer still advances: confirmed-empty is distinguishable from a
+    // failure, and from a candidate who has never been derived.
+    expect(log).toContain("publish");
+    expect(pointers).toHaveLength(1);
   });
 
-  it("throws rather than reporting success when a read, delete or insert fails", async () => {
+  it("throws on a read error rather than publishing anything", async () => {
     await expect(
       refreshCandidateQualifierTokens(makeClient({ rolesError: { message: "down" } }).client, "c"),
     ).rejects.toBeTruthy();
+  });
+});
 
-    await expect(
-      refreshCandidateQualifierTokens(makeClient({ roles: [], deleteError: { message: "down" } }).client, "c"),
-    ).rejects.toBeTruthy();
+describe("loadPublishedQualifierGeneration", () => {
+  it("returns null when nothing has been published — UNKNOWN, not empty", async () => {
+    const { client } = makeClient({ roles: [] });
 
-    await expect(
-      refreshCandidateQualifierTokens(
-        makeClient({ roles: [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }], insertError: { message: "down" } })
-          .client,
-        "c",
-      ),
-    ).rejects.toBeTruthy();
+    expect(await loadPublishedQualifierGeneration(client, "candidate-1")).toBeNull();
+  });
+
+  it("returns the published generation after a refresh", async () => {
+    const { client } = makeClient({
+      roles: [{ role_name: "Data Engineer", raw_role_name: "Azure Data Engineer" }],
+    });
+
+    const refresh = await refreshCandidateQualifierTokens(client, "candidate-1");
+    const published = await loadPublishedQualifierGeneration(client, "candidate-1");
+
+    expect(published).toEqual({
+      candidateId: "candidate-1",
+      generation: refresh.generation,
+      tokenizerVersion: TOKENIZER_VERSION,
+    });
   });
 });

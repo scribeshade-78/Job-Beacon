@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { preferredQualifiers } from "../../shared/candidateQualifiers.js";
 import { TOKENIZER_VERSION, evidenceFingerprint } from "../../shared/evidenceTokens.js";
@@ -67,16 +68,42 @@ export interface RefreshQualifierTokensResult {
   candidateId: string;
   rolesConsidered: number;
   rowsWritten: number;
+  /** The generation just published; older generations are unreachable from here. */
+  generation: string;
+}
+
+/** The generation a candidate's CURRENT preferences are published under. */
+export interface PublishedQualifierGeneration {
+  candidateId: string;
+  generation: string;
+  tokenizerVersion: string;
 }
 
 /**
- * Replaces the candidate's derived qualifier rows.
+ * Publishes a NEW derivation generation, then advances the pointer.
  *
- * A REPLACE, NOT AN APPEND: a cleared phrase, an edited phrase or a removed role
- * must REMOVE the old rows, which is why the delete runs first. Both statements
- * are scoped by candidate_id because service_role bypasses RLS, and any error
- * throws — a partial refresh reported as success would silently rank on stale
- * intent.
+ * WHY NOT DELETE-THEN-INSERT. The previous implementation deleted the
+ * candidate's rows and inserted the replacement as two statements. A failed
+ * insert left the candidate with zero rows, which every reader must interpret as
+ * "no recorded preference" — a confirmed "Azure preferred" would silently stop
+ * ranking. Throwing afterwards does not bring the deleted rows back.
+ *
+ * STAGED PUBLICATION, in this order, and the order is the whole point:
+ *   1. write the new generation's rows (nothing is deleted first);
+ *   2. advance the single per-candidate pointer to that generation.
+ * A failure before step 2 leaves the PREVIOUS generation current, so the
+ * candidate keeps the preferences they had instead of losing them. Step 2 is one
+ * statement, so two concurrent refreshes cannot interleave rows from different
+ * derivations — the last writer's generation becomes current as a whole.
+ *
+ * A CONFIRMED EMPTY DERIVATION STILL ADVANCES THE POINTER. That is what keeps "I
+ * cleared my preference" distinguishable from "derivation failed" and from
+ * "never derived": the pointer exists and the generation has no rows.
+ *
+ * Old generations are cleaned up best-effort AFTER publication. A cleanup
+ * failure is not an error, because the pointer already makes those rows
+ * unreachable; reporting failure there would be reporting a problem that no
+ * reader can observe.
  */
 export async function refreshCandidateQualifierTokens(
   client: Pick<SupabaseClient, "from">,
@@ -97,34 +124,80 @@ export async function refreshCandidateQualifierTokens(
   }));
 
   const rows = deriveCandidateQualifierRows(roles);
+  const generation = randomUUID();
+  const now = new Date().toISOString();
 
-  const { error: deleteError } = await client
-    .from("candidate_qualifier_tokens")
-    .delete()
-    .eq("candidate_id", candidateId);
+  if (rows.length > 0) {
+    const { error: insertError } = await client.from("candidate_qualifier_tokens").insert(
+      rows.map((row) => ({
+        candidate_id: candidateId,
+        role_name: row.roleName,
+        qualifier: row.qualifier,
+        tokenizer_version: row.tokenizerVersion,
+        intent_fingerprint: row.intentFingerprint,
+        generation,
+        refreshed_at: now,
+      })),
+    );
 
-  if (deleteError) {
-    throw deleteError;
+    if (insertError) {
+      // The pointer has NOT moved, so the previously published generation is
+      // still what readers see. Nothing is lost and nothing is half-published.
+      throw insertError;
+    }
   }
 
-  if (rows.length === 0) {
-    return { candidateId, rolesConsidered: roles.length, rowsWritten: 0 };
-  }
-
-  const { error: insertError } = await client.from("candidate_qualifier_tokens").insert(
-    rows.map((row) => ({
+  const { error: pointerError } = await client.from("candidate_qualifier_generations").upsert(
+    {
       candidate_id: candidateId,
-      role_name: row.roleName,
-      qualifier: row.qualifier,
-      tokenizer_version: row.tokenizerVersion,
-      intent_fingerprint: row.intentFingerprint,
-      refreshed_at: new Date().toISOString(),
-    })),
+      generation,
+      tokenizer_version: TOKENIZER_VERSION,
+      published_at: now,
+    },
+    { onConflict: "candidate_id" },
   );
 
-  if (insertError) {
-    throw insertError;
+  if (pointerError) {
+    throw pointerError;
   }
 
-  return { candidateId, rolesConsidered: roles.length, rowsWritten: rows.length };
+  // Best effort, after publication: only now are older generations unreachable.
+  await client
+    .from("candidate_qualifier_tokens")
+    .delete()
+    .eq("candidate_id", candidateId)
+    .neq("generation", generation);
+
+  return { candidateId, rolesConsidered: roles.length, rowsWritten: rows.length, generation };
+}
+
+/**
+ * The candidate's CURRENT published generation, or null when nothing has been
+ * published yet.
+ *
+ * NULL IS UNKNOWN, NOT EMPTY. Callers must not read a missing pointer as "this
+ * candidate has no preferences" — it means no derivation has completed, so
+ * ranking falls back to priority and the feed says so honestly.
+ */
+export async function loadPublishedQualifierGeneration(
+  client: Pick<SupabaseClient, "from">,
+  candidateId: string,
+): Promise<PublishedQualifierGeneration | null> {
+  const { data, error } = await client
+    .from("candidate_qualifier_generations")
+    .select("candidate_id, generation, tokenizer_version")
+    .eq("candidate_id", candidateId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (data === null) {
+    return null;
+  }
+
+  const row = data as { candidate_id: string; generation: string; tokenizer_version: string };
+
+  return { candidateId: row.candidate_id, generation: row.generation, tokenizerVersion: row.tokenizer_version };
 }
