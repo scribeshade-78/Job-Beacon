@@ -3,17 +3,22 @@ import type OpenAI from "openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runFollowUpSweep } from "./mailbox/antiGhosting.js";
+import { runScheduledDiscovery, runScheduledRankingRefresh } from "./opportunities/scheduledRefresh.js";
 import {
   ANTI_GHOSTING_TASK_NAME,
   buildScheduledTasks,
   CALENDAR_SYNC_TASK_NAME,
   DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
+  DEFAULT_DISCOVERY_INTERVAL_MS,
   DEFAULT_FIT_INTERVAL_MS,
+  DEFAULT_RANKING_REFRESH_INTERVAL_MS,
+  DISCOVERY_TASK_NAME,
   FIT_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
   parseDisabledTasks,
+  RANKING_REFRESH_TASK_NAME,
 } from "./schedulerTasks.js";
 
 vi.mock("./opportunities/runner.js", () => ({ runFitAnalysisBatch: vi.fn() }));
@@ -21,6 +26,18 @@ vi.mock("./mailbox/poll.js", () => ({ runMailboxPollingBatch: vi.fn() }));
 vi.mock("./mailbox/classifyBatch.js", () => ({ runMessageClassificationBatch: vi.fn() }));
 vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() }));
 vi.mock("./calendar/sync.js", () => ({ runCalendarSyncBatch: vi.fn() }));
+
+// Batch C. The tasks' own coordination is covered by
+// server/opportunities/scheduledRefresh.test.ts; here only registration, cadence
+// and the summary the scheduler logs.
+vi.mock("./opportunities/scheduledRefresh.js", async (importActual) => {
+  const actual = await importActual<typeof import("./opportunities/scheduledRefresh.js")>();
+  return {
+    ...actual,
+    runScheduledRankingRefresh: vi.fn(),
+    runScheduledDiscovery: vi.fn(),
+  };
+});
 
 /**
  * Task H2 added four tasks, two of which are gated on Google credentials being
@@ -38,7 +55,14 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
   MAILBOX_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 3).toString("base64"),
 };
 
-const ALWAYS_ON = [FIT_TASK_NAME, ANTI_GHOSTING_TASK_NAME, MAILBOX_CLASSIFY_TASK_NAME, MAILBOX_MATCH_TASK_NAME];
+const ALWAYS_ON = [
+  FIT_TASK_NAME,
+  RANKING_REFRESH_TASK_NAME,
+  ANTI_GHOSTING_TASK_NAME,
+  MAILBOX_CLASSIFY_TASK_NAME,
+  MAILBOX_MATCH_TASK_NAME,
+  DISCOVERY_TASK_NAME,
+];
 
 // The constants are imported for real rather than restubbed: the whole point of
 // reading DEFAULT_MIN_AGE_DAYS here is to assert the scheduler uses the
@@ -72,6 +96,8 @@ function taskByName(name: string, env: Record<string, string | undefined> = {}) 
 beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
+  vi.mocked(runScheduledRankingRefresh).mockReset();
+  vi.mocked(runScheduledDiscovery).mockReset();
   vi.mocked(runFitAnalysisBatch).mockResolvedValue({ ...fitResult });
   vi.mocked(runFollowUpSweep).mockResolvedValue({ ...sweepResult });
 });
@@ -105,17 +131,21 @@ describe("buildScheduledTasks", () => {
     // Without Google credentials the Google-dependent tasks are absent, and the
     // two that need no Google access are still there.
     expect(tasks.map((task) => task.name)).toEqual(ALWAYS_ON);
-    expect(tasks.map((task) => task.intervalMs).slice(0, 2))
-      .toEqual([DEFAULT_FIT_INTERVAL_MS, DEFAULT_ANTI_GHOSTING_INTERVAL_MS]);
+    expect(tasks.map((task) => task.intervalMs).slice(0, 3)).toEqual([
+      DEFAULT_FIT_INTERVAL_MS,
+      DEFAULT_RANKING_REFRESH_INTERVAL_MS,
+      DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
+    ]);
   });
 
   it("lets each cadence be retuned without editing code", () => {
     const tasks = buildScheduledTasks(client, openai, {
       SCHEDULER_FIT_INTERVAL_MS: "60000",
+      SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "90000",
       SCHEDULER_ANTI_GHOSTING_INTERVAL_MS: "43200000",
     });
 
-    expect(tasks.map((task) => task.intervalMs).slice(0, 2)).toEqual([60_000, 43_200_000]);
+    expect(tasks.map((task) => task.intervalMs).slice(0, 3)).toEqual([60_000, 90_000, 43_200_000]);
   });
 
   it("ignores an unparseable or negative interval rather than disabling the task", () => {
@@ -364,5 +394,67 @@ describe("the anti-ghosting task", () => {
     vi.mocked(runFollowUpSweep).mockRejectedValue(new Error("rpc unavailable"));
 
     await expect(taskByName(ANTI_GHOSTING_TASK_NAME, {}).run()).rejects.toThrow("rpc unavailable");
+  });
+});
+
+describe("the Batch C scheduled refresh tasks", () => {
+  it("schedules the ranking refresh at its own default cadence and logs the tick summary", async () => {
+    vi.mocked(runScheduledRankingRefresh).mockResolvedValue({
+      candidatesConsidered: 2,
+      completed: 1,
+      failed: 1,
+      stillRunning: 0,
+      noTargetRoles: 0,
+      deadlineReached: false,
+      identities: ["identity-1"],
+    });
+
+    const task = taskByName(RANKING_REFRESH_TASK_NAME, {});
+    expect(task.intervalMs).toBe(DEFAULT_RANKING_REFRESH_INTERVAL_MS);
+
+    const summary = await task.run();
+    expect(summary).toMatchObject({ candidatesConsidered: 2, completed: 1, failed: 1 });
+    // The budget comes from the environment, with the documented defaults.
+    expect(vi.mocked(runScheduledRankingRefresh)).toHaveBeenCalledWith(client, {
+      budget: expect.objectContaining({ maxCandidates: 20, perCandidateDeadlineMs: 10_000 }),
+    });
+  });
+
+  it("schedules discovery at its own default cadence and logs the tick summary", async () => {
+    vi.mocked(runScheduledDiscovery).mockResolvedValue({
+      candidatesConsidered: 1,
+      created: 3,
+      updated: 0,
+      failed: 0,
+      failedSources: 0,
+      deadlineReached: false,
+    });
+
+    const task = taskByName(DISCOVERY_TASK_NAME, {});
+    expect(task.intervalMs).toBe(DEFAULT_DISCOVERY_INTERVAL_MS);
+
+    expect(await task.run()).toMatchObject({ created: 3 });
+    expect(vi.mocked(runScheduledDiscovery)).toHaveBeenCalledWith(client, {
+      budget: expect.objectContaining({ maxCandidates: 20 }),
+    });
+  });
+
+  it("retunes both new cadences without editing code", () => {
+    const tasks = buildScheduledTasks(client, openai, {
+      SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "45000",
+      SCHEDULER_DISCOVERY_INTERVAL_MS: "3600000",
+    });
+
+    expect(tasks.find((task) => task.name === RANKING_REFRESH_TASK_NAME)?.intervalMs).toBe(45_000);
+    expect(tasks.find((task) => task.name === DISCOVERY_TASK_NAME)?.intervalMs).toBe(3_600_000);
+  });
+
+  it("can disable either new task independently", () => {
+    const names = buildScheduledTasks(client, openai, { SCHEDULER_DISABLED_TASKS: "discovery" }).map(
+      (task) => task.name,
+    );
+
+    expect(names).toContain(RANKING_REFRESH_TASK_NAME);
+    expect(names).not.toContain(DISCOVERY_TASK_NAME);
   });
 });

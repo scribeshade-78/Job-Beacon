@@ -1,6 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import {
+  readScheduledRefreshBudget,
+  runScheduledDiscovery,
+  runScheduledRankingRefresh,
+} from "./opportunities/scheduledRefresh.js";
 import { DEFAULT_DRAFT_LIMIT, DEFAULT_MIN_AGE_DAYS, runFollowUpSweep } from "./mailbox/antiGhosting.js";
 import { runMailboxPollingBatch } from "./mailbox/poll.js";
 import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
@@ -50,6 +55,8 @@ export const DEFAULT_FIT_INTERVAL_MS = 5 * 60_000;
 export const DEFAULT_ANTI_GHOSTING_INTERVAL_MS = 24 * 60 * 60_000;
 
 export const FIT_TASK_NAME = "fit-analysis";
+export const RANKING_REFRESH_TASK_NAME = "ranking-refresh";
+export const DISCOVERY_TASK_NAME = "discovery";
 export const ANTI_GHOSTING_TASK_NAME = "anti-ghosting";
 export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
 export const MAILBOX_CLASSIFY_TASK_NAME = "mailbox-classify";
@@ -82,6 +89,21 @@ export const DEFAULT_MAILBOX_MATCH_INTERVAL_MS = 5 * 60_000;
  * halving the request volume. Ten minutes is the compromise.
  */
 export const DEFAULT_CALENDAR_SYNC_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Batch C — the scheduled preference-ranking refresh. DB-only over each
+ * candidate's own rows, so ten minutes keeps a live feed current without any
+ * third-party request, model call or submission.
+ */
+export const DEFAULT_RANKING_REFRESH_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Batch C — scheduled discovery. It reaches third-party APIs, so it defaults
+ * CONSERVATIVELY to four runs a day even though the unattended path is restricted
+ * to keyless public sources; SCHEDULER_DISCOVERY_INTERVAL_MS changes it without a
+ * deploy, and each tick is capped to SCHEDULER_REFRESH_MAX_CANDIDATES_PER_TICK.
+ */
+export const DEFAULT_DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
 
 /**
  * Parses SCHEDULER_DISABLED_TASKS, a comma-separated list of task names.
@@ -271,6 +293,23 @@ export function buildScheduledTasks(
         };
       },
     },
+    /**
+     * Batch C ranking refresh. Runs BEFORE the network tasks so the cheap DB work
+     * is never delayed by an intake call. It reuses runRankingRefresh exactly, so
+     * the scheduled and manual paths cannot diverge; force is always false, so a
+     * failed refresh is never auto-retried.
+     */
+    {
+      name: RANKING_REFRESH_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_RANKING_REFRESH_INTERVAL_MS",
+        DEFAULT_RANKING_REFRESH_INTERVAL_MS,
+        env,
+      ),
+      // Spread into a fresh object so the summary satisfies the scheduler's
+      // Record<string, unknown> log payload without an index signature on the type.
+      run: async () => ({ ...(await runScheduledRankingRefresh(client, { budget: readScheduledRefreshBudget(env) })) }),
+    },
     {
       name: ANTI_GHOSTING_TASK_NAME,
       intervalMs: readEnvInt(
@@ -314,6 +353,17 @@ export function buildScheduledTasks(
     mailboxClassifyTask(client, openai, env),
     mailboxMatchTask(client, env),
     ...(capability.googleCalendar.enabled ? [calendarSyncTask(client, env)] : []),
+
+    /**
+     * Batch C scheduled discovery. LAST so its network latency never delays the
+     * DB tasks; authorization and keyless-only source selection live inside the
+     * task, and new vacancies are ranked by the next ranking-refresh tick.
+     */
+    {
+      name: DISCOVERY_TASK_NAME,
+      intervalMs: readEnvInt("SCHEDULER_DISCOVERY_INTERVAL_MS", DEFAULT_DISCOVERY_INTERVAL_MS, env),
+      run: async () => ({ ...(await runScheduledDiscovery(client, { budget: readScheduledRefreshBudget(env) })) }),
+    },
   ];
 
   return tasks.filter((task) => !disabled.has(task.name));

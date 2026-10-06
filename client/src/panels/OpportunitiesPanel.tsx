@@ -54,9 +54,20 @@ import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
-import { describeRankingRefresh, runRankingRefresh } from "../lib/feedRankingRefresh";
+import {
+  describeRankingRefresh,
+  readRankingRefreshStatus,
+  runRankingRefresh,
+} from "../lib/feedRankingRefresh";
 import { formatSalary } from "../lib/opportunities";
 import { formatDistanceToNow } from "date-fns";
+
+/** HH:MM for the compact "last checked" notice; empty when the value is unusable. */
+function formatCheckedAt(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 interface RefreshNotice {
   tone: "info" | "error";
@@ -137,6 +148,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    * The state of the real ranking refresh this panel requested. Kept apart from
    * "querying" so a refresh is never confused with a page load.
    */
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
   const [feedRefresh, setFeedRefresh] = useState<
     | { kind: "idle" }
     | { kind: "running"; text: string }
@@ -202,6 +214,25 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   );
 
   useEffect(() => () => feedRefreshAbort.current?.abort(), []);
+
+  /**
+   * The compact freshness line. Re-read whenever the refresh run changes state, so
+   * "last checked" moves forward when work completes without polling the database
+   * on every render.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    void readRankingRefreshStatus(getSupabaseBrowserClient()).then((row) => {
+      if (!cancelled) {
+        setLastCheckedAt(row?.lastCheckedAt ?? null);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [feedRefresh.kind]);
 
   /**
    * THE ONE TRIGGER. A refresh is requested ONLY when the loaded rows say the
@@ -822,7 +853,8 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
               : ranking.state === "unavailable"
                 ? "Preference ranking is unavailable right now — showing priority order."
                 : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}
-            {feedRefresh.kind === "failed" && <> {feedRefresh.text}</>}{" "}
+            {feedRefresh.kind === "failed" && <> {feedRefresh.text}</>}
+            {lastCheckedAt !== null && <> Last checked {formatCheckedAt(lastCheckedAt)}.</>}{" "}
             {/* Retry invokes the REAL refresh path, not a reload of the same stale view. */}
             <button
               type="button"

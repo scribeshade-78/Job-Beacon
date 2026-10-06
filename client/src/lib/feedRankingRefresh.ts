@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "./supabaseClient";
 
 /**
@@ -210,6 +211,50 @@ export async function runRankingRefresh(
   }
 
   return { kind: "timeout", result: lastResult };
+}
+
+export interface RankingRefreshStatusRow {
+  status: string;
+  /** When the last refresh last made progress or completed. */
+  lastCheckedAt: string | null;
+  lastError: string | null;
+}
+
+/**
+ * The caller's own refresh row, for a compact "last checked" notice.
+ *
+ * RLS scopes this to the signed-in candidate (candidate_ranking_refresh has
+ * SELECT-own only), and it NEVER throws: a missing or unreadable row means "no
+ * timestamp to show", not a failed feed.
+ */
+export async function readRankingRefreshStatus(
+  client: Pick<SupabaseClient, "from">,
+): Promise<RankingRefreshStatusRow | null> {
+  try {
+    const { data, error } = await client
+      .from("candidate_ranking_refresh")
+      .select("status, completed_at, updated_at, last_error")
+      .maybeSingle();
+
+    if (error || !data) {
+      return null;
+    }
+
+    const row = data as {
+      status: string;
+      completed_at: string | null;
+      updated_at: string | null;
+      last_error: string | null;
+    };
+
+    return {
+      status: row.status,
+      lastCheckedAt: row.completed_at ?? row.updated_at ?? null,
+      lastError: row.last_error ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** The one line a panel shows for a refresh result. */

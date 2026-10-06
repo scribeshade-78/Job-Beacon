@@ -163,3 +163,30 @@ describe("runIntakeAcrossSources", () => {
     }
   });
 });
+
+describe("runIntakeAcrossSources deadline", () => {
+  it("stops before starting another source once the budget is spent", async () => {
+    // The clock advances by 6s per source against a 10s budget: the third source
+    // never starts. An in-flight source is never interrupted — this only prevents
+    // STARTING another, the same contract runFitAnalysisBatch documents.
+    let clock = 0;
+    const runOne = vi.fn(async (_c: SupabaseClient, input: { sourceCode: string }) => {
+      clock += 6_000;
+      return sourceResult(input.sourceCode, { received: 1 });
+    });
+
+    const result = await runIntakeAcrossSources(client, { deadlineMs: 10_000 }, { runOne, now: () => clock });
+
+    expect(runOne).toHaveBeenCalledTimes(2);
+    expect(result.stoppedOnDeadline).toBe(true);
+  });
+
+  it("does not mark a deadline stop when every source ran", async () => {
+    const runOne = vi.fn(async (_c: SupabaseClient, input: { sourceCode: string }) => sourceResult(input.sourceCode));
+
+    const result = await runIntakeAcrossSources(client, { deadlineMs: 10_000 }, { runOne, now: () => 0 });
+
+    expect(runOne).toHaveBeenCalledTimes(3);
+    expect(result.stoppedOnDeadline).toBeUndefined();
+  });
+});

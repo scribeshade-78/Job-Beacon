@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   describeRankingRefresh,
+  readRankingRefreshStatus,
   requestRankingRefresh,
   runRankingRefresh,
   type RankingRefreshResult,
@@ -153,5 +154,43 @@ describe("describeRankingRefresh", () => {
     expect(describeRankingRefresh(SUCCEEDED)).toContain("up to date");
     expect(describeRankingRefresh({ ...RUNNING, outcome: "no_target_roles" })).toContain("target roles");
     expect(describeRankingRefresh({ ...RUNNING, outcome: "failed", lastError: "db down" })).toContain("db down");
+  });
+});
+
+describe("readRankingRefreshStatus", () => {
+  function clientReturning(data: unknown, error: unknown = null) {
+    return {
+      from: () => ({ select: () => ({ maybeSingle: async () => ({ data, error }) }) }),
+    } as never;
+  }
+
+  it("returns the caller's own last-checked timestamp (RLS scopes the row)", async () => {
+    const row = await readRankingRefreshStatus(
+      clientReturning({
+        status: "succeeded",
+        completed_at: "2026-10-01T10:00:00Z",
+        updated_at: "2026-10-01T09:00:00Z",
+        last_error: null,
+      }),
+    );
+
+    expect(row).toEqual({
+      status: "succeeded",
+      lastCheckedAt: "2026-10-01T10:00:00Z",
+      lastError: null,
+    });
+  });
+
+  it("falls back to updated_at when nothing completed yet", async () => {
+    const row = await readRankingRefreshStatus(
+      clientReturning({ status: "running", completed_at: null, updated_at: "2026-10-01T09:00:00Z", last_error: null }),
+    );
+
+    expect(row?.lastCheckedAt).toBe("2026-10-01T09:00:00Z");
+  });
+
+  it("returns null instead of throwing when the row is absent or unreadable", async () => {
+    expect(await readRankingRefreshStatus(clientReturning(null))).toBeNull();
+    expect(await readRankingRefreshStatus({ from: () => { throw new Error("no table"); } } as never)).toBeNull();
   });
 });

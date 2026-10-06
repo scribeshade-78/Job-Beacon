@@ -115,6 +115,8 @@ export interface RunIntakeDeps {
    * what its tests need to exercise without standing up a whole Supabase graph.
    */
   runOne?: (client: SupabaseClient, input: RunIntakeInput, deps: RunIntakeDeps) => Promise<RunIntakeResult>;
+  /** Injectable clock, so the deadline can be tested without waiting. */
+  now?: () => number;
 }
 
 /**
@@ -160,6 +162,12 @@ export interface RunIntakeFanOutResult {
   durationMs: number;
   /** How many sources were skipped, so a caller can report partial success. */
   failedSources: number;
+  /**
+   * True when the fan-out stopped because its time budget ran out, not because
+   * it finished the source list. An in-flight source is never interrupted; this
+   * only prevents STARTING another, the same contract as runFitAnalysisBatch.
+   */
+  stoppedOnDeadline?: boolean;
 }
 
 export interface RunIntakeFanOutInput {
@@ -171,6 +179,12 @@ export interface RunIntakeFanOutInput {
   location?: string;
   country?: string;
   limit?: number;
+  /**
+   * Wall-clock budget for the whole fan-out. Checked BEFORE each source only, so
+   * a started fetch always completes; a scheduled per-candidate budget uses this
+   * rather than interrupting a third-party request mid-flight.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -209,12 +223,23 @@ export async function runIntakeAcrossSources(
       ? registered.filter((adapter) => input.sourceCodes!.includes(adapter.sourceCode))
       : registered;
 
-  const startedAt = Date.now();
+  const now = deps.now ?? (() => Date.now());
+  const startedAt = now();
+  const deadline = input.deadlineMs === undefined ? Number.POSITIVE_INFINITY : startedAt + input.deadlineMs;
+  let stoppedOnDeadline = false;
   const sources: IntakeSourceSummary[] = [];
   const runOne = deps.runOne ?? runIntake;
 
   for (const adapter of wanted) {
-    const sourceStartedAt = Date.now();
+    // Checked before each source, never mid-fetch: stopping a request already in
+    // flight is not something this loop can do, and pretending otherwise would
+    // make the budget a lie.
+    if (now() >= deadline) {
+      stoppedOnDeadline = true;
+      break;
+    }
+
+    const sourceStartedAt = now();
 
     try {
       const result = await runOne(
@@ -274,7 +299,7 @@ export async function runIntakeAcrossSources(
         skippedByAdapter: 0,
         newVacancyIds: [],
         trustStatusCounts: {},
-        durationMs: Date.now() - sourceStartedAt,
+        durationMs: now() - sourceStartedAt,
       });
     }
   }
@@ -298,8 +323,9 @@ export async function runIntakeAcrossSources(
     skippedByAdapter: sum((s) => s.skippedByAdapter),
     newVacancyIds: sources.flatMap((source) => source.newVacancyIds),
     trustStatusCounts,
-    durationMs: Date.now() - startedAt,
+    durationMs: now() - startedAt,
     failedSources: sources.filter((source) => source.status === "failed").length,
+    ...(stoppedOnDeadline ? { stoppedOnDeadline: true } : {}),
   };
 }
 
