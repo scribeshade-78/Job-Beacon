@@ -108,7 +108,14 @@ function makeClient(config: Config = {}) {
           filters.push([column, value]);
           return builder;
         },
-        maybeSingle: async () => ({ data: config.pointer ?? null, error: null }),
+        maybeSingle: async () =>
+          config.pointer === null || config.pointer === undefined
+            ? { data: null, error: null }
+            : {
+                // A fixed id so the returned shape is assertable.
+                data: { ...config.pointer, generation: "generation-1", tokenizer_version: TOKENIZER_VERSION },
+                error: null,
+              },
         insert: async () => {
           log.push("pointer-insert");
           return { error: config.pointerInsertError ?? null };
@@ -270,8 +277,43 @@ describe("refreshCandidateQualifierTokens — publication guard", () => {
   });
 });
 
-describe("loadPublishedQualifierGeneration", () => {
+describe("loadPublishedQualifierGeneration — read-time validity", () => {
   it("returns null when nothing has been published — UNKNOWN, not empty", async () => {
     expect(await loadPublishedQualifierGeneration(makeClient({ pointer: null }).client, "candidate-1")).toBeNull();
+  });
+
+  it("returns the generation when it still matches the candidate's CURRENT intent", async () => {
+    const { client } = makeClient({
+      roles: AZURE,
+      pointer: { candidate_id: "candidate-1", intent_fingerprint: intentFingerprintOf(AZURE_INTENT) },
+    });
+
+    expect(await loadPublishedQualifierGeneration(client, "candidate-1")).toEqual({
+      candidateId: "candidate-1",
+      generation: "generation-1",
+      tokenizerVersion: TOKENIZER_VERSION,
+    });
+  });
+
+  it("treats a STALE generation as unknown, so a cleared preference stops ranking", async () => {
+    // The pointer still names the old generation — publication deliberately keeps
+    // the previous one current when a refresh loses a race. After the candidate
+    // CLEARS their phrase, that generation no longer corresponds to anything they
+    // recorded, so it must not be served as current preferences.
+    const { client } = makeClient({
+      roles: [{ role_name: "Data Engineer", raw_role_name: null }],
+      pointer: { candidate_id: "candidate-1", intent_fingerprint: intentFingerprintOf(AZURE_INTENT) },
+    });
+
+    expect(await loadPublishedQualifierGeneration(client, "candidate-1")).toBeNull();
+  });
+
+  it("treats a pre-guard pointer with no fingerprint as unverifiable", async () => {
+    const { client } = makeClient({
+      roles: AZURE,
+      pointer: { candidate_id: "candidate-1", intent_fingerprint: null },
+    });
+
+    expect(await loadPublishedQualifierGeneration(client, "candidate-1")).toBeNull();
   });
 });

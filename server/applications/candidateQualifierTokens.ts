@@ -263,12 +263,32 @@ export async function refreshCandidateQualifierTokens(
 }
 
 /**
- * The candidate's CURRENT published generation, or null when nothing has been
- * published yet.
+ * The candidate's CURRENT, VALID published generation, or null when there is
+ * none that may be trusted.
  *
  * NULL IS UNKNOWN, NOT EMPTY. Callers must not read a missing pointer as "this
- * candidate has no preferences" — it means no derivation has completed, so
- * ranking falls back to priority and the feed says so honestly.
+ * candidate has no preferences": it means no trustworthy derivation exists, so
+ * ranking falls back to priority and the feed must say so honestly.
+ *
+ * READ-TIME VALIDITY, NOT POINTER TRUST. This is the part the publication guard
+ * could not cover. Publication deliberately keeps the PREVIOUS generation
+ * current when a refresh loses the race or is abandoned — which is right for a
+ * failed refresh and WRONG once the candidate has edited or cleared their
+ * intent, because that older generation's rows no longer correspond to anything
+ * they recorded. The pointer's stored fingerprint therefore proves only what the
+ * generation was derived FROM; it is not the source of truth for what the
+ * candidate's intent IS now.
+ *
+ * So the current intent is recomputed here and compared. A mismatch means the
+ * published generation is STALE, and a stale generation is returned as UNKNOWN
+ * rather than as preferences: presenting "Azure" as a current preference after
+ * the candidate cleared it is exactly the silent staleness this guards.
+ *
+ * RESIDUAL WINDOW, STATED PLAINLY: intent can still change between this read and
+ * the caller's use of it. That window is unavoidable without reading intent and
+ * preferences in one transaction; it is bounded, self-healing on the next read,
+ * and never turns a cleared preference into a permanent boost. A pre-guard
+ * pointer with a NULL fingerprint is likewise treated as unverifiable.
  */
 export async function loadPublishedQualifierGeneration(
   client: Pick<SupabaseClient, "from">,
@@ -276,7 +296,7 @@ export async function loadPublishedQualifierGeneration(
 ): Promise<PublishedQualifierGeneration | null> {
   const { data, error } = await client
     .from("candidate_qualifier_generations")
-    .select("candidate_id, generation, tokenizer_version")
+    .select("candidate_id, generation, tokenizer_version, intent_fingerprint")
     .eq("candidate_id", candidateId)
     .maybeSingle();
 
@@ -288,7 +308,37 @@ export async function loadPublishedQualifierGeneration(
     return null;
   }
 
-  const row = data as { candidate_id: string; generation: string; tokenizer_version: string };
+  const row = data as {
+    candidate_id: string;
+    generation: string;
+    tokenizer_version: string;
+    intent_fingerprint: string | null;
+  };
+
+  if (row.intent_fingerprint === null) {
+    // Published before the guard existed: unverifiable, so not trustworthy.
+    return null;
+  }
+
+  const { data: roleData, error: roleError } = await client
+    .from("candidate_selected_roles")
+    .select("role_name, raw_role_name")
+    .eq("candidate_id", candidateId);
+
+  if (roleError) {
+    throw roleError;
+  }
+
+  const roles = ((roleData ?? []) as Array<{ role_name: string; raw_role_name: string | null }>).map((entry) => ({
+    roleName: entry.role_name,
+    rawRoleName: entry.raw_role_name,
+  }));
+
+  if (intentFingerprintOf(roles) !== row.intent_fingerprint) {
+    // The candidate's intent has moved since this generation was published. The
+    // generation is stale and must not be presented as current preferences.
+    return null;
+  }
 
   return { candidateId: row.candidate_id, generation: row.generation, tokenizerVersion: row.tokenizer_version };
 }
