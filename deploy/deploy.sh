@@ -72,6 +72,19 @@ if [ -n "${SSH_KEY}" ]; then
 fi
 REMOTE="${VPS_USER}@${VPS_HOST}"
 
+# ---- 0. schema preflight -----------------------------------------------------
+# THE TARGET DATABASE IS VERIFIED BEFORE ANYTHING IS BUILT OR UPLOADED, because a
+# deploy that ships code ahead of the schema is down on arrival and the local
+# build is the expensive part. See deploy/preflight-schema.sh for why
+# migration-history parity alone is not sufficient: the 2026-10 Find Jobs outage
+# had every migration recorded and a schema-cache reload, and the feed was still
+# dead because a view's column list was frozen before the column existed.
+#
+# Invoked through bash rather than executed directly so the script does not
+# depend on its executable bit surviving a Windows checkout.
+log "Running schema preflight against the target database"
+bash "${REPO_ROOT}/deploy/preflight-schema.sh"
+
 # ---- 1. sanity build ---------------------------------------------------------
 cd "${REPO_ROOT}"
 log "Building locally to fail fast on a compile error"
