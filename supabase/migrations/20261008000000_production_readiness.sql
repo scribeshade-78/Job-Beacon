@@ -1,0 +1,122 @@
+-- ---------------------------------------------------------------------------
+-- Production readiness: the service_role privileges production needs but a
+-- fresh replay does not have.
+--
+-- WHY A MIGRATION AND NOT A HAND-RUN GRANT. These were applied to production
+-- out-of-band, which is the drift this repository has spent a day cleaning up: a
+-- rebuilt database (CI, a new machine, a re-provisioned production) would come up
+-- WITHOUT them, and the failure is not obvious. Verified before writing this: on a
+-- pristine `supabase db reset`,
+--
+--   set role service_role;
+--   update public.resume_documents set parse_status = parse_status where false;
+--   ERROR:  permission denied for table resume_documents
+--
+-- while production holds parse_status = 'parsed' with parsed_at set, i.e.
+-- production can and a replay cannot.
+--
+-- Note this is the SAME class as 20260823120000 (service_role lacked SELECT on
+-- resume_documents) and 20260917180010 (lacked INSERT). Third time.
+--
+-- WHY IT MATTERS. server/resumes/parseStatus.ts writes the parse lifecycle through
+-- this table as service_role, and readinessGate.ts reads parse_status = 'parsed'
+-- to decide a resume is usable for matching, tailoring and submission. Without the
+-- grant, POST /api/resumes/:id/extract cannot record what it did.
+--
+-- GRANT SCOPE. Table-level UPDATE matches the shape service_role already has on
+-- this table (table-level INSERT and SELECT). If you would rather keep it tight,
+-- scope it to the columns parseStatus.ts actually writes —
+--   grant update (parse_status, parse_started_at, parse_updated_at, parsed_at,
+--                 parse_error) on public.resume_documents to service_role;
+-- — but take that list from parseStatus.ts rather than from this comment.
+-- ---------------------------------------------------------------------------
+grant update on public.resume_documents to service_role;
+
+-- The feed views. NOTHING IN server/ READS THESE AS service_role — the browser
+-- reads them as 'authenticated', and every server-side path goes to the base
+-- tables. These two grants exist because a service-role reader (an admin or MCP
+-- surface, or a test harness) otherwise gets 42501 on a view it is entitled to
+-- read, which reads as a bug rather than a missing grant. Both views are
+-- security_invoker = on, so the caller's own table privileges still apply.
+grant select on public.candidate_opportunities to service_role;
+grant select on public.candidate_ranked_opportunities to service_role;
+
+-- ---------------------------------------------------------------------------
+-- DELIBERATELY NOT HERE: source_policies rows for greenhouse and lever.
+--
+-- Do not add them. 20260917320000_source_policy_rows_on_credential.sql exists
+-- solely to REVERT an earlier migration that seeded exactly those rows, for two
+-- reasons it states outright:
+--
+--   1. Seeding breaks 20 pgTAP files that insert their own source_policies
+--      fixture row, every one of them failing with
+--        duplicate key value violates unique constraint "source_policies_pkey"
+--      before a single assertion runs.
+--   2. Seeding is unnecessary. evaluateSourcePolicy reads the row with
+--      maybeSingle() and falls back to false, so an ABSENT row and a row whose
+--      flag is false are the same answer to the gate.
+--
+-- The supported mechanism already exists and is live: the statement-level trigger
+-- ats_credentials_sync_policy on public.ats_credentials calls
+-- public.refresh_source_application_policy(), which CREATES the policy row when an
+-- active employer credential arrives and turns the flag off again when it is
+-- withdrawn. Authorization enables the source; a hand-written row would assert
+-- authorization that does not exist yet, and the next trigger firing would undo it.
+--
+-- See docs for the operator steps: add the credential through the admin ATS
+-- Credentials screen. Nothing to migrate.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- DECIDED 2026-10-08 — the Free plan's auto-apply allowance stays at 0.
+--
+-- The intent is "Free users hit an allowance limit, not an instant block". That
+-- change is THREE files, and the third is the problem:
+--
+--   (1) shared/pricing.ts      PLAN_CATALOGUE free: autoApplyPerMonth { 0, 0 } -> { 10, 10 }
+--   (2) 20260927120000_pricing_plans.sql, PARITY-BLOCK:QUOTAS, line 142:
+--         ('free', 0, 0, 0, 0)  ->  ('free', 10, 10, 0, 0)
+--       (shared/pricing.parity.test.ts parses that block and fails if the two
+--        disagree, so they must move together, one tuple per line)
+--   (3) a forward UPDATE like the one below, for databases already seeded.
+--
+-- The problem is that the number is NOT a limit.
+-- server/billing/automationEntitlement.ts, in its own words:
+--
+--   "THE QUOTA IS NOT YET A COUNTER. This checks only that the plan INCLUDES an
+--    allowance; it does not check remaining/consumed usage. The monthly auto-apply
+--    quota is not currently a real counter — enforcement of actual usage is a
+--    Phase 3 prerequisite for real submission."
+--
+-- and loadAutomationEntitlement decides planEntitled as "either destination quota
+-- is greater than zero". So setting Free to 10 does not give Free users ten
+-- applications a month; it gives them UNLIMITED automatic applications, bounded
+-- only by the 25-per-24h velocity cap in eligibilityGate.ts. Free would become
+-- strictly more generous than Starter's advertised "30/month" suggests, and the
+-- pricing page would be claiming an allowance nothing enforces.
+--
+-- CHOSEN: leave Free at 0 and keep the instant block until the counter exists.
+-- The block is true; raising the number without a counter would not create a
+-- ten-a-month limit, it would create no limit at all. The user-facing remedy for
+-- the block now exists anyway — findActionableBlocker turns plan_not_eligible into
+-- a "See plans" prompt rather than a silent refusal.
+--
+-- The rejected alternatives, recorded so they are not rediscovered as new ideas:
+--   (a) build the usage counter first (Phase 3), then raise the number and mean it;
+--   (b) ship the raise now and re-word Free to "automation included, no monthly cap
+--       yet" — true, but it rewrites the paid tiers' value story.
+--
+-- When the counter lands, this is the statement to run:
+--
+-- update public.plan_limits pl
+--    set max_auto_apply_india_per_month = 10,
+--        max_auto_apply_us_per_month = 10,
+--        updated_at = now()
+--   from public.subscription_plans p
+--  where p.code = 'free'
+--    and pl.plan_id = p.id;
+--
+-- Free's description also reads "with no automation" in BOTH shared/pricing.ts and
+-- the subscription_plans upsert in 20260927120000 — not covered by the parity test,
+-- so it will not fail loudly if you forget it.
+-- ---------------------------------------------------------------------------
