@@ -149,6 +149,57 @@ services:
       - default
       - traefik-proxy
 
+  # ---------------------------------------------------------------------------
+  # Task D — the autonomous scheduler (server/scheduler.ts).
+  #
+  # A SECOND PROCESS FROM THE SAME IMAGE, and it has to be. The runtime image
+  # contains only dist/ and production node_modules — no server/ source and no
+  # tsx (a devDependency) — so "npm run scheduler" cannot run in there. The entry
+  # point is the compiled dist/server/server/scheduler.js, alongside the index.js
+  # the app service runs.
+  #
+  # IT SERVES NO HTTP: no ports, no Traefik labels, no traefik-proxy network. The
+  # healthcheck is DISABLED rather than left to fail: the image's HEALTHCHECK
+  # probes :5000/api/health, which this process never answers, so the container
+  # would sit permanently "unhealthy" and tell an operator nothing true.
+  #
+  # SCHEDULER_DISABLED_TASKS IS AN OFF-LIST. The scheduler builds every task it
+  # can and removes the names listed here, so this list is what keeps the
+  # model-backed tasks (fit-analysis, anti-ghosting, mailbox-classify) and the
+  # network task (discovery) switched OFF. Enabling one later means deleting its
+  # name from this list, not editing code.
+  #
+  # OPENROUTER_API_KEY IS STILL REQUIRED even though every task left enabled is
+  # DB-only: scheduler.ts constructs the OpenAI client before it filters the task
+  # list. Without the key the process logs "cannot start", exits 0, and
+  # unless-stopped restarts it into the same loop — visible only in the logs.
+  # ---------------------------------------------------------------------------
+  scheduler:
+    image: jobbeacon:latest
+    container_name: jobbeacon-scheduler
+    command: ["node", "dist/server/server/scheduler.js"]
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: "production"
+      SCHEDULER_DISABLED_TASKS: "fit-analysis,anti-ghosting,mailbox-poll,mailbox-classify,mailbox-match,calendar-sync,discovery"
+      SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "600000"
+      SCHEDULER_REFRESH_MAX_CANDIDATES_PER_TICK: "20"
+      SCHEDULER_REFRESH_PER_CANDIDATE_DEADLINE_MS: "10000"
+      SCHEDULER_REFRESH_TICK_DEADLINE_MS: "120000"
+    depends_on:
+      - app
+    healthcheck:
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
 # Traefik's own compose declares this external, so it is referenced rather than
 # created here: a stack that tried to define it would clash with the running
 # proxy on the network name.
