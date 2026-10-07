@@ -20,29 +20,40 @@ begin;
 create extension if not exists pgtap with schema extensions;
 select plan(20);
 
+-- The migration chain seeds browseable local-fixture postings (migrations
+-- 20260917170000_local_fixture_source through 20260917200000) that carry NO
+-- evidence tokens, so the corpus-wide completeness check can never be true on a
+-- freshly migrated database. Isolate the corpus to this fixture's own vacancies;
+-- the update is rolled back with the transaction.
+update public.vacancies
+set status = 'expired'
+where status = 'active'
+  and trust_status in ('VERIFIED', 'VERIFIED_INCOMPLETE', 'UNDER_REVIEW');
+
 -- ---------------------------------------------------------------------------
 -- Fixtures.
 -- ---------------------------------------------------------------------------
 insert into auth.users (id, email) values
   ('a1a1a1a1-1111-1111-1111-111111111111', 'rank-a@test.local'),
-  ('b2b2b2b2-2222-2222-2222-222222222222', 'rank-b@test.local');
+  ('b2b2b2b2-2222-2222-2222-222222222222', 'rank-b@test.local'),
+  ('c0c0c0c0-0000-0000-0000-000000000000', 'rank-c@test.local');
 
 insert into candidate_profiles (id) values
   ('a1a1a1a1-1111-1111-1111-111111111111'),
   ('b2b2b2b2-2222-2222-2222-222222222222');
 
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('greenhouse', 'none', 'r2-v1');
+values ('pgtap_fixture', 'none', 'r2-v1');
 insert into vacancy_sources (id, source_code, target_key)
-values ('c3c3c3c3-3333-3333-3333-333333333333', 'greenhouse', 'acme');
+values ('c3c3c3c3-3333-3333-3333-333333333333', 'pgtap_fixture', 'pgtap');
 
 -- Three browseable vacancies: a matching Data Engineer that mentions Azure, a
 -- generic matching Data Engineer that does not, and an unrelated Nurse that
 -- does mention Azure.
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, status, trust_status) values
-  ('d1d1d1d1-1111-1111-1111-111111111111', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-1', 'https://boards.greenhouse.io/acme/jobs/1', 'Data Engineer',    'active', 'VERIFIED'),
-  ('d2d2d2d2-2222-2222-2222-222222222222', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-2', 'https://boards.greenhouse.io/acme/jobs/2', 'Data Engineer II', 'active', 'VERIFIED'),
-  ('d3d3d3d3-3333-3333-3333-333333333333', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-3', 'https://boards.greenhouse.io/acme/jobs/3', 'Registered Nurse', 'active', 'VERIFIED');
+  ('d1d1d1d1-1111-1111-1111-111111111111', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-1', 'https://pgtap.test/jobs/1', 'Data Engineer',    'active', 'VERIFIED'),
+  ('d2d2d2d2-2222-2222-2222-222222222222', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-2', 'https://pgtap.test/jobs/2', 'Data Engineer II', 'active', 'VERIFIED'),
+  ('d3d3d3d3-3333-3333-3333-333333333333', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-3', 'https://pgtap.test/jobs/3', 'Registered Nurse', 'active', 'VERIFIED');
 
 insert into vacancy_versions (id, vacancy_id, raw_payload, content_hash) values
   ('aa000001-0000-0000-0000-000000000001', 'd1d1d1d1-1111-1111-1111-111111111111', '{}'::jsonb, 'hash-1'),
@@ -52,9 +63,9 @@ insert into vacancy_versions (id, vacancy_id, raw_payload, content_hash) values
 -- Snapshot per vacancy. The token row records the SAME clean_text and title, so
 -- vacancy_evidence_is_current() is true for all three.
 insert into vacancy_jd_snapshots (id, vacancy_id, vacancy_version_id, canonical_url, clean_text, sections, source_code, extractor_version) values
-  ('e0000000-0000-0000-0000-000000000001', 'd1d1d1d1-1111-1111-1111-111111111111', 'aa000001-0000-0000-0000-000000000001', 'https://boards.greenhouse.io/acme/jobs/1', 'Build pipelines on Azure.', '[]'::jsonb, 'greenhouse', 'jd-extract-v1'),
-  ('e0000000-0000-0000-0000-000000000002', 'd2d2d2d2-2222-2222-2222-222222222222', 'aa000002-0000-0000-0000-000000000002', 'https://boards.greenhouse.io/acme/jobs/2', 'General posting text.', '[]'::jsonb, 'greenhouse', 'jd-extract-v1'),
-  ('e0000000-0000-0000-0000-000000000003', 'd3d3d3d3-3333-3333-3333-333333333333', 'aa000003-0000-0000-0000-000000000003', 'https://boards.greenhouse.io/acme/jobs/3', 'Azure cloud nurse role.', '[]'::jsonb, 'greenhouse', 'jd-extract-v1');
+  ('e0000000-0000-0000-0000-000000000001', 'd1d1d1d1-1111-1111-1111-111111111111', 'aa000001-0000-0000-0000-000000000001', 'https://pgtap.test/jobs/1', 'Build pipelines on Azure.', '[]'::jsonb, 'pgtap_fixture', 'jd-extract-v1'),
+  ('e0000000-0000-0000-0000-000000000002', 'd2d2d2d2-2222-2222-2222-222222222222', 'aa000002-0000-0000-0000-000000000002', 'https://pgtap.test/jobs/2', 'General posting text.', '[]'::jsonb, 'pgtap_fixture', 'jd-extract-v1'),
+  ('e0000000-0000-0000-0000-000000000003', 'd3d3d3d3-3333-3333-3333-333333333333', 'aa000003-0000-0000-0000-000000000003', 'https://pgtap.test/jobs/3', 'Azure cloud nurse role.', '[]'::jsonb, 'pgtap_fixture', 'jd-extract-v1');
 
 insert into vacancy_evidence_tokens (vacancy_id, jd_snapshot_id, tokenizer_version, evidence_fingerprint, input_title, input_clean_text, tokens) values
   ('d1d1d1d1-1111-1111-1111-111111111111', 'e0000000-0000-0000-0000-000000000001', 'evidence-tokens-v1', 'fp1', 'Data Engineer',    'Build pipelines on Azure.', array['data','engineer','build','pipelines','on','azure']),
@@ -164,6 +175,11 @@ select is(
   'only the qualifier whose ROLE the vacancy matches counts (Teacher''s qualifier ignored)'
 );
 
+-- The view is scoped to the CALLING candidate. With no identity the state is
+-- 'unavailable' and the view deliberately returns the whole browseable feed
+-- (with NULL matched counts) rather than nothing, so the caller must be named.
+set local role authenticated;
+set local request.jwt.claims to '{"sub":"b2b2b2b2-2222-2222-2222-222222222222"}';
 select is(
   (
     select count(*)::int
@@ -173,6 +189,7 @@ select is(
   0,
   'a vacancy matching no selected role is absent from the ranked rows'
 );
+reset role;
 
 -- ---------------------------------------------------------------------------
 -- 12-13. Legacy / stale inputs are never current, and score is NULL then.
@@ -200,7 +217,7 @@ reset role;
 -- Add a browseable vacancy with NO token row; A's page would still contain
 -- indexed rows, so a page-local check would wrongly call the feed current.
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, status, trust_status)
-values ('d4d4d4d4-4444-4444-4444-444444444444', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-4', 'https://boards.greenhouse.io/acme/jobs/4', 'Data Engineer III', 'active', 'VERIFIED');
+values ('d4d4d4d4-4444-4444-4444-444444444444', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-4', 'https://pgtap.test/jobs/4', 'Data Engineer III', 'active', 'VERIFIED');
 
 select is(public.posting_evidence_complete(), false, 'one unindexed browseable vacancy makes the whole corpus incomplete');
 select is(public.candidate_ranking_state('a1a1a1a1-1111-1111-1111-111111111111'), 'updating', 'so the state is updating, never a partial boost labelled current');

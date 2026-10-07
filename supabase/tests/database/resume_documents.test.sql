@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(24);
+select plan(25);
 
 insert into auth.users (id, email) values
   ('11111111-1111-1111-1111-111111111111', 'user-a@test.local'),
@@ -19,14 +19,29 @@ select ok(
   'RLS is enabled on resume_documents'
 );
 
--- 2. authenticated has exactly SELECT, INSERT and DELETE, nothing else
+-- 2a. authenticated holds exactly SELECT and DELETE at TABLE level.
+-- 20260929120000_resume_parse_status.sql revoked the table-wide INSERT and
+-- re-granted it per column, so a candidate cannot forge parse_status (or any
+-- other service-role-written column). UPDATE stays absent entirely.
 select ok(
   (
     select array_agg(privilege_type::text order by privilege_type)
     from information_schema.role_table_grants
     where table_name = 'resume_documents' and grantee = 'authenticated'
-  ) = array['DELETE', 'INSERT', 'SELECT'],
-  'authenticated has exactly SELECT, INSERT and DELETE on resume_documents'
+  ) = array['DELETE', 'SELECT'],
+  'authenticated has exactly SELECT and DELETE at table level on resume_documents'
+);
+
+-- 2b. INSERT survives only as a column-scoped grant on the five upload columns.
+select ok(
+  (
+    select array_agg(column_name::text order by column_name)
+    from information_schema.column_privileges
+    where table_name = 'resume_documents'
+      and grantee = 'authenticated'
+      and privilege_type = 'INSERT'
+  ) = array['byte_size', 'candidate_id', 'mime_type', 'original_filename', 'storage_path'],
+  'authenticated INSERT on resume_documents is column-scoped to exactly the five upload columns'
 );
 
 -- 3. anon has no privileges at all on this table

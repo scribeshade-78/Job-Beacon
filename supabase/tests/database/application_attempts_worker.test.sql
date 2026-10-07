@@ -107,7 +107,12 @@ select is_empty(
   'An attempt at max_attempts is not claimed — dead-letter behavior'
 );
 
--- 7. an attempt already marked succeeded is never reclaimed even with a stale lease
+-- 7. an attempt already marked succeeded is never reclaimed even with a stale lease.
+-- 'succeeded' is unreachable without a stored acceptance receipt (the trigger
+-- added by 20261001140000), so the receipt is written first — the same order the
+-- worker uses on the real path.
+insert into application_evidence (application_attempt_id, evidence_type, payload)
+values ('11111111-8000-2222-2222-222222222222', 'submission_confirmation', '{}'::jsonb);
 update application_attempts
   set status = 'succeeded', attempts = 1, leased_until = now() - interval '1 minute'
   where id = '11111111-8000-2222-2222-222222222222';
@@ -140,7 +145,10 @@ select is_empty(
 -- still-'pending' attempt from test 8) are forced terminal first, so every
 -- claim_application_attempt() call from here on only ever sees this file's
 -- own fixture rows — deterministic, not dependent on prior test state.
-update application_attempts set status = 'succeeded' where status in ('pending', 'leased');
+-- 'failed', not 'succeeded': 'succeeded' now requires a persisted acceptance
+-- receipt and none of these attempts ever reached a provider. Both are terminal
+-- to the lease query.
+update application_attempts set status = 'failed' where status in ('pending', 'leased');
 
 -- 10. the paused candidate's pending attempt is never claimed
 select is_empty(
@@ -225,7 +233,7 @@ select throws_ok(
 -- claims below can only ever see this block's own fixture rows. Without this,
 -- "the held attempt was not claimed" would pass whenever the function happened
 -- to claim some other row instead.
-update application_attempts set status = 'succeeded'
+update application_attempts set status = 'failed'
   where status in ('pending', 'pending_review', 'leased');
 
 -- 18. the CHECK constraint accepts the new status

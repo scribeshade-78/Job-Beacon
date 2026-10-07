@@ -1,0 +1,12 @@
+-- Local development seed.
+--
+-- Intentionally empty. The database fixtures under supabase/tests/database/ create
+-- every row they need, and the ranking fixtures require an ISOLATED corpus:
+-- posting_evidence_complete() and candidate_ranking_state() are corpus-wide, so a
+-- seeded browseable vacancy without evidence tokens would (correctly) hold the
+-- ranking at 'updating' and make those assertions fail.
+--
+-- This file must exist because supabase/config.toml sets:
+--   [db.seed] enabled = true
+--   sql_paths = ["./seed.sql"]
+-- and `supabase db reset` reads that path.

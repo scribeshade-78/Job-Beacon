@@ -31,21 +31,25 @@ insert into candidate_profiles (id) values
   ('b2b2b2b2-2222-2222-2222-222222222222');
 
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('greenhouse', 'none', 'r2-v1');
+values ('pgtap_fixture', 'none', 'r2-v1');
 
 insert into vacancy_sources (id, source_code, target_key)
-values ('c3c3c3c3-3333-3333-3333-333333333333', 'greenhouse', 'acme');
+values ('c3c3c3c3-3333-3333-3333-333333333333', 'pgtap_fixture', 'pgtap');
 
 -- b1 / b2 are browseable (active + VERIFIED); n1 is unknown-trust and n2 is
 -- expired, so neither is part of the corpus.
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, status, trust_status) values
-  ('d1d1d1d1-1111-1111-1111-111111111111', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-1', 'https://boards.greenhouse.io/acme/jobs/1', 'Data Engineer', 'active', 'VERIFIED'),
-  ('d2d2d2d2-2222-2222-2222-222222222222', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-2', 'https://boards.greenhouse.io/acme/jobs/2', 'Teacher',        'active', 'VERIFIED'),
-  ('d3d3d3d3-3333-3333-3333-333333333333', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-3', 'https://boards.greenhouse.io/acme/jobs/3', 'Data Engineer', 'active', null),
-  ('d4d4d4d4-4444-4444-4444-444444444444', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-4', 'https://boards.greenhouse.io/acme/jobs/4', 'Data Engineer', 'expired', 'VERIFIED');
+  ('d1d1d1d1-1111-1111-1111-111111111111', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-1', 'https://pgtap.test/jobs/1', 'Data Engineer', 'active', 'VERIFIED'),
+  ('d2d2d2d2-2222-2222-2222-222222222222', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-2', 'https://pgtap.test/jobs/2', 'Teacher',        'active', 'VERIFIED'),
+  ('d3d3d3d3-3333-3333-3333-333333333333', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-3', 'https://pgtap.test/jobs/3', 'Data Engineer', 'active', null),
+  ('d4d4d4d4-4444-4444-4444-444444444444', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-4', 'https://pgtap.test/jobs/4', 'Data Engineer', 'expired', 'VERIFIED');
 
 create temporary table corpus_probe (version bigint);
 insert into corpus_probe select version from public.vacancy_corpus_version;
+
+-- corpus_probe is read again below while the session is switched to service_role
+-- (publish_role_match_coverage is worker-only), so it needs the grant.
+grant select on corpus_probe to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 1-5. The version row and its access model.
@@ -86,7 +90,7 @@ select ok(
 -- ---------------------------------------------------------------------------
 -- 6. Inserting a NON-browseable vacancy is not a corpus change.
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, status, trust_status)
-values ('d5d5d5d5-5555-5555-5555-555555555555', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-5', 'https://boards.greenhouse.io/acme/jobs/5', 'Data Engineer', 'active', null);
+values ('d5d5d5d5-5555-5555-5555-555555555555', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-5', 'https://pgtap.test/jobs/5', 'Data Engineer', 'active', null);
 select is(
   (select version from public.vacancy_corpus_version),
   (select version from corpus_probe),
@@ -160,7 +164,7 @@ select is(
 
 -- 14. Inserting a browseable vacancy is relevant.
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, status, trust_status)
-values ('d6d6d6d6-6666-6666-6666-666666666666', 'greenhouse', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-6', 'https://boards.greenhouse.io/acme/jobs/6', 'Data Engineer', 'active', 'UNDER_REVIEW');
+values ('d6d6d6d6-6666-6666-6666-666666666666', 'pgtap_fixture', 'c3c3c3c3-3333-3333-3333-333333333333', 'gh-6', 'https://pgtap.test/jobs/6', 'Data Engineer', 'active', 'UNDER_REVIEW');
 select isnt(
   (select version from public.vacancy_corpus_version),
   (select version from corpus_probe),

@@ -8,6 +8,12 @@
 -- The properties are stated as failing assertions so a regression is loud.
 
 begin;
+create extension if not exists pgtap with schema extensions;
+
+-- This file is documentation, not an executable fixture: the races it describes
+-- need concurrent sessions. It declares a zero-test plan so pg_prove does not
+-- report "No plan found in TAP output" and mask real failures.
+select plan(1);
 
 -- ---------------------------------------------------------------------------
 -- FIXTURE 1 — intent changes AFTER the publication recheck but BEFORE the CAS.
@@ -68,6 +74,15 @@ join public.candidate_qualifier_tokens t
 where t.candidate_id <> g.candidate_id;
 -- expect zero rows
 
+-- The races above need concurrent sessions to exercise; what can be asserted in a
+-- single session is that the publication pointer they depend on is present.
+select has_table(
+  'public',
+  'candidate_qualifier_generations',
+  'the published-generation pointer table exists'
+);
+
+select * from finish();
 rollback;
 
 -- EXPECTED FAILURES IF THE READ-TIME GUARD IS REMOVED
