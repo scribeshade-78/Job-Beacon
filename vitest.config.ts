@@ -11,5 +11,9 @@ export default defineConfig({
     // duplicate tree is excluded rather than tolerated.
     exclude: [...configDefaults.exclude, "**/dist/**", "**/.kilo/**"],
     environment: "jsdom",
+    // Registers @testing-library/jest-dom's matchers on Vitest's expect. Without
+    // it toBeEnabled() and friends are undefined rather than failing to match —
+    // see vitest.setup.ts.
+    setupFiles: ["./vitest.setup.ts"],
   },
 });

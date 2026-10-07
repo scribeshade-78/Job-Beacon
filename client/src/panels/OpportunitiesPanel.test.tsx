@@ -99,12 +99,27 @@ vi.mock("../lib/candidatePreferences", async (importOriginal) => {
   };
 });
 
+// Capability and the bulk-apply call are configurable per test. The default
+// ("no source can queue") keeps every pre-existing test on the disabled-button
+// path; the blocker tests below turn both on in order to reach the click.
+const capabilityApi = vi.hoisted(() => ({ canQueue: false, explanation: "No source yet." }));
+const bulkApi = vi.hoisted(() => ({ submitBulkApply: vi.fn() }));
+
 vi.mock("../lib/queueCapability", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/queueCapability")>();
   return {
     ...actual,
-    fetchQueueCapability: vi.fn(async () => ({ kind: "ready", canQueue: false, explanation: "No source yet." })),
+    fetchQueueCapability: vi.fn(async () => ({
+      kind: "ready",
+      canQueue: capabilityApi.canQueue,
+      explanation: capabilityApi.explanation,
+    })),
   };
+});
+
+vi.mock("../lib/bulkApply", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/bulkApply")>();
+  return { ...actual, submitBulkApply: bulkApi.submitBulkApply };
 });
 
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
@@ -117,6 +132,8 @@ beforeEach(() => {
   // current. Default the poll to its cap so no test reaches the network; the
   // refresh-specific tests override this.
   rankingApi.runRankingRefresh.mockResolvedValue({ kind: "timeout", result: null });
+  capabilityApi.canQueue = false;
+  bulkApi.submitBulkApply.mockReset();
 });
 
 function renderPanel() {
@@ -235,5 +252,85 @@ describe("OpportunitiesPanel — real ranking refresh", () => {
     await waitFor(() =>
       expect(rankingApi.runRankingRefresh).toHaveBeenCalledWith(expect.objectContaining({ force: true })),
     );
+  });
+});
+
+describe("OpportunitiesPanel — actionable blocker prompt", () => {
+  function blockedByPlan() {
+    return {
+      kind: "success",
+      result: {
+        requested: 1,
+        queued: 0,
+        blocked: 1,
+        errors: 0,
+        outcomes: [
+          {
+            vacancyId: "job-1",
+            status: "blocked",
+            blockingGates: [{ gate: "plan_entitlement", reasonCode: "plan_not_eligible" }],
+          },
+        ],
+      },
+    };
+  }
+
+  it("names the plan gate and offers plans, instead of only showing a toast", async () => {
+    capabilityApi.canQueue = true;
+    bulkApi.submitBulkApply.mockResolvedValue(blockedByPlan());
+
+    renderPanel();
+
+    await screen.findByText("Azure Data Engineer");
+    // Re-queried inside waitFor: the button is re-rendered as capability and the
+    // list resolve, so a reference captured once can be detached by the time it
+    // is asserted against. toBeEnabled() comes from vitest.setup.ts.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Queue eligible applications/i })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Queue eligible applications/i }));
+
+    // The gate the SERVER named, turned into something the candidate can act on.
+    expect(await screen.findByText("Automatic applications need a paid plan")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "See plans" })).toBeTruthy();
+  });
+
+  it("stays silent when the blocking gate is not the candidate's to fix", async () => {
+    capabilityApi.canQueue = true;
+    bulkApi.submitBulkApply.mockResolvedValue({
+      kind: "success",
+      result: {
+        requested: 1,
+        queued: 0,
+        blocked: 1,
+        errors: 0,
+        outcomes: [
+          {
+            vacancyId: "job-1",
+            status: "blocked",
+            blockingGates: [{ gate: "application_support", reasonCode: "NO_ADAPTER_REGISTERED_FOR_SOURCE" }],
+          },
+        ],
+      },
+    });
+
+    renderPanel();
+
+    await screen.findByText("Azure Data Engineer");
+    // Re-queried inside waitFor: the button is re-rendered as capability and the
+    // list resolve, so a reference captured once can be detached by the time it
+    // is asserted against. toBeEnabled() comes from vitest.setup.ts.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Queue eligible applications/i })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Queue eligible applications/i }));
+
+    await waitFor(() => expect(bulkApi.submitBulkApply).toHaveBeenCalled());
+    // No adapter exists: there is no screen that would fix it, so a dialog would be
+    // a dead end. The plain toast (asserted in lib/bulkApply.test.ts) is the whole
+    // answer here.
+    expect(screen.queryByText("Automatic applications need a paid plan")).toBeNull();
+    expect(screen.queryByText("Tell us where you want to work")).toBeNull();
+    expect(screen.queryByRole("button", { name: "See plans" })).toBeNull();
   });
 });

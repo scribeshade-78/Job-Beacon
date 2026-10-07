@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import { StatusBadge } from "../components/ui/status-badge";
 import {
   FitSection,
@@ -21,7 +29,7 @@ import {
   type OpportunityTrustStatus,
   type RankingInfo,
 } from "../lib/opportunities";
-import { describeBulkApplyResult, submitBulkApply } from "../lib/bulkApply";
+import { describeBulkApplyResult, findActionableBlocker, submitBulkApply, type ActionableBlocker } from "../lib/bulkApply";
 import {
   describeBulkApplyButton,
   describeLoadedCount,
@@ -262,6 +270,8 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     startRankingRefresh(false);
   }, [ranking?.state, ranking?.identity, feedRefresh.kind, startRankingRefresh]);
 
+  const [, navigate] = useLocation();
+
   // True only while a filter/sort change is re-reading, so a control the
   // candidate just touched does not blank the list back to a loading screen.
   const [querying, setQuerying] = useState(false);
@@ -272,6 +282,13 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    */
   const [prepVacancy, setPrepVacancy] = useState<OpportunitySummary | null>(null);
   const [bulkApplying, setBulkApplying] = useState(false);
+  /**
+   * The gate the last bulk attempt died on, WHEN it is one the candidate can
+   * clear. Held as resolved copy plus a destination rather than a raw reason
+   * code, so the dialog renders from a decision made in one place — see
+   * findActionableBlocker.
+   */
+  const [blocker, setBlocker] = useState<ActionableBlocker | null>(null);
   /**
    * Whether ANY source can carry an application, read from the server because
    * source_policies is not readable by a signed-in client. The bulk action is
@@ -659,6 +676,10 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
     }
 
     setBulkApplying(true);
+    // A blocker from a previous run must not outlive this one, and a new one is
+    // decided only AFTER the server has spoken — never pre-guessed from what the
+    // client believes about eligibility.
+    setBlocker(null);
     const outcome = await submitBulkApply(vacancyIds);
 
     if (outcome.kind === "error") {
@@ -669,6 +690,10 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
 
     const { text, tone } = describeBulkApplyResult(outcome.result);
     showToast({ title: text, tone });
+
+    // "0 queued — blocked by safety gates" is honest but not actionable. When the
+    // gate that stopped it is one the candidate can clear, name it and link there.
+    setBlocker(findActionableBlocker(outcome.result));
 
     // Clear the filters and re-read, so the list reflects what just happened
     // instead of leaving the user on a view they have to reason about. The
@@ -1021,6 +1046,39 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           </button>
         )}
       </CardContent>
+
+      {/* A gate the candidate can clear is named and linked here, instead of being
+          left as "blocked by safety gates" in a toast that is gone before it can be
+          read. Rendered inside the Card, but Radix portals the content to body. */}
+      <Dialog
+        open={blocker !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setBlocker(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{blocker?.title ?? ""}</DialogTitle>
+            <DialogDescription>{blocker?.body ?? ""}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setBlocker(null)}>
+              Not now
+            </Button>
+            <Button
+              onClick={() => {
+                const href = blocker?.ctaHref ?? "/";
+                setBlocker(null);
+                navigate(href);
+              }}
+            >
+              {blocker?.ctaLabel ?? "Continue"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Rendered inside the Card, but Radix portals the content to body, so it
           is not affected by the card's layout or overflow. */}

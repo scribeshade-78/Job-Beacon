@@ -182,3 +182,75 @@ export function describeBulkApplyResult(result: BulkApplyResult): { text: string
 
   return { text: "Nothing to queue.", tone: "default" };
 }
+
+/**
+ * A blocking gate the candidate can actually clear.
+ *
+ * WHICH GATES QUALIFY. A gate reason is worth an interruption only when the fix
+ * lives on a screen the candidate controls: plan_entitlement needs a paid plan,
+ * location needs a stated search location. Everything else in the ledger is
+ * either not theirs to fix (application_support — no adapter exists for that
+ * source), already stated plainly by describeBulkApplyResult, or a deliberate
+ * candidate decision that must not be shortcut (automation_authorization —
+ * consent).
+ */
+export interface ActionableBlocker {
+  gate: string;
+  reasonCode: string | null;
+  title: string;
+  body: string;
+  ctaLabel: string;
+  /** A hash route ("/billing"), not a URL: this only ever navigates in-app. */
+  ctaHref: string;
+}
+
+const ACTIONABLE_BLOCKERS: Record<string, Omit<ActionableBlocker, "gate" | "reasonCode">> = {
+  plan_entitlement: {
+    title: "Automatic applications need a paid plan",
+    body:
+      "Your current plan includes no automatic applications, so nothing was queued. " +
+      "Searching, tailoring and tracking applications work on every plan, including Free.",
+    ctaLabel: "See plans",
+    ctaHref: "/billing",
+  },
+  location: {
+    title: "Tell us where you want to work",
+    body:
+      "Your profile has no work location, so we cannot tell which of these jobs you are " +
+      "eligible for. Add a country or city, or tick \u201copen to anywhere\u201d.",
+    ctaLabel: "Update search preferences",
+    ctaHref: "/profile",
+  },
+};
+
+/**
+ * The first blocking gate worth naming, or null when none is.
+ *
+ * READS THE SERVER'S VERDICT, NEVER RE-DERIVES IT. server/applications/bulkApply.ts
+ * and lib/queueCapability.ts both refuse to re-run eligibility on the client, and
+ * for the same reason: a second copy of a gate rule drifts from
+ * evaluateEligibilityGates and can then disagree with it in either direction. This
+ * takes the gate outcomes the server already returned and only decides how to
+ * present one of them.
+ *
+ * Keyed on the gate name, not the reason code: plan_entitlement's code could gain
+ * a second value (a per-destination quota, say) without changing what the
+ * candidate has to do about it.
+ */
+export function findActionableBlocker(result: BulkApplyResult): ActionableBlocker | null {
+  for (const outcome of result.outcomes) {
+    if (outcome.status !== "blocked") {
+      continue;
+    }
+
+    for (const entry of outcome.blockingGates) {
+      const spec = ACTIONABLE_BLOCKERS[entry.gate];
+
+      if (spec) {
+        return { gate: entry.gate, reasonCode: entry.reasonCode, ...spec };
+      }
+    }
+  }
+
+  return null;
+}

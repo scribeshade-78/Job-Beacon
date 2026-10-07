@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { describeBulkApplyResult, submitBulkApply, type BulkApplyResult } from "./bulkApply";
+import { describeBulkApplyResult, findActionableBlocker, submitBulkApply, type BulkApplyResult } from "./bulkApply";
 
 function result(overrides: Partial<BulkApplyResult> = {}): BulkApplyResult {
   return { requested: 0, queued: 0, blocked: 0, errors: 0, outcomes: [], ...overrides };
@@ -139,5 +139,72 @@ describe("describeBulkApplyResult", () => {
 
     expect(described.text).toBe("Successfully queued 2 applications. 1 could not be processed.");
     expect(described.tone).toBe("default");
+  });
+});
+
+describe("findActionableBlocker", () => {
+  it("names plan_entitlement and points at billing", () => {
+    const blocker = findActionableBlocker(
+      result({ requested: 1, blocked: 1, outcomes: [blockedBy("plan_not_eligible", "plan_entitlement")] }),
+    );
+
+    expect(blocker?.gate).toBe("plan_entitlement");
+    expect(blocker?.ctaHref).toBe("/billing");
+    expect(blocker?.ctaLabel).toBe("See plans");
+  });
+
+  it("names location and points at profile", () => {
+    const blocker = findActionableBlocker(
+      result({ requested: 1, blocked: 1, outcomes: [blockedBy("location_not_stated", "location")] }),
+    );
+
+    expect(blocker?.gate).toBe("location");
+    expect(blocker?.reasonCode).toBe("location_not_stated");
+    expect(blocker?.ctaHref).toBe("/profile");
+  });
+
+  it("stays silent for a gate the candidate cannot act on", () => {
+    // The expected state today: no adapter is registered for any source, so there
+    // is nothing the candidate can fix and nothing to prompt about. A dialog here
+    // would be a dead end pointing at a screen with no remedy.
+    expect(
+      findActionableBlocker(
+        result({ requested: 1, blocked: 1, outcomes: [blockedBy("NO_ADAPTER_REGISTERED_FOR_SOURCE")] }),
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores errored and queued outcomes", () => {
+    expect(
+      findActionableBlocker(
+        result({
+          requested: 2,
+          errors: 1,
+          outcomes: [
+            { vacancyId: "v1", status: "error", blockingGates: [] },
+            { vacancyId: "v2", status: "queued", blockingGates: [] },
+          ],
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns the first actionable gate when several vacancies are blocked", () => {
+    const blocker = findActionableBlocker(
+      result({
+        requested: 2,
+        blocked: 2,
+        outcomes: [
+          blockedBy("NO_ADAPTER_REGISTERED_FOR_SOURCE"),
+          blockedBy("plan_not_eligible", "plan_entitlement"),
+        ],
+      }),
+    );
+
+    expect(blocker?.gate).toBe("plan_entitlement");
+  });
+
+  it("returns null for an empty result", () => {
+    expect(findActionableBlocker(result())).toBeNull();
   });
 });

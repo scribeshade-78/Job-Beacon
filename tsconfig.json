@@ -17,6 +17,10 @@
     "jsx": "react-jsx",
     "types": ["vite/client"]
   },
-  "include": ["client/src", "shared", "vite.config.ts"]
+  // vitest.setup.ts is listed so its @testing-library/jest-dom/vitest import is in
+  // the program: that import is what augments Vitest's expect with the jest-dom
+  // matchers, and compilerOptions.types is pinned to ["vite/client"] so nothing
+  // pulls the augmentation in automatically.
+  "include": ["client/src", "shared", "vite.config.ts", "vitest.setup.ts"]
 }
 
