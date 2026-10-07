@@ -1,0 +1,8 @@
+# Shell scripts must keep LF on every platform. With core.autocrlf=true and no
+# .gitattributes, a Windows checkout rewrites them to CRLF, and a CRLF bash script
+# fails on its shebang ("bad interpreter: /usr/bin/env bash^M").
+*.sh text eol=lf
+
+# This file pins itself for the same reason: a CRLF here would attach a stray
+# carriage return to the last token and corrupt the eol value below/above.
+.gitattributes text eol=lf
