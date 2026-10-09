@@ -269,6 +269,8 @@ export function BillingPanel() {
   // Auto-detected on mount, then owned by the candidate. The pill is a display
   // preference after that.
   const [region, setRegion] = useState<BillingRegion>(() => detectRegionFromBrowser());
+  /** Whether the discreet "change" link has revealed the region picker. */
+  const [regionPickerOpen, setRegionPickerOpen] = useState(false);
   const [entitlements, setEntitlements] = useState<EntitlementSummary | null>(null);
   const [providers, setProviders] = useState<Partial<BillingProviders> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -485,7 +487,7 @@ export function BillingPanel() {
         )}
       </section>
 
-      {/* Heading and the region pill. */}
+      {/* Heading, the detected billing country, and a collapsed region picker. */}
       <section className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -493,30 +495,59 @@ export function BillingPanel() {
             <p className="mt-1 text-sm text-ios-text-secondary">
               Simple monthly pricing. Change or cancel any time.
             </p>
+
+            {/* THE ESCAPE HATCH, NOT A CONTROL PANEL. The region is detected from
+                the browser because "which currency should we charge you in" is a
+                question most visitors cannot answer about themselves. Detection is
+                still a guess: a VPN, a corporate proxy or a traveller on hotel wifi
+                lands in the wrong one, and with no way back they cannot buy at all.
+                So the prominent four-pill switcher is gone and this line replaces
+                it — the answer stated, the correction one click away, nothing
+                shouting for attention. The server still prices the checkout. */}
+            <p className="mt-2 text-xs text-ios-text-secondary">
+              Billing country:{" "}
+              <span className="font-medium text-black">{REGION_SWITCHER_LABEL[region]}</span>
+              {" · "}
+              <button
+                type="button"
+                onClick={() => setRegionPickerOpen((open) => !open)}
+                aria-expanded={regionPickerOpen}
+                aria-controls="billing-region-picker"
+                className="cursor-pointer font-medium text-ios-blue hover:underline"
+              >
+                {regionPickerOpen ? "done" : "change"}
+              </button>
+            </p>
           </div>
 
-          <div
-            role="group"
-            aria-label="Billing region"
-            className="inline-flex flex-wrap gap-1 rounded-full border border-ios-separator bg-ios-card p-1 shadow-card"
-          >
-            {BILLING_REGIONS.map((candidate) => (
-              <button
-                key={candidate}
-                type="button"
-                aria-pressed={candidate === region}
-                onClick={() => setRegion(candidate)}
-                className={cn(
-                  "cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
-                  candidate === region
-                    ? "bg-blue-600 text-white"
-                    : "text-ios-text-secondary hover:bg-ios-bg",
-                )}
-              >
-                {REGION_SWITCHER_LABEL[candidate]}
-              </button>
-            ))}
-          </div>
+          {regionPickerOpen && (
+            <div
+              id="billing-region-picker"
+              role="group"
+              aria-label="Billing region"
+              className="inline-flex flex-wrap gap-1 rounded-full border border-ios-separator bg-ios-card p-1 shadow-card"
+            >
+              {BILLING_REGIONS.map((candidate) => (
+                <button
+                  key={candidate}
+                  type="button"
+                  aria-pressed={candidate === region}
+                  onClick={() => {
+                    setRegion(candidate);
+                    setRegionPickerOpen(false);
+                  }}
+                  className={cn(
+                    "cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
+                    candidate === region
+                      ? "bg-blue-600 text-white"
+                      : "text-ios-text-secondary hover:bg-ios-bg",
+                  )}
+                >
+                  {REGION_SWITCHER_LABEL[candidate]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 

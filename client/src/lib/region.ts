@@ -24,11 +24,17 @@ const EU_LOCALE_REGIONS = new Set([
 ]);
 
 /**
- * Timezone first, locale second, India last.
+ * Timezone first, locale second, US last.
  *
- * India is the default because the product launched on INR and PRD v3 §27.1
- * prices it first — an unplaceable visitor is shown the market the company
- * actually operates in, rather than a guess at theirs.
+ * THE FALLBACK IS US, NOT IN. An unplaceable visitor used to land on India, which
+ * is the cheapest region — so the visitors whose locale we could not read were
+ * exactly the ones handed the largest discount, while the ones we had actually
+ * placed paid full price. US is the safer answer for somebody we know nothing
+ * about, and BillingPanel's escape hatch lets anyone correct it.
+ *
+ * Every region is still a HINT and never a decision. It chooses what is
+ * displayed and what a NEW checkout is priced at; it never re-prices an existing
+ * subscription, and the server has the final say on what a subscription costs.
  */
 export function detectRegion(timeZone?: string | null, language?: string | null): BillingRegion {
   const tz = (timeZone ?? "").trim();
@@ -72,7 +78,7 @@ export function detectRegion(timeZone?: string | null, language?: string | null)
     return "EU";
   }
 
-  return "IN";
+  return "US";
 }
 
 /** Reads the browser's own signals. Guarded, because jsdom and any prerender lack them. */

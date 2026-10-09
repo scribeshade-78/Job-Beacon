@@ -39,11 +39,15 @@ describe("detectRegion", () => {
     expect(detectRegion("", "en_GB")).toBe("UK");
   });
 
-  it("defaults to IN when nothing is recognisable", () => {
-    expect(detectRegion("", "")).toBe("IN");
-    expect(detectRegion(null, null)).toBe("IN");
-    expect(detectRegion("Pacific/Auckland", "en-NZ")).toBe("IN");
-    expect(detectRegion("UTC", "zz")).toBe("IN");
+  /**
+   * US rather than IN: an unplaceable visitor must not default to the cheapest
+   * region, or the least identifiable visitors get the largest discount.
+   */
+  it("defaults to US when nothing is recognisable", () => {
+    expect(detectRegion("", "")).toBe("US");
+    expect(detectRegion(null, null)).toBe("US");
+    expect(detectRegion("Pacific/Auckland", "en-NZ")).toBe("US");
+    expect(detectRegion("UTC", "zz")).toBe("US");
   });
 
   it("always returns a region the catalogue prices", () => {

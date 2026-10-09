@@ -109,8 +109,8 @@ update public.subscription_plans
 insert into public.subscription_plans (code, display_name, description, tier_rank, is_active) values
   ('free',    'Free',    'Everything needed to search, tailor and track, with no automation.', 1, true),
   ('starter', 'Starter', 'Entry tier for a candidate running a focused search.',               2, true),
-  ('pro',     'Pro',     'Full autonomous discovery and application for an active search.',    3, true),
-  ('power',   'Power',   'Highest allowance, for a candidate applying at volume.',             4, true)
+  ('pro',     'Premium International', 'Full autonomous discovery and application for an active search.', 3, true),
+  ('power',   'Professional',          'Highest allowance, for a candidate applying at volume.',             4, true)
 on conflict (code) do update
   set display_name = excluded.display_name,
       description = excluded.description,
@@ -139,10 +139,10 @@ update public.plan_limits pl
        max_mailbox_connections = v.mailboxes,
        updated_at = now()
   from (values
-    ('free',    0,    0,    0,    0),
-    ('starter', 30,   80,   80,   1),
-    ('pro',     100,  300,  300,  1),
-    ('power',   750,  1000, 1000, 1)
+    ('free',    0,    0,    15,   0),
+    ('starter', 100,  100,  100,  1),
+    ('pro',     500,  500,  500,  1),
+    ('power',   1000, 1000, 1000, 1)
   ) as v(code, india, us, verified, mailboxes)
   join public.subscription_plans p on p.code = v.code
  where pl.plan_id = p.id;
@@ -171,18 +171,18 @@ select p.id, v.region, v.currency, 'month', v.amount_minor, true
     ('free',    'US', 'USD', 0),
     ('free',    'UK', 'GBP', 0),
     ('free',    'EU', 'EUR', 0),
-    ('starter', 'IN', 'INR', 49900),
-    ('starter', 'US', 'USD', 1900),
-    ('starter', 'UK', 'GBP', 1200),
-    ('starter', 'EU', 'EUR', 1500),
+    ('starter', 'IN', 'INR', 19900),
+    ('starter', 'US', 'USD', 599),
+    ('starter', 'UK', 'GBP', 499),
+    ('starter', 'EU', 'EUR', 599),
     ('pro',     'IN', 'INR', 99900),
-    ('pro',     'US', 'USD', 3900),
-    ('pro',     'UK', 'GBP', 2500),
-    ('pro',     'EU', 'EUR', 3200),
-    ('power',   'IN', 'INR', 249900),
-    ('power',   'US', 'USD', 9900),
-    ('power',   'UK', 'GBP', 6900),
-    ('power',   'EU', 'EUR', 8500)
+    ('pro',     'US', 'USD', 2999),
+    ('pro',     'UK', 'GBP', 2499),
+    ('pro',     'EU', 'EUR', 2999),
+    ('power',   'IN', 'INR', 199900),
+    ('power',   'US', 'USD', 5999),
+    ('power',   'UK', 'GBP', 4999),
+    ('power',   'EU', 'EUR', 5999)
   ) as v(code, region, currency, amount_minor)
   join public.subscription_plans p on p.code = v.code
 on conflict (plan_id, region, billing_interval) do update

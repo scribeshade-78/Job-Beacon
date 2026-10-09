@@ -76,8 +76,17 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     description: "Everything needed to search, tailor and track, with no automation.",
     tierRank: 1,
     monthlyPriceMinor: { IN: 0, US: 0, UK: 0, EU: 0 },
+    // THE AUTOMATION ALLOWANCE STAYS 0, DELIBERATELY. loadAutomationEntitlement
+    // reads these two columns as a boolean ("is either destination above zero?"),
+    // so any non-zero value here would grant Free unlimited automatic
+    // applications rather than fifteen — see its own "THE QUOTA IS NOT YET A
+    // COUNTER" note. Revisit only when the consumption counter exists.
     autoApplyPerMonth: { india: 0, us: 0 },
-    verifiedApplicationsPerMonth: 0,
+    // 15 is a DISPLAY allowance and nothing enforces it. Safe only because
+    // max_verified_applications_per_month is read exclusively by the billing
+    // matrix (server/billing/entitlements.ts, server/admin/billing.ts) and never
+    // by an eligibility or authorization path — verified before setting it.
+    verifiedApplicationsPerMonth: 15,
     maxMailboxConnections: 0,
   },
   {
@@ -85,32 +94,32 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     displayName: "Starter",
     description: "Entry tier for a candidate running a focused search.",
     tierRank: 2,
-    monthlyPriceMinor: { IN: 49900, US: 1900, UK: 1200, EU: 1500 },
-    autoApplyPerMonth: { india: 30, us: 80 },
-    verifiedApplicationsPerMonth: 80,
+    monthlyPriceMinor: { IN: 19900, US: 599, UK: 499, EU: 599 },
+    autoApplyPerMonth: { india: 100, us: 100 },
+    verifiedApplicationsPerMonth: 100,
     maxMailboxConnections: 1,
   },
   {
     code: "pro",
-    displayName: "Pro",
+    displayName: "Premium International",
     // NOT "...and application". No plan can submit an application today: that
     // needs a source whose policy allows automated application AND an adapter
     // for it, and no source with vacancies has both. Advertising application as
     // a paid feature was untrue at every tier.
     description: "Full autonomous discovery for an active search.",
     tierRank: 3,
-    monthlyPriceMinor: { IN: 99900, US: 3900, UK: 2500, EU: 3200 },
-    autoApplyPerMonth: { india: 100, us: 300 },
-    verifiedApplicationsPerMonth: 300,
+    monthlyPriceMinor: { IN: 99900, US: 2999, UK: 2499, EU: 2999 },
+    autoApplyPerMonth: { india: 500, us: 500 },
+    verifiedApplicationsPerMonth: 500,
     maxMailboxConnections: 1,
   },
   {
     code: "power",
-    displayName: "Power",
+    displayName: "Professional",
     description: "Highest allowance, for a candidate running a search at volume.",
     tierRank: 4,
-    monthlyPriceMinor: { IN: 249900, US: 9900, UK: 6900, EU: 8500 },
-    autoApplyPerMonth: { india: 750, us: 1000 },
+    monthlyPriceMinor: { IN: 199900, US: 5999, UK: 4999, EU: 5999 },
+    autoApplyPerMonth: { india: 1000, us: 1000 },
     verifiedApplicationsPerMonth: 1000,
     maxMailboxConnections: 1,
   },
