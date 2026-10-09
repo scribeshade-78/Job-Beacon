@@ -49,12 +49,18 @@ comment on constraint subscriptions_billing_interval_check on public.subscriptio
 -- ---------------------------------------------------------------------------
 -- The weekly prices, for every plan and region.
 --
--- NO PARITY-BLOCK MARKERS HERE, deliberately: shared/pricing.parity.test.ts
--- resolves exactly one migration path (20260927120000) for the block it parses, so
--- duplicating the markers in this file would create a second copy of the numbers
--- that nothing checks. This statement is the forward half — see that file's
--- WEEKLY-PRICES block, which is the copy the test verifies.
+-- THEY LIVE HERE, NOT IN 20260927120000, AND THAT IS AN ORDERING REQUIREMENT. That
+-- migration predates the CHECK widened above, so inserting a 'week' row there
+-- fails with 23514 on a fresh replay. This file is the earliest point at which a
+-- weekly row is legal. Found by `supabase db reset`, which is the only thing that
+-- replays migrations in order — an incrementally migrated database never notices,
+-- because the end state is the same.
+--
+-- THE BLOCK BELOW IS THE PARITY-TEST FIXTURE. pricing.parity.test.ts resolves a
+-- path per block, so it reads PRICES and QUOTAS from the seed and this one from
+-- here, and each list can live where it is legal.
 -- ---------------------------------------------------------------------------
+-- PARITY-BLOCK:WEEKLY-PRICES-BEGIN
 insert into public.regional_prices (plan_id, region, currency, billing_interval, amount_minor, is_active)
 select p.id, v.region, v.currency, 'week', v.amount_minor, true
   from (values
@@ -81,6 +87,7 @@ on conflict (plan_id, region, billing_interval) do update
       amount_minor = excluded.amount_minor,
       is_active = excluded.is_active,
       updated_at = now();
+-- PARITY-BLOCK:WEEKLY-PRICES-END
 
 -- ---------------------------------------------------------------------------
 -- STILL REQUIRED BEFORE A WEEKLY PLAN CAN ACTUALLY BE SOLD (phase 2b part 2):

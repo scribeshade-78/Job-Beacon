@@ -29,8 +29,20 @@ const MIGRATION_PATH = resolve(
   "supabase/migrations/20260927120000_pricing_plans.sql",
 );
 
-function parityBlock(name: string): string {
-  const text = readFileSync(MIGRATION_PATH, "utf8");
+/**
+ * The weekly prices are NOT in MIGRATION_PATH, and cannot be: 20260927120000
+ * predates the CHECK that allows billing_interval = 'week', so inserting them
+ * there fails with a constraint violation on a fresh replay. They live in the
+ * migration that widens the CHECK. Resolving a path per block is what lets each
+ * list sit where it is legal while still being compared against the catalogue.
+ */
+const WEEKLY_PRICES_PATH = resolve(
+  process.cwd(),
+  "supabase/migrations/20261010000000_billing_interval_week.sql",
+);
+
+function parityBlock(name: string, path: string = MIGRATION_PATH): string {
+  const text = readFileSync(path, "utf8");
   const start = text.indexOf("-- PARITY-BLOCK:" + name + "-BEGIN");
   const end = text.indexOf("-- PARITY-BLOCK:" + name + "-END");
 
@@ -113,7 +125,7 @@ describe("the seed migration matches the catalogue", () => {
    * agree with the catalogue, for no gain.
    */
   it("seeds the weekly matrix from weeklyPriceMinor", () => {
-    const tuples = [...parityBlock("WEEKLY-PRICES").matchAll(/\(\s*'([a-z]+)',\s*'([A-Z]{2})',\s*'([A-Z]{3})',\s*(\d+)\s*\)/g)].map(
+    const tuples = [...parityBlock("WEEKLY-PRICES", WEEKLY_PRICES_PATH).matchAll(/\(\s*'([a-z]+)',\s*'([A-Z]{2})',\s*'([A-Z]{3})',\s*(\d+)\s*\)/g)].map(
       (match) => ({
         code: match[1],
         region: match[2],

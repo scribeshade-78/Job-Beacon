@@ -92,14 +92,21 @@ export interface EntitlementSummary {
 
 interface UsageRow {
   active_target_roles: number;
-  verified_applications_this_month: number;
+  /** Succeeded attempts this billing period — what the candidate actually got. */
+  verified_applications_this_period: number;
+  /** Every attempt except cancelled, this billing period — what a quota counts. */
+  consumed_applications_this_period: number;
   ats_resume_variants: number;
   connected_mailboxes: number;
 }
 
 const USAGE_BY_DIMENSION: Record<string, keyof UsageRow> = {
   active_target_roles: "active_target_roles",
-  verified_applications_per_month: "verified_applications_this_month",
+  // VERIFIED, not consumed: this matrix answers "how many did you get", and the
+  // number shown beside a limit has to be the same thing the limit counts, or the
+  // bar and the comparison disagree. The quota comparison is a separate question
+  // and reads consumed_applications_this_period.
+  verified_applications_per_month: "verified_applications_this_period",
   ats_resume_variants: "ats_resume_variants",
   mailbox_connections: "connected_mailboxes",
 };
@@ -121,7 +128,8 @@ const LIMIT_BY_DIMENSION: Record<string, keyof PlanLimits> = {
 /** Zeroed usage for a candidate who has never done anything, so evaluation never depends on a missing row. */
 const ZERO_USAGE: UsageRow = {
   active_target_roles: 0,
-  verified_applications_this_month: 0,
+  verified_applications_this_period: 0,
+  consumed_applications_this_period: 0,
   ats_resume_variants: 0,
   connected_mailboxes: 0,
 };

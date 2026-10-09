@@ -11,7 +11,8 @@ import { ENTITLEMENT_DIMENSIONS, evaluateEntitlements } from "./entitlements.js"
 
 const USAGE = {
   active_target_roles: 4,
-  verified_applications_this_month: 3,
+  verified_applications_this_period: 3,
+  consumed_applications_this_period: 5,
   ats_resume_variants: 6,
   connected_mailboxes: 1,
 };

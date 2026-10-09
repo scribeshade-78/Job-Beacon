@@ -199,31 +199,17 @@ on conflict (plan_id, region, billing_interval) do update
       updated_at = now();
 -- PARITY-BLOCK:PRICES-END
 
--- PARITY-BLOCK:WEEKLY-PRICES-BEGIN
-insert into public.regional_prices (plan_id, region, currency, billing_interval, amount_minor, is_active)
-select p.id, v.region, v.currency, 'week', v.amount_minor, true
-  from (values
-    ('free',    'IN', 'INR', 0),
-    ('free',    'US', 'USD', 0),
-    ('free',    'UK', 'GBP', 0),
-    ('free',    'EU', 'EUR', 0),
-    ('starter', 'IN', 'INR', 5900),
-    ('starter', 'US', 'USD', 199),
-    ('starter', 'UK', 'GBP', 149),
-    ('starter', 'EU', 'EUR', 199),
-    ('pro',     'IN', 'INR', 29900),
-    ('pro',     'US', 'USD', 899),
-    ('pro',     'UK', 'GBP', 749),
-    ('pro',     'EU', 'EUR', 899),
-    ('power',   'IN', 'INR', 59900),
-    ('power',   'US', 'USD', 1799),
-    ('power',   'UK', 'GBP', 1499),
-    ('power',   'EU', 'EUR', 1799)
-  ) as v(code, region, currency, amount_minor)
-  join public.subscription_plans p on p.code = v.code
-on conflict (plan_id, region, billing_interval) do update
-  set currency = excluded.currency,
-      amount_minor = excluded.amount_minor,
-      is_active = excluded.is_active,
-      updated_at = now();
--- PARITY-BLOCK:WEEKLY-PRICES-END
+-- THE WEEKLY PRICES ARE NOT SEEDED HERE, AND THAT IS AN ORDERING REQUIREMENT
+-- RATHER THAN A PREFERENCE. This migration predates the CHECK that allows 'week',
+-- so inserting those rows here fails with 23514 on a FRESH REPLAY: the constraint
+-- is widened by 20261010000000_billing_interval_week.sql, which runs later. The
+-- rows therefore live in that migration, after the widening, and its own
+-- PARITY-BLOCK:WEEKLY-PRICES is the copy the parity test reads.
+--
+-- FOUND BY `supabase db reset`, which is the only thing that replays migrations in
+-- order. Nothing else catches it, because the END STATE is correct either way: a
+-- database migrated incrementally, like production, never notices.
+--
+-- The delete above still spares 'week', which remains necessary: this file is
+-- re-runnable, and a re-run that removed weekly rows would delete the catalogue
+-- while the parity test went on passing.

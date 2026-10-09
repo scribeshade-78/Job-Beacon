@@ -295,8 +295,9 @@ function CandidateRow({ candidate }: { candidate: AdminBillingCandidate }) {
           : "—"}
       </td>
       <td className="py-2 pr-4 text-xs text-slate-500">
-        {usage.activeTargetRoles} roles · {usage.verifiedApplicationsThisMonth} apps ·{" "}
-        {usage.atsResumeVariants} variants · {usage.connectedMailboxes} mailboxes
+        {usage.activeTargetRoles} roles · {usage.verifiedApplicationsThisPeriod} apps ·{" "}
+        {usage.consumedApplicationsThisPeriod} consumed · {usage.atsResumeVariants} variants ·{" "}
+        {usage.connectedMailboxes} mailboxes
       </td>
     </tr>
   );

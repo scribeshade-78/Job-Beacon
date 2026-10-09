@@ -67,7 +67,10 @@ export interface EntitlementSummary {
 
 export interface AdminBillingUsage {
   activeTargetRoles: number;
-  verifiedApplicationsThisMonth: number;
+  /** Succeeded attempts this billing period — what the candidate got. */
+  verifiedApplicationsThisPeriod: number;
+  /** Every attempt except cancelled — what the quota compares against the limit. */
+  consumedApplicationsThisPeriod: number;
   atsResumeVariants: number;
   connectedMailboxes: number;
 }

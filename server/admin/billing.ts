@@ -28,7 +28,10 @@ export const ADMIN_BILLING_CANDIDATE_LIMIT = 100;
 
 export interface AdminBillingUsage {
   activeTargetRoles: number;
-  verifiedApplicationsThisMonth: number;
+  /** Succeeded attempts this billing period — what the candidate got. */
+  verifiedApplicationsThisPeriod: number;
+  /** Every attempt except cancelled — what the quota compares against the limit. */
+  consumedApplicationsThisPeriod: number;
   atsResumeVariants: number;
   connectedMailboxes: number;
 }
@@ -100,14 +103,16 @@ const LIMIT_KEYS: Array<keyof PlanLimits> = [
 
 const ZERO_USAGE: AdminBillingUsage = {
   activeTargetRoles: 0,
-  verifiedApplicationsThisMonth: 0,
+  verifiedApplicationsThisPeriod: 0,
+  consumedApplicationsThisPeriod: 0,
   atsResumeVariants: 0,
   connectedMailboxes: 0,
 };
 
 interface UsageRow {
   active_target_roles: number;
-  verified_applications_this_month: number;
+  verified_applications_this_period: number;
+  consumed_applications_this_period: number;
   ats_resume_variants: number;
   connected_mailboxes: number;
 }
@@ -135,7 +140,8 @@ async function candidateUsage(client: SupabaseClient, candidateId: string): Prom
 
   return {
     activeTargetRoles: row.active_target_roles,
-    verifiedApplicationsThisMonth: row.verified_applications_this_month,
+    verifiedApplicationsThisPeriod: row.verified_applications_this_period,
+    consumedApplicationsThisPeriod: row.consumed_applications_this_period,
     atsResumeVariants: row.ats_resume_variants,
     connectedMailboxes: row.connected_mailboxes,
   };
