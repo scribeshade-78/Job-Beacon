@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { DEFAULT_PLAN_CODE } from "../../shared/pricing.js";
 import { LIVE_SUBSCRIPTION_STATUSES } from "./subscription.js";
+import type { BillingInterval } from "./plans.js";
 
 /**
  * The automation entitlement — "does this candidate's EFFECTIVE plan include a
@@ -33,23 +34,67 @@ import { LIVE_SUBSCRIPTION_STATUSES } from "./subscription.js";
  */
 
 export interface AutomationEntitlement {
+  /**
+   * The plan INCLUDES an automation allowance for the current interval. Says
+   * nothing about whether any of it is left — that is quotaExhausted, kept
+   * separate so the two produce DIFFERENT reason codes rather than one vague
+   * "not eligible" that a candidate cannot act on.
+   */
   planEntitled: boolean;
   /** The plan the decision was made on: the live subscription's plan, or 'free'. */
   planCode: string;
+  /** The allowance for the CURRENT billing interval, or 0 when the plan has none. */
+  limit: number;
+  /** Attempts consumed this billing period: every status except 'cancelled'. */
+  consumed: number;
+  /** True when the plan has an allowance and it is used up. */
+  quotaExhausted: boolean;
+  /** The interval the limit was read for, so a failure can say which one. */
+  billingInterval: BillingInterval;
 }
 
 interface PlanLimitsRow {
   max_auto_apply_india_per_month: number | null;
   max_auto_apply_us_per_month: number | null;
+  max_auto_apply_india_per_week: number | null;
+  max_auto_apply_us_per_week: number | null;
+}
+
+/**
+ * Attempts consumed this billing period, read through the SAME function the
+ * billing matrix uses, so the gate and the number a candidate is shown cannot
+ * disagree about what was spent.
+ *
+ * A read failure THROWS rather than returning zero. Defaulting to zero would
+ * convert a database blip into an unmetered allowance, which is the wrong
+ * direction to fail in for a quota.
+ */
+async function loadConsumedApplications(
+  client: Pick<SupabaseClient, "rpc">,
+  candidateId: string,
+): Promise<number> {
+  const { data, error } = await client.rpc("candidate_entitlement_usage", {
+    p_candidate_id: candidateId,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { consumed_applications_this_period?: number }
+    | undefined;
+
+  return row?.consumed_applications_this_period ?? 0;
 }
 
 export async function loadAutomationEntitlement(
-  client: Pick<SupabaseClient, "from">,
+  client: Pick<SupabaseClient, "from" | "rpc">,
   candidateId: string,
 ): Promise<AutomationEntitlement> {
   const { data: subscription, error: subscriptionError } = await client
     .from("subscriptions")
-    .select("plan_id")
+    .select("plan_id, billing_interval")
     .eq("candidate_id", candidateId)
     .in("status", [...LIVE_SUBSCRIPTION_STATUSES])
     .maybeSingle();
@@ -57,6 +102,12 @@ export async function loadAutomationEntitlement(
   if (subscriptionError) {
     throw subscriptionError;
   }
+
+  // The interval the SUBSCRIPTION was bought at decides which limit column
+  // applies. A weekly plan compared against a monthly allowance would be handed
+  // roughly four times what it paid for.
+  const billingInterval: BillingInterval =
+    (subscription as { billing_interval?: BillingInterval } | null)?.billing_interval ?? "month";
 
   let planCode: string = DEFAULT_PLAN_CODE;
   let planId: string | null = null;
@@ -93,12 +144,22 @@ export async function loadAutomationEntitlement(
   }
 
   if (planId === null) {
-    return { planEntitled: false, planCode };
+    return {
+      planEntitled: false,
+      planCode,
+      limit: 0,
+      consumed: 0,
+      quotaExhausted: false,
+      billingInterval,
+    };
   }
 
   const { data: limits, error: limitsError } = await client
     .from("plan_limits")
-    .select("max_auto_apply_india_per_month, max_auto_apply_us_per_month")
+    .select(
+      "max_auto_apply_india_per_month, max_auto_apply_us_per_month, " +
+        "max_auto_apply_india_per_week, max_auto_apply_us_per_week",
+    )
     .eq("plan_id", planId)
     .maybeSingle();
 
@@ -107,8 +168,27 @@ export async function loadAutomationEntitlement(
   }
 
   const row = (limits ?? null) as PlanLimitsRow | null;
-  const india = row?.max_auto_apply_india_per_month ?? null;
-  const us = row?.max_auto_apply_us_per_month ?? null;
+  const weekly = billingInterval === "week";
 
-  return { planEntitled: (india ?? 0) > 0 || (us ?? 0) > 0, planCode };
+  const india = weekly
+    ? row?.max_auto_apply_india_per_week ?? null
+    : row?.max_auto_apply_india_per_month ?? null;
+
+  const us = weekly ? row?.max_auto_apply_us_per_week ?? null : row?.max_auto_apply_us_per_month ?? null;
+
+  // MAX OF THE TWO, NOT THE SUM. candidate_entitlement_usage has no destination
+  // split, so a per-destination gate is still not expressible (see this file's
+  // header). The larger is the only defensible reading: the smaller would refuse a
+  // US application against an India-only figure.
+  const limit = Math.max(india ?? 0, us ?? 0);
+  const consumed = await loadConsumedApplications(client, candidateId);
+
+  return {
+    planEntitled: limit > 0,
+    planCode,
+    limit,
+    consumed,
+    quotaExhausted: limit > 0 && consumed >= limit,
+    billingInterval,
+  };
 }

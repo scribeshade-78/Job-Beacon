@@ -82,6 +82,26 @@ export interface PlanDefinition {
    * reset cadence and the interval factor arrive with the counters in phase 2c.
    */
   verifiedApplicationsPerWeek: number;
+  /**
+   * AUTOMATION allowance per week, per destination.
+   *
+   * Distinct from verifiedApplicationsPerWeek above, which is the TRACKED figure
+   * shown on the pricing page and gates nothing. This pair is what the
+   * plan_entitlement gate compares consumed attempts against, so the two must not
+   * be collapsed into one "applications" number.
+   */
+  autoApplyPerWeek: { india: number; us: number };
+  /** AI credits per billing period. One credit = one resume-tailoring or deep-cover-letter run. */
+  aiCreditsPerMonth: number;
+  aiCreditsPerWeek: number;
+  /**
+   * Distinct vacancies that may be first surfaced per CALENDAR DAY.
+   *
+   * NOT per billing period: discovery resets daily, so this is the one limit here
+   * whose window is not the subscription's. Kept beside the others because it is
+   * still an allowance, but it must never be compared against a period total.
+   */
+  dailyDiscoveryJobs: number;
   /** Mirrors plan_limits.max_mailbox_connections — 0 on Free is "Gmail connect: No". */
   maxMailboxConnections: number;
 }
@@ -106,6 +126,10 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     verifiedApplicationsPerMonth: 15,
     verifiedApplicationsPerWeek: 5,
     weeklyPriceMinor: { IN: 0, US: 0, UK: 0, EU: 0 },
+    autoApplyPerWeek: { india: 0, us: 0 },
+    aiCreditsPerMonth: 2,
+    aiCreditsPerWeek: 2,
+    dailyDiscoveryJobs: 50,
     maxMailboxConnections: 0,
   },
   {
@@ -118,6 +142,10 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     verifiedApplicationsPerMonth: 100,
     verifiedApplicationsPerWeek: 25,
     weeklyPriceMinor: { IN: 5900, US: 199, UK: 149, EU: 199 },
+    autoApplyPerWeek: { india: 25, us: 25 },
+    aiCreditsPerMonth: 100,
+    aiCreditsPerWeek: 25,
+    dailyDiscoveryJobs: 150,
     maxMailboxConnections: 1,
   },
   {
@@ -134,6 +162,10 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     verifiedApplicationsPerMonth: 500,
     verifiedApplicationsPerWeek: 100,
     weeklyPriceMinor: { IN: 29900, US: 899, UK: 749, EU: 899 },
+    autoApplyPerWeek: { india: 100, us: 100 },
+    aiCreditsPerMonth: 500,
+    aiCreditsPerWeek: 125,
+    dailyDiscoveryJobs: 800,
     maxMailboxConnections: 1,
   },
   {
@@ -146,6 +178,10 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     verifiedApplicationsPerMonth: 1000,
     verifiedApplicationsPerWeek: 200,
     weeklyPriceMinor: { IN: 59900, US: 1799, UK: 1499, EU: 1799 },
+    autoApplyPerWeek: { india: 200, us: 200 },
+    aiCreditsPerMonth: 1000,
+    aiCreditsPerWeek: 250,
+    dailyDiscoveryJobs: 1500,
     maxMailboxConnections: 1,
   },
 ];

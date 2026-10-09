@@ -13,10 +13,14 @@ function chain(value: { data: unknown; error: unknown }) {
   return builder;
 }
 
-function fakeClient(tables: Record<string, { data: unknown; error: unknown }>) {
+/**
+ * `consumed` is what candidate_entitlement_usage reports for the period. Zero for
+ * every case that only cares about the allowance itself.
+ */
+function fakeClient(tables: Record<string, { data: unknown; error: unknown }>, consumed = 0) {
   return {
     from: (table: string) => chain(tables[table] ?? { data: null, error: null }),
-    rpc: async () => ({ data: [], error: null }),
+    rpc: async () => ({ data: [{ consumed_applications_this_period: consumed }], error: null }),
   } as never;
 }
 
@@ -38,7 +42,14 @@ describe("loadAutomationEntitlement", () => {
       "cand-1",
     );
 
-    expect(result).toEqual({ planEntitled: false, planCode: "free" });
+    expect(result).toEqual({
+      planEntitled: false,
+      planCode: "free",
+      limit: 0,
+      consumed: 0,
+      quotaExhausted: false,
+      billingInterval: "month",
+    });
   });
 
   it("is entitled for a live subscription whose plan has a non-zero allowance", async () => {
@@ -51,7 +62,15 @@ describe("loadAutomationEntitlement", () => {
       "cand-1",
     );
 
-    expect(result).toEqual({ planEntitled: true, planCode: "pro" });
+    expect(result).toEqual({
+      planEntitled: true,
+      planCode: "pro",
+      // max(india, us) — 300, not 400.
+      limit: 300,
+      consumed: 0,
+      quotaExhausted: false,
+      billingInterval: "month",
+    });
   });
 
   it("is entitled when only ONE destination quota is non-zero", async () => {
@@ -70,6 +89,52 @@ describe("loadAutomationEntitlement", () => {
     expect(result.planEntitled).toBe(true);
   });
 
+  it("reports an entitled plan as exhausted once the period's allowance is spent", async () => {
+    const result = await loadAutomationEntitlement(
+      fakeClient(
+        {
+          subscriptions: { data: { plan_id: "plan-pro" }, error: null },
+          subscription_plans: PRO_PLAN,
+          plan_limits: PRO_LIMITS,
+        },
+        300,
+      ),
+      "cand-1",
+    );
+
+    // STILL ENTITLED — the plan does include automation. Exhaustion is a separate
+    // fact, so the gate can say "you have used this period" rather than "buy a
+    // plan" to somebody who already has one.
+    expect(result.planEntitled).toBe(true);
+    expect(result.quotaExhausted).toBe(true);
+    expect(result.consumed).toBe(300);
+    expect(result.limit).toBe(300);
+  });
+
+  it("reads the WEEKLY columns when the subscription was bought weekly", async () => {
+    const result = await loadAutomationEntitlement(
+      fakeClient({
+        subscriptions: { data: { plan_id: "plan-starter", billing_interval: "week" }, error: null },
+        subscription_plans: { data: { id: "plan-starter", code: "starter" }, error: null },
+        plan_limits: {
+          data: {
+            max_auto_apply_india_per_month: 100,
+            max_auto_apply_us_per_month: 100,
+            max_auto_apply_india_per_week: 25,
+            max_auto_apply_us_per_week: 25,
+          },
+          error: null,
+        },
+      }),
+      "cand-1",
+    );
+
+    // 25, not 100: comparing a weekly plan against the monthly column would hand
+    // it four times what it paid for.
+    expect(result.billingInterval).toBe("week");
+    expect(result.limit).toBe(25);
+  });
+
   it("is NOT entitled when the effective plan has no plan_limits row", async () => {
     const result = await loadAutomationEntitlement(
       fakeClient({
@@ -80,7 +145,14 @@ describe("loadAutomationEntitlement", () => {
       "cand-1",
     );
 
-    expect(result).toEqual({ planEntitled: false, planCode: "pro" });
+    expect(result).toEqual({
+      planEntitled: false,
+      planCode: "pro",
+      limit: 0,
+      consumed: 0,
+      quotaExhausted: false,
+      billingInterval: "month",
+    });
   });
 
   it("throws on a query error rather than reporting a plan problem", async () => {

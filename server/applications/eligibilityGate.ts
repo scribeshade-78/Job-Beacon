@@ -242,13 +242,28 @@ export async function evaluateEligibilityGates(
     work_mode: preferenceLedger.gates.work_mode,
     salary: preferenceLedger.gates.salary,
     location: preferenceLedger.gates.location,
-    plan_entitlement: automationEntitlement.planEntitled
-      ? { status: "pass" }
-      : {
+    // TWO FAILURES, TWO CODES, ON PURPOSE. "Your plan does not include automated
+    // applications" and "you have used this period's allowance" need different
+    // answers from the candidate, and collapsing them into plan_not_eligible would
+    // send somebody who has simply run out to the pricing page for no reason.
+    plan_entitlement: !automationEntitlement.planEntitled
+      ? {
           status: "fail",
           reasonCode: "plan_not_eligible",
           detail: { planCode: automationEntitlement.planCode },
-        },
+        }
+      : automationEntitlement.quotaExhausted
+        ? {
+            status: "fail",
+            reasonCode: "QUOTA_EXHAUSTED",
+            detail: {
+              planCode: automationEntitlement.planCode,
+              billingInterval: automationEntitlement.billingInterval,
+              used: automationEntitlement.consumed,
+              limit: automationEntitlement.limit,
+            },
+          }
+        : { status: "pass" },
   };
 
   const eligible = Object.values(gates).every((gate) => gate.status === "pass");

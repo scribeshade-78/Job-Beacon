@@ -41,6 +41,15 @@ const WEEKLY_PRICES_PATH = resolve(
   "supabase/migrations/20261010000000_billing_interval_week.sql",
 );
 
+/**
+ * The metered limits are also elsewhere, for the same ordering reason: they are
+ * columns added after 20260927120000 ran, so that migration cannot write them.
+ */
+const USAGE_LIMITS_PATH = resolve(
+  process.cwd(),
+  "supabase/migrations/20261012000000_usage_limits.sql",
+);
+
 function parityBlock(name: string, path: string = MIGRATION_PATH): string {
   const text = readFileSync(path, "utf8");
   const start = text.indexOf("-- PARITY-BLOCK:" + name + "-BEGIN");
@@ -142,6 +151,36 @@ describe("the seed migration matches the catalogue", () => {
         amountMinor: plan.weeklyPriceMinor[region],
       })),
     );
+
+    expect(tuples).toHaveLength(expected.length);
+
+    for (const row of expected) {
+      expect(tuples).toContainEqual(row);
+    }
+  });
+
+  it("seeds the metered limits from the catalogue", () => {
+    const tuples = [...parityBlock("USAGE-LIMITS", USAGE_LIMITS_PATH).matchAll(/\(\s*'([a-z]+)',\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\)/g)].map(
+      (match) => ({
+        code: match[1],
+        autoIndiaWk: Number(match[2]),
+        autoUsWk: Number(match[3]),
+        verifiedWk: Number(match[4]),
+        creditsMo: Number(match[5]),
+        creditsWk: Number(match[6]),
+        discoveryDay: Number(match[7]),
+      }),
+    );
+
+    const expected = PLAN_CATALOGUE.map((plan) => ({
+      code: plan.code,
+      autoIndiaWk: plan.autoApplyPerWeek.india,
+      autoUsWk: plan.autoApplyPerWeek.us,
+      verifiedWk: plan.verifiedApplicationsPerWeek,
+      creditsMo: plan.aiCreditsPerMonth,
+      creditsWk: plan.aiCreditsPerWeek,
+      discoveryDay: plan.dailyDiscoveryJobs,
+    }));
 
     expect(tuples).toHaveLength(expected.length);
 

@@ -95,7 +95,13 @@ function makeClient(overrides: Partial<Record<string, TableResult>> = {}) {
     }
     return makeQueryBuilder(result);
   });
-  return { from } as unknown as Parameters<typeof evaluateEligibilityGates>[0];
+  return {
+    from,
+    // The plan_entitlement gate reads consumed usage through the same RPC the
+    // billing matrix uses. Zero by default: every pre-existing test here asserts
+    // its OWN gate, and a non-zero default would fail them all on QUOTA_EXHAUSTED.
+    rpc: vi.fn(async () => ({ data: [{ consumed_applications_this_period: 0 }], error: null })),
+  } as unknown as Parameters<typeof evaluateEligibilityGates>[0];
 }
 
 const baseInput = { candidateId: "candidate-1", vacancyId: "vacancy-1" };
