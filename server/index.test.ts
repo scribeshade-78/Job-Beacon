@@ -108,6 +108,7 @@ vi.mock("./usage/ledger.js", () => ({
   AI_CREDIT_SPEND_KIND: "ai_credit_spend",
   recordDiscoverySurfaces: vi.fn(async () => ({ recorded: 0, duplicates: 0 })),
   loadDiscoveryConsumption: vi.fn(async () => 0),
+  loadDailyDiscoveryLimit: vi.fn(async () => null),
   loadAiCreditBalance: vi.fn(async () => 0),
   ensurePeriodCreditGrant: vi.fn(async () => ({
     granted: 0,

@@ -72,6 +72,8 @@ import {
 import { selectCandidatePlan } from "./billing/selectPlan.js";
 import {
   ensurePeriodCreditGrant,
+  loadDailyDiscoveryLimit,
+  loadDiscoveryConsumption,
   recordDiscoverySurfaces,
   releaseAiCredit,
   reserveAiCredit,
@@ -2686,10 +2688,38 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     try {
-      const result = await recordDiscoverySurfaces(resolveServiceClient(), request.user!.id, vacancyIds);
+      const client = resolveServiceClient();
+
+      // ALWAYS RECORD, EVEN WHEN OVER THE ALLOWANCE. The ledger is the audit trail,
+      // and refusing the write at exactly the point over-consumption begins would
+      // blind it at the one moment it matters. The refusal is reported to the
+      // caller; it is not applied to the recording.
+      const result = await recordDiscoverySurfaces(client, request.user!.id, vacancyIds);
+
+      const limit = await loadDailyDiscoveryLimit(client, request.user!.id);
+      const consumed = await loadDiscoveryConsumption(client, request.user!.id);
+
+      // A NULL LIMIT IS A MISSING plan_limits ROW, NOT A SPENT ALLOWANCE, so it is
+      // not exhausted. This is the deliberate opposite of the credit check, which
+      // throws rather than defaulting: there the failure mode is unmetered SPEND,
+      // here it would be switching discovery off for every candidate in order to be
+      // strict about one who is merely over quota.
+      const exhausted = limit !== null && consumed >= limit;
 
       response.set("Cache-Control", "no-store");
-      response.status(200).json({ recorded: result.recorded, duplicates: result.duplicates });
+      response.status(exhausted ? 429 : 200).json({
+        recorded: result.recorded,
+        duplicates: result.duplicates,
+        consumed,
+        limit,
+        exhausted,
+        ...(exhausted
+          ? {
+              code: "QUOTA_EXHAUSTED",
+              error: "You have reached today's discovery allowance. It resets tomorrow.",
+            }
+          : {}),
+      });
     } catch (error) {
       console.error(
         "Discovery surface failed:",

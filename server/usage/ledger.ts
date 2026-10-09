@@ -228,6 +228,80 @@ export async function releaseAiCredit(
   }
 }
 
+/**
+ * The candidate's effective plan: the live subscription's, else Free. Shared by the
+ * credit grant and the discovery limit so the two cannot disagree about which plan
+ * somebody is on.
+ *
+ * A SUBSCRIPTION'S OWN plan_id IS USED EVEN IF THE PLAN ROW IS MISSING - the
+ * catalogue might have been renamed under it. Only the absence of any subscription
+ * falls back to Free, which is what "no subscription IS the Free plan" means here.
+ */
+async function resolvePlanId(client: SupabaseClient, candidateId: string): Promise<string | null> {
+  const { data: subscription, error: subscriptionError } = await client
+    .from("subscriptions")
+    .select("plan_id")
+    .eq("candidate_id", candidateId)
+    .in("status", [...LIVE_STATUSES])
+    .maybeSingle();
+
+  if (subscriptionError) {
+    throw subscriptionError;
+  }
+
+  const subscribed = (subscription as { plan_id?: string } | null)?.plan_id ?? null;
+
+  if (subscribed) {
+    return subscribed;
+  }
+
+  const { data: freePlan, error: freeError } = await client
+    .from("subscription_plans")
+    .select("id")
+    .eq("code", "free")
+    .maybeSingle();
+
+  if (freeError) {
+    throw freeError;
+  }
+
+  return (freePlan as { id: string } | null)?.id ?? null;
+}
+
+/**
+ * The daily discovery allowance, or NULL when the plan's row or the column is
+ * missing.
+ *
+ * NULL IS NOT ZERO. Zero means "this plan includes no discovery"; null means "we
+ * could not tell". The caller must not treat the second as the first, or a
+ * configuration gap switches discovery off for everybody.
+ */
+export async function loadDailyDiscoveryLimit(
+  client: SupabaseClient,
+  candidateId: string,
+): Promise<number | null> {
+  const planId = await resolvePlanId(client, candidateId);
+
+  if (!planId) {
+    return null;
+  }
+
+  const { data, error } = await client
+    .from("plan_limits")
+    .select("max_daily_discovery_jobs")
+    .eq("plan_id", planId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  const value = (data as { max_daily_discovery_jobs: number | null } | null)
+    ?.max_daily_discovery_jobs;
+
+  return typeof value === "number" ? value : null;
+}
+
 export interface PeriodGrantResult {
   granted: number;
   billingInterval: BillingInterval;
@@ -274,32 +348,7 @@ export async function ensurePeriodCreditGrant(
     periodStartsAt: period.starts_at,
   };
 
-  const { data: subscription, error: subscriptionError } = await client
-    .from("subscriptions")
-    .select("plan_id")
-    .eq("candidate_id", candidateId)
-    .in("status", [...LIVE_STATUSES])
-    .maybeSingle();
-
-  if (subscriptionError) {
-    throw subscriptionError;
-  }
-
-  let planId = (subscription as { plan_id?: string } | null)?.plan_id ?? null;
-
-  if (!planId) {
-    const { data: freePlan, error: freeError } = await client
-      .from("subscription_plans")
-      .select("id")
-      .eq("code", "free")
-      .maybeSingle();
-
-    if (freeError) {
-      throw freeError;
-    }
-
-    planId = (freePlan as { id: string } | null)?.id ?? null;
-  }
+  const planId = await resolvePlanId(client, candidateId);
 
   if (!planId) {
     return empty;
