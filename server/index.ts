@@ -70,6 +70,7 @@ import {
   verifyRazorpayWebhookSignature,
 } from "./billing/razorpay.js";
 import { selectCandidatePlan } from "./billing/selectPlan.js";
+import { recordDiscoverySurfaces } from "./usage/ledger.js";
 import { REGION_CURRENCY } from "../shared/pricing.js";
 import {
   applyCheckoutCompleted,
@@ -2611,6 +2612,51 @@ export function createApp(options: CreateAppOptions = {}) {
   // See server/billing/selectPlan.ts for why this exists at all and what bounds
   // it. It is a deliberate pre-launch decision, not an oversight.
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // M6 - the discovery-surface ledger write.
+  //
+  // A ROUTE RATHER THAN A BROWSER RPC, deliberately. candidate_usage_events is
+  // service-role-only with no candidate write path, so the only way a candidate can
+  // put a row in it is by getting this route to do it - with the id taken from the
+  // VERIFIED TOKEN, never the body, and every vacancy id shape-checked first.
+  //
+  // The client sends the vacancies it actually rendered. Re-reads, re-sorts,
+  // pagination and filter changes re-send the same ids and write nothing, because
+  // the unique key - not this route - enforces distinctness.
+  //
+  // The RAW count is recorded, never capped at the daily allowance: capping on write
+  // would make the ledger assert something that did not happen and destroy the
+  // over-consumption audit trail. Enforcement belongs on the read side.
+  // ---------------------------------------------------------------------------
+  app.post("/api/usage/discovery-surface", requireAuth, async (request: AuthenticatedRequest, response) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const raw = Array.isArray(body.vacancyIds) ? body.vacancyIds : [];
+
+    // Shape-checked rather than trusted: these end up in a text key, and a non-uuid
+    // would silently become a valid-looking ledger row.
+    const vacancyIds = raw.filter(
+      (id): id is string => typeof id === "string" && UUID_PATTERN.test(id),
+    );
+
+    if (vacancyIds.length === 0) {
+      response.status(400).json({ error: "vacancyIds must be a non-empty array of vacancy ids." });
+      return;
+    }
+
+    try {
+      const result = await recordDiscoverySurfaces(resolveServiceClient(), request.user!.id, vacancyIds);
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json({ recorded: result.recorded, duplicates: result.duplicates });
+    } catch (error) {
+      console.error(
+        "Discovery surface failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+      response.status(500).json({ error: "Could not record discovery usage." });
+    }
+  });
+
   app.post("/api/billing/select-plan", requireAuth, async (request: AuthenticatedRequest, response) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
