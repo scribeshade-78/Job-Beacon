@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { reportDiscoverySurfaces } from "../lib/usage";
 import { Link, useLocation } from "wouter";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "../components/ui/badge";
@@ -426,6 +427,11 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         setTotalCount(result.totalCount);
         setRanking(result.ranking);
         setError(null);
+
+        // M6. Reported AFTER the generation guard above, so a superseded response is
+        // never billed to the candidate's daily allowance, and fire-and-forget so a
+        // ledger failure cannot turn a good job list into an error screen.
+        void reportDiscoverySurfaces(result.opportunities.map((opportunity) => opportunity.id));
       } else {
         setError(result.message);
       }

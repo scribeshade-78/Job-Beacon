@@ -95,6 +95,28 @@ vi.mock("./admin/workerTasks.js", async () => {
   return { ...actual, runAdminWorkerTask: vi.fn() };
 });
 vi.mock("./billing/entitlements.js", () => ({ evaluateEntitlements: vi.fn() }));
+
+// The credit ledger is mocked at the MODULE boundary rather than by widening each
+// generate-preview call site's serviceClient. Those tests pass an intentionally
+// empty client to assert the route's contract - 404-not-403 for another
+// candidate's attempt, 409 when not awaiting review - and teaching that client to
+// serve ledger queries would edit 33 security assertions to fix a fixture. Mocking
+// the seam keeps every one of them exactly as written.
+vi.mock("./usage/ledger.js", () => ({
+  DISCOVERY_RUN_KIND: "discovery_run",
+  AI_CREDIT_GRANT_KIND: "ai_credit_grant",
+  AI_CREDIT_SPEND_KIND: "ai_credit_spend",
+  recordDiscoverySurfaces: vi.fn(async () => ({ recorded: 0, duplicates: 0 })),
+  loadDiscoveryConsumption: vi.fn(async () => 0),
+  loadAiCreditBalance: vi.fn(async () => 0),
+  ensurePeriodCreditGrant: vi.fn(async () => ({
+    granted: 0,
+    billingInterval: "month",
+    periodStartsAt: "2026-10-01T00:00:00.000Z",
+  })),
+  reserveAiCredit: vi.fn(async () => ({ kind: "reserved", balanceAfter: 0 })),
+  releaseAiCredit: vi.fn(async () => undefined),
+}));
 vi.mock("./billing/plans.js", async () => {
   const actual = await vi.importActual<typeof import("./billing/plans.js")>("./billing/plans.js");
   return { ...actual, listPlans: vi.fn() };

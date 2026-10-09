@@ -70,7 +70,12 @@ import {
   verifyRazorpayWebhookSignature,
 } from "./billing/razorpay.js";
 import { selectCandidatePlan } from "./billing/selectPlan.js";
-import { recordDiscoverySurfaces } from "./usage/ledger.js";
+import {
+  ensurePeriodCreditGrant,
+  recordDiscoverySurfaces,
+  releaseAiCredit,
+  reserveAiCredit,
+} from "./usage/ledger.js";
 import { REGION_CURRENCY } from "../shared/pricing.js";
 import {
   applyCheckoutCompleted,
@@ -1377,11 +1382,48 @@ export function createApp(options: CreateAppOptions = {}) {
       }
 
       try {
-        const preview = await generateAttemptPreview(
-          resolveServiceClient(),
-          { createOpenAIClient: resolveOpenAIClient },
-          { candidateId: request.user!.id, applicationAttemptId: attemptId },
-        );
+        const client = resolveServiceClient();
+
+        // ---------------------------------------------------------------------
+        // M7. One credit is one tailoring or deep-cover-letter run. The period's
+        // grant is written lazily on first use - keyed on the period start, so a
+        // re-run is a no-op and this needs no rollover job - and the credit is
+        // reserved BEFORE the model call.
+        // ---------------------------------------------------------------------
+        await ensurePeriodCreditGrant(client, request.user!.id);
+
+        // Keyed per ATTEMPT, not per call: a retried request must not cost a second
+        // credit, and reserveAiCredit lets an already-reserved run through without
+        // charging again.
+        const reservationKey = "preview:" + attemptId;
+        const reservation = await reserveAiCredit(client, request.user!.id, reservationKey);
+
+        if (reservation.kind === "insufficient") {
+          response.status(402).json({
+            error: "You have used all of this period's AI credits.",
+            code: "QUOTA_EXHAUSTED",
+            balance: reservation.balance,
+          });
+          return;
+        }
+
+        let preview: Awaited<ReturnType<typeof generateAttemptPreview>>;
+
+        try {
+          preview = await generateAttemptPreview(
+            client,
+            { createOpenAIClient: resolveOpenAIClient },
+            { candidateId: request.user!.id, applicationAttemptId: attemptId },
+          );
+        } catch (error) {
+          // A COMPENSATING GRANT, never a delete of the spend: the failed run stays
+          // visible in the ledger and the pair reconciles. Swallowed here because the
+          // original generation error is the one worth reporting.
+          await releaseAiCredit(client, request.user!.id, reservationKey, "generation_failed").catch(
+            () => undefined,
+          );
+          throw error;
+        }
 
         response.status(200).json({
           applicationAttemptId: preview.applicationAttemptId,
