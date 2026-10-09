@@ -43,7 +43,7 @@ export interface CheckoutSessionRequest {
   amountMinor: number;
   region: string;
   currency: string;
-  billingInterval: "month" | "year";
+  billingInterval: "week" | "month" | "year";
   candidateId: string;
   successUrl: string;
   cancelUrl: string;

@@ -54,7 +54,7 @@ export interface RazorpayOrderRequest {
   amountMinor: number;
   currency: string;
   region: string;
-  billingInterval: "month" | "year";
+  billingInterval: "week" | "month" | "year";
   candidateId: string;
 }
 

@@ -3752,9 +3752,21 @@ describe("Task H1 billing routes", () => {
       });
     });
 
-    it("rejects an unknown billing interval", async () => {
+    // The fixture used to be "week". Widening BILLING_INTERVALS in phase 2b made
+    // that legal, so this test silently stopped testing what it says: the request
+    // got past the guard and failed later. "fortnight" cannot become legal by
+    // accident.
+    it("rejects an interval that is not week, month or year", async () => {
       await withTestServer(withAuth(), async (base) => {
-        expect((await post(base, { planCode: "pro", region: "IN", billingInterval: "week" })).status).toBe(400);
+        expect((await post(base, { planCode: "pro", region: "IN", billingInterval: "fortnight" })).status).toBe(400);
+      });
+    });
+
+    it("accepts week now that it is a legal interval", async () => {
+      await withTestServer(withAuth(), async (base) => {
+        // NOT 400: the interval cleared validation. What happens next is the
+        // provider's business — this asserts the guard, not checkout.
+        expect((await post(base, { planCode: "pro", region: "IN", billingInterval: "week" })).status).not.toBe(400);
       });
     });
 

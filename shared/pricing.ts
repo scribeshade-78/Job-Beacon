@@ -65,6 +65,23 @@ export interface PlanDefinition {
    * because the pricing table shows it and the seed writes it.
    */
   verifiedApplicationsPerMonth: number;
+  /**
+   * Weekly price in minor units for every region. A flat record beside
+   * monthlyPriceMinor rather than a nested Record<BillingInterval, ...>: 'year'
+   * stays legal in the database but is deliberately unpriced, so a nested map
+   * would force a null branch into every consumer for a case that cannot occur.
+   */
+  weeklyPriceMinor: Record<BillingRegion, number>;
+  /**
+   * Applications included per WEEK, for the weekly plans.
+   *
+   * DISPLAY ONLY — THERE IS NO COLUMN BEHIND THIS, ON PURPOSE. plan_limits stores
+   * per-month figures and it was decided (2026-10-10) to keep it that way rather
+   * than add per-week columns that nothing counts. A column here would be a number
+   * no code reads, which is the trap the Free auto-apply allowance avoided. The
+   * reset cadence and the interval factor arrive with the counters in phase 2c.
+   */
+  verifiedApplicationsPerWeek: number;
   /** Mirrors plan_limits.max_mailbox_connections — 0 on Free is "Gmail connect: No". */
   maxMailboxConnections: number;
 }
@@ -87,6 +104,8 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     // matrix (server/billing/entitlements.ts, server/admin/billing.ts) and never
     // by an eligibility or authorization path — verified before setting it.
     verifiedApplicationsPerMonth: 15,
+    verifiedApplicationsPerWeek: 5,
+    weeklyPriceMinor: { IN: 0, US: 0, UK: 0, EU: 0 },
     maxMailboxConnections: 0,
   },
   {
@@ -97,6 +116,8 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     monthlyPriceMinor: { IN: 19900, US: 599, UK: 499, EU: 599 },
     autoApplyPerMonth: { india: 100, us: 100 },
     verifiedApplicationsPerMonth: 100,
+    verifiedApplicationsPerWeek: 25,
+    weeklyPriceMinor: { IN: 5900, US: 199, UK: 149, EU: 199 },
     maxMailboxConnections: 1,
   },
   {
@@ -111,6 +132,8 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     monthlyPriceMinor: { IN: 99900, US: 2999, UK: 2499, EU: 2999 },
     autoApplyPerMonth: { india: 500, us: 500 },
     verifiedApplicationsPerMonth: 500,
+    verifiedApplicationsPerWeek: 100,
+    weeklyPriceMinor: { IN: 29900, US: 899, UK: 749, EU: 899 },
     maxMailboxConnections: 1,
   },
   {
@@ -121,6 +144,8 @@ export const PLAN_CATALOGUE: readonly PlanDefinition[] = [
     monthlyPriceMinor: { IN: 199900, US: 5999, UK: 4999, EU: 5999 },
     autoApplyPerMonth: { india: 1000, us: 1000 },
     verifiedApplicationsPerMonth: 1000,
+    verifiedApplicationsPerWeek: 200,
+    weeklyPriceMinor: { IN: 59900, US: 1799, UK: 1499, EU: 1799 },
     maxMailboxConnections: 1,
   },
 ];

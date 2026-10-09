@@ -15,6 +15,7 @@ import {
   selectPlan,
   startCheckout,
   verifyRazorpayPayment,
+  type BillingInterval,
   type BillingProviders,
   type EntitlementEvaluation,
   type EntitlementSummary,
@@ -198,12 +199,14 @@ function PlanCard({
   plan,
   region,
   currency,
+  billingInterval,
   currentCode,
   onSelect,
 }: {
   plan: PlanDefinition;
   region: BillingRegion;
   currency: string;
+  billingInterval: BillingInterval;
   currentCode: PlanCode;
   onSelect: (plan: PlanDefinition) => void;
 }) {
@@ -232,9 +235,14 @@ function PlanCard({
 
       <p className="mt-4 flex items-baseline gap-1.5">
         <span className="text-4xl font-bold tracking-tight text-black">
-          {formatPrice(plan.monthlyPriceMinor[region], currency)}
+          {formatPrice(
+            billingInterval === "week" ? plan.weeklyPriceMinor[region] : plan.monthlyPriceMinor[region],
+            currency,
+          )}
         </span>
-        <span className="text-sm text-ios-text-secondary">/ month</span>
+        <span className="text-sm text-ios-text-secondary">
+          {billingInterval === "week" ? "/ week" : "/ month"}
+        </span>
       </p>
 
       <ul className="mt-5 flex-1 space-y-2.5">
@@ -271,6 +279,11 @@ export function BillingPanel() {
   const [region, setRegion] = useState<BillingRegion>(() => detectRegionFromBrowser());
   /** Whether the discreet "change" link has revealed the region picker. */
   const [regionPickerOpen, setRegionPickerOpen] = useState(false);
+  /**
+   * Monthly is the default view: it is the cadence the prices were designed
+   * around, and the one a candidate comparing tiers expects to see first.
+   */
+  const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
   const [entitlements, setEntitlements] = useState<EntitlementSummary | null>(null);
   const [providers, setProviders] = useState<Partial<BillingProviders> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -370,7 +383,7 @@ export function BillingPanel() {
     try {
       // Free is a downgrade, not a purchase: it closes the live row.
       if (planCode === "free") {
-        const result = await selectPlan({ planCode, region }, accessToken);
+        const result = await selectPlan({ planCode, region, billingInterval }, accessToken);
 
         if (result.kind !== "success") {
           setActionError(result.kind === "error" ? result.message : "Could not switch to Free.");
@@ -383,7 +396,7 @@ export function BillingPanel() {
       }
 
       if (activeProvider === "razorpay") {
-        const order = await createRazorpayOrder({ planCode, region }, accessToken);
+        const order = await createRazorpayOrder({ planCode, region, billingInterval }, accessToken);
 
         if (order.kind !== "success") {
           setActionError(order.kind === "error" ? order.message : "Could not start the payment.");
@@ -434,7 +447,7 @@ export function BillingPanel() {
       }
 
       if (activeProvider === "stripe") {
-        const result = await startCheckout({ planCode, region, billingInterval: "month" }, accessToken);
+        const result = await startCheckout({ planCode, region, billingInterval }, accessToken);
 
         if (result.kind !== "success") {
           setActionError(result.kind === "error" ? result.message : "Could not start checkout.");
@@ -493,7 +506,7 @@ export function BillingPanel() {
           <div>
             <h2 className="text-2xl font-bold tracking-tight text-black">Plans &amp; pricing</h2>
             <p className="mt-1 text-sm text-ios-text-secondary">
-              Simple monthly pricing. Change or cancel any time.
+              Billed monthly or weekly. Change or cancel any time.
             </p>
 
             {/* THE ESCAPE HATCH, NOT A CONTROL PANEL. The region is detected from
@@ -518,6 +531,33 @@ export function BillingPanel() {
                 {regionPickerOpen ? "done" : "change"}
               </button>
             </p>
+
+            {/* Monthly first, and not collapsed behind a link: which cadence you
+                are looking at changes every number on this page, so it is not a
+                preference to be tucked away — unlike the region above, which is
+                detected and only ever corrected. */}
+            <div
+              role="group"
+              aria-label="Billing interval"
+              className="mt-3 inline-flex gap-1 rounded-full border border-ios-separator bg-ios-card p-1 shadow-card"
+            >
+              {(["month", "week"] as const).map((interval) => (
+                <button
+                  key={interval}
+                  type="button"
+                  aria-pressed={billingInterval === interval}
+                  onClick={() => setBillingInterval(interval)}
+                  className={cn(
+                    "cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
+                    billingInterval === interval
+                      ? "bg-blue-600 text-white"
+                      : "text-ios-text-secondary hover:bg-ios-bg",
+                  )}
+                >
+                  {interval === "month" ? "Monthly" : "Weekly"}
+                </button>
+              ))}
+            </div>
           </div>
 
           {regionPickerOpen && (
@@ -574,6 +614,7 @@ export function BillingPanel() {
             plan={plan}
             region={region}
             currency={currency}
+            billingInterval={billingInterval}
             currentCode={currentCode}
             onSelect={(selected) => {
               setActionError(null);

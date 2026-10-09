@@ -106,6 +106,38 @@ describe("the seed migration matches the catalogue", () => {
     }
   });
 
+  /**
+   * The weekly matrix. A separate block rather than a second tuple field in
+   * PRICES, because the existing block is verified and its regexp is positional —
+   * adding an interval column to it would rewrite the sixteen tuples that already
+   * agree with the catalogue, for no gain.
+   */
+  it("seeds the weekly matrix from weeklyPriceMinor", () => {
+    const tuples = [...parityBlock("WEEKLY-PRICES").matchAll(/\(\s*'([a-z]+)',\s*'([A-Z]{2})',\s*'([A-Z]{3})',\s*(\d+)\s*\)/g)].map(
+      (match) => ({
+        code: match[1],
+        region: match[2],
+        currency: match[3],
+        amountMinor: Number(match[4]),
+      }),
+    );
+
+    const expected = PLAN_CATALOGUE.flatMap((plan) =>
+      BILLING_REGIONS.map((region) => ({
+        code: plan.code,
+        region,
+        currency: REGION_CURRENCY[region],
+        amountMinor: plan.weeklyPriceMinor[region],
+      })),
+    );
+
+    expect(tuples).toHaveLength(expected.length);
+
+    for (const row of expected) {
+      expect(tuples).toContainEqual(row);
+    }
+  });
+
   it("seeds exactly the catalogue's quota values", () => {
     const tuples = [...parityBlock("QUOTAS").matchAll(/\(\s*'([a-z]+)',\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\)/g)].map(
       (match) => ({

@@ -9,7 +9,7 @@
 
 import { type BillingRegion } from "../../../shared/pricing";
 
-export type BillingInterval = "month" | "year";
+export type BillingInterval = "week" | "month" | "year";
 
 /** Region list lives in shared/pricing.ts so the client cannot offer one the server rejects. */
 export type { BillingRegion };
@@ -208,7 +208,7 @@ export function getBillingSubscription(accessToken: string, fetchImpl: typeof fe
  * the server refuses with 409 once credentials exist.
  */
 export function selectPlan(
-  input: { planCode: string; region: BillingRegion },
+  input: { planCode: string; region: BillingRegion; billingInterval?: BillingInterval },
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
 ) {
@@ -229,7 +229,7 @@ export interface RazorpayOrderPayload {
 }
 
 export function createRazorpayOrder(
-  input: { planCode: string; region: BillingRegion },
+  input: { planCode: string; region: BillingRegion; billingInterval?: BillingInterval },
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
 ) {

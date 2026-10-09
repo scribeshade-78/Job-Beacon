@@ -12,7 +12,7 @@ import { BILLING_REGIONS as PRICING_REGIONS, type BillingRegion } from "../../sh
  */
 
 export type CompanyIntelligenceDepth = "none" | "basic" | "full";
-export type BillingInterval = "month" | "year";
+export type BillingInterval = "week" | "month" | "year";
 
 /**
  * Region comes from shared/pricing.ts rather than being listed again here. A
@@ -21,7 +21,7 @@ export type BillingInterval = "month" | "year";
  */
 export type { BillingRegion };
 export const BILLING_REGIONS: readonly BillingRegion[] = PRICING_REGIONS;
-export const BILLING_INTERVALS: readonly BillingInterval[] = ["month", "year"];
+export const BILLING_INTERVALS: readonly BillingInterval[] = ["week", "month", "year"];
 
 /**
  * The PRD v3 §27.2 dimensions, exactly as the table stores them.

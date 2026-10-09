@@ -479,7 +479,11 @@ export function UsersBillingSection() {
                     {price.region} · {price.currency}
                   </td>
                   <td className="py-2 pr-4 text-xs text-slate-400">
-                    {price.billingInterval === "month" ? "Monthly" : "Annual"}
+                    {price.billingInterval === "month"
+                      ? "Monthly"
+                      : price.billingInterval === "week"
+                        ? "Weekly"
+                        : "Annual"}
                   </td>
                   <td className="py-2 pr-4 font-mono text-xs text-slate-300">
                     {price.amountMinor === null ? (

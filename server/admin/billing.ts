@@ -141,9 +141,24 @@ async function candidateUsage(client: SupabaseClient, candidateId: string): Prom
   };
 }
 
-/** Normalises a stored price to a monthly figure in minor units. */
+/**
+ * Normalises a stored price to a monthly figure in minor units.
+ *
+ * THE WEEK CASE IS NOT OPTIONAL. Without it the else branch returns a WEEKLY
+ * amount as if it were monthly, overstating that plan's MRR by ~4.35x — silently,
+ * in the number an operator would use to make decisions. 52/12 rather than 4: a
+ * year is not twelve four-week months.
+ */
 function monthlyMinor(amountMinor: number, interval: BillingInterval): number {
-  return interval === "year" ? Math.round(amountMinor / 12) : amountMinor;
+  if (interval === "year") {
+    return Math.round(amountMinor / 12);
+  }
+
+  if (interval === "week") {
+    return Math.round((amountMinor * 52) / 12);
+  }
+
+  return amountMinor;
 }
 
 export async function getAdminBilling(client: SupabaseClient): Promise<AdminBilling> {

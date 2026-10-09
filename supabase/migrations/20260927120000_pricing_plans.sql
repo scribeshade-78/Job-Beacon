@@ -149,14 +149,21 @@ update public.plan_limits pl
 -- PARITY-BLOCK:QUOTAS-END
 
 -- ---------------------------------------------------------------------------
--- 5. Prices: the monthly matrix only.
+-- 5. Prices: the monthly matrix and the weekly matrix.
 --
 -- The annual rows were seeded unpriced and inactive and no figure was ever
 -- given for them, so they are deleted rather than left to render as a permanent
 -- "Not priced" in the admin console. billing_interval keeps 'year' in its CHECK
 -- so annual pricing can return without another constraint change.
+--
+-- 'week' IS SPARED BY THIS DELETE, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
+-- This file declares itself re-runnable, so a version of this line that removed
+-- weekly rows would silently delete the whole weekly catalogue on a re-run —
+-- while the parity test, which reads the blocks below, went on passing.
 -- ---------------------------------------------------------------------------
-delete from public.regional_prices where billing_interval <> 'month';
+delete from public.regional_prices
+ where billing_interval <> 'month'
+   and billing_interval <> 'week';
 
 delete from public.regional_prices rp
  using public.subscription_plans p
@@ -191,3 +198,32 @@ on conflict (plan_id, region, billing_interval) do update
       is_active = excluded.is_active,
       updated_at = now();
 -- PARITY-BLOCK:PRICES-END
+
+-- PARITY-BLOCK:WEEKLY-PRICES-BEGIN
+insert into public.regional_prices (plan_id, region, currency, billing_interval, amount_minor, is_active)
+select p.id, v.region, v.currency, 'week', v.amount_minor, true
+  from (values
+    ('free',    'IN', 'INR', 0),
+    ('free',    'US', 'USD', 0),
+    ('free',    'UK', 'GBP', 0),
+    ('free',    'EU', 'EUR', 0),
+    ('starter', 'IN', 'INR', 5900),
+    ('starter', 'US', 'USD', 199),
+    ('starter', 'UK', 'GBP', 149),
+    ('starter', 'EU', 'EUR', 199),
+    ('pro',     'IN', 'INR', 29900),
+    ('pro',     'US', 'USD', 899),
+    ('pro',     'UK', 'GBP', 749),
+    ('pro',     'EU', 'EUR', 899),
+    ('power',   'IN', 'INR', 59900),
+    ('power',   'US', 'USD', 1799),
+    ('power',   'UK', 'GBP', 1499),
+    ('power',   'EU', 'EUR', 1799)
+  ) as v(code, region, currency, amount_minor)
+  join public.subscription_plans p on p.code = v.code
+on conflict (plan_id, region, billing_interval) do update
+  set currency = excluded.currency,
+      amount_minor = excluded.amount_minor,
+      is_active = excluded.is_active,
+      updated_at = now();
+-- PARITY-BLOCK:WEEKLY-PRICES-END

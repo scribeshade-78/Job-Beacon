@@ -2615,6 +2615,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
     const region = body.region;
+    // Monthly unless the caller asks otherwise. The weekly plans come through this
+    // same route, and defaulting keeps every pre-existing caller working.
+    const billingInterval = isBillingInterval(body.billingInterval) ? body.billingInterval : "month";
 
     if (!planCode) {
       response.status(400).json({ error: "planCode is required" });
@@ -2652,6 +2655,7 @@ export function createApp(options: CreateAppOptions = {}) {
         planCode,
         region,
         currency: REGION_CURRENCY[region],
+        billingInterval,
       });
 
       if (result.kind === "unknown_plan") {
@@ -2709,6 +2713,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const planCode = typeof body.planCode === "string" ? body.planCode.trim() : "";
     const region = body.region;
+    // The order must be raised against the SAME interval the price came from, or a
+    // weekly plan would be charged at its monthly amount.
+    const billingInterval = isBillingInterval(body.billingInterval) ? body.billingInterval : "month";
 
     if (!planCode) {
       response.status(400).json({ error: "planCode is required" });
@@ -2746,7 +2753,7 @@ export function createApp(options: CreateAppOptions = {}) {
         return;
       }
 
-      const price = findActivePrice(plan, region, "month");
+      const price = findActivePrice(plan, region, billingInterval);
 
       if (!price || price.amountMinor === null) {
         response.status(409).json({ error: "This plan is not priced for that region yet." });
@@ -2769,7 +2776,7 @@ export function createApp(options: CreateAppOptions = {}) {
         amountMinor: price.amountMinor,
         currency: price.currency,
         region: price.region,
-        billingInterval: "month",
+        billingInterval,
         candidateId: request.user!.id,
       });
 

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { DEFAULT_PLAN_CODE, type BillingRegion } from "../../shared/pricing.js";
 import { applyCheckoutCompleted, cancelCandidateSubscription } from "./subscription.js";
+import type { BillingInterval } from "./plans.js";
 
 /**
  * Task R5 — the early-access plan switch.
@@ -38,7 +39,14 @@ export type SelectPlanResult =
 
 export async function selectCandidatePlan(
   client: SupabaseClient,
-  input: { candidateId: string; planCode: string; region: BillingRegion; currency: string },
+  input: {
+    candidateId: string;
+    planCode: string;
+    region: BillingRegion;
+    currency: string;
+    /** Defaults to monthly — every caller before the weekly plans was monthly. */
+    billingInterval?: BillingInterval;
+  },
 ): Promise<SelectPlanResult> {
   if (input.planCode === DEFAULT_PLAN_CODE) {
     try {
@@ -67,7 +75,7 @@ export async function selectCandidatePlan(
       providerSubscriptionId: null,
       region: input.region,
       currency: input.currency,
-      billingInterval: "month",
+      billingInterval: input.billingInterval ?? "month",
       // NO PERIOD. A grant with no period end is one that
       // cancelCandidateSubscription closes immediately, which is the honest
       // behaviour for something nobody paid for — there is no paid remainder to
