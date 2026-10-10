@@ -138,7 +138,35 @@ printf '    %s columns required by the feed select list\n' "$(printf '%s\n' "${r
 
 check_b_ok=1
 
+# NOT ONE SHARED LIST - and this cost a blocked deploy to learn.
+#
+# VIEW_COLUMNS is the select list for candidate_ranked_opportunities ONLY
+# (client/src/lib/opportunities.ts selects it from that view and no other). It
+# includes the four ranking columns that 20261001340000 adds to the RANKED view
+# alone. Asserting it against candidate_opportunities - the base view the ranked one
+# is layered on - is a FALSE POSITIVE.
+#
+# MEASURED, not assumed: against a local database with all 123 migrations applied,
+# candidate_opportunities exposes the ranked view's columns MINUS exactly these four.
+# Left as one shared list this check would have had us "repair" production - adding
+# ranking columns to a base view that must not have them - to satisfy a bug in this
+# script. A gate that damages its target in order to pass is worse than no gate.
+#
+# The base view is still checked, for every column except these, so a FROZEN base
+# view is still caught. That is the failure this check exists for.
+RANKING_ONLY_COLUMNS="evidence_state
+matched_qualifier_count
+ranking_identity
+ranking_state"
+
 for relation in ${VIEW_RELATIONS}; do
+  relation_columns="${required_columns}"
+
+  if [ "${relation}" = "candidate_opportunities" ]; then
+    relation_columns="$(printf '%s\n' "${required_columns}" \
+      | grep -vxF -f <(printf '%s\n' "${RANKING_ONLY_COLUMNS}") || true)"
+  fi
+
   if ! deployed_columns="$(remote_query "select column_name from information_schema.columns where table_schema = 'public' and table_name = '${relation}' order by column_name;" 2>&1)"; then
     fail "Could not read columns for public.${relation}.
 --- psql said ---
@@ -152,7 +180,7 @@ ${deployed_columns}"
     continue
   fi
 
-  absent="$(comm -23 <(printf '%s\n' "${required_columns}") <(printf '%s\n' "${deployed_columns}") || true)"
+  absent="$(comm -23 <(printf '%s\n' "${relation_columns}") <(printf '%s\n' "${deployed_columns}") || true)"
   if [ -n "${absent}" ]; then
     check_b_ok=0
     warn "public.${relation} is missing columns the deployed client selects:"
