@@ -86,6 +86,20 @@ ENV NODE_ENV=production \
     PORT=5000 \
     HOST=0.0.0.0
 
+# Brief 3 - THE ARTEFACT IDENTITY. Baked in at build time because a running
+# container cannot see the source it came from, so "which commit is live?" was
+# previously answerable only by reading the deploy log on the host - and a
+# container left running the PREVIOUS environment looks identical to a current one.
+#
+# DEFAULTS ARE "unknown" RATHER THAN REQUIRED, AND THAT IS DELIBERATE. A bare
+# "docker compose up" with no args must still build; deploy.sh passes the real
+# values, and deploy/assert-environment.sh treats "unknown" as NO CLAIM rather than
+# as a mismatch, so a local run cannot fail the gate for the wrong reason.
+ARG GIT_COMMIT=unknown
+ARG BUILT_AT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT} \
+    BUILT_AT=${BUILT_AT}
+
 # CHROMIUM COMES FROM ALPINE, NOT FROM PLAYWRIGHT, AND THAT IS THE WHOLE REASON
 # THESE TWO VARIABLES EXIST. Playwright's managed browser builds are linked
 # against glibc and do not run on musl, so "npx playwright install chromium"

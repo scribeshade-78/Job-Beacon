@@ -42,6 +42,13 @@ services:
       args:
         VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:?missing — put it in .env.build; Vite inlines it at build time and the client renders a blank page without it}
         VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY:?missing — put it in .env.build; Vite inlines it at build time and the client renders a blank page without it}
+        # Brief 3. Defaulted, NOT required: these identify the artefact, they do not
+        # configure it, so a missing stamp must not stop a build. It makes the deploy
+        # gate report "unknown" instead of the container lying about which commit is
+        # live — and assert-environment.sh treats "unknown" as no claim, not a
+        # mismatch, so a bare local "docker compose up" cannot fail the gate.
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILT_AT: ${BUILT_AT:-unknown}
     image: jobbeacon:latest
     container_name: jobbeacon-app
 
@@ -70,6 +77,10 @@ services:
       HOST: "0.0.0.0"
       PORT: "5000"
       NODE_ENV: "production"
+      # Resolved at "up" time rather than baked in, because it is a fact about the
+      # DEPLOY and not about the image. It answers "is this container from before or
+      # after the change I just made?" without reading the host's logs.
+      DEPLOYED_AT: ${DEPLOYED_AT:-unknown}
 
     ports:
       - "127.0.0.1:5000:5000"

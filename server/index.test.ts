@@ -226,10 +226,47 @@ describe("GET /api/health", () => {
     const response = await fetch(`${baseUrl}/api/health`);
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    // toMatchObject, not toEqual: Brief 3 added version, environment and
+    // dependencies to this payload, and the contract this test guards is the two
+    // stable fields, not the absence of every future one.
+    expect(await response.json()).toMatchObject({
       status: "ok",
       service: APP_NAME,
     });
+  });
+
+  /**
+   * Brief 3. The payload now answers "what is running, with what config, and can it
+   * reach its dependencies" - which is what deploy/assert-environment.sh reads.
+   *
+   * ASSERTED BY SHAPE, NOT BY VALUE, deliberately: whether the required keys happen
+   * to be set in a test process is an environment fact, so a test asserting
+   * environment.ok === true here would pass or fail for reasons unrelated to this
+   * code. The missing-key behaviour is covered directly in
+   * server/config/requiredEnv.test.ts.
+   */
+  it("reports the artefact, the environment and the dependencies", async () => {
+    const response = await fetch(`${baseUrl}/api/health`);
+    const body = (await response.json()) as {
+      status: string;
+      service: string;
+      version: { commit: string; builtAt: string; deployedAt: string };
+      environment: { ok: boolean; requiredMissing: string[]; keys: { name: string }[] };
+      dependencies: { supabase: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.status).toBe("ok");
+
+    expect(typeof body.version.commit).toBe("string");
+    expect(typeof body.version.builtAt).toBe("string");
+    expect(typeof body.version.deployedAt).toBe("string");
+
+    expect(typeof body.environment.ok).toBe("boolean");
+    expect(Array.isArray(body.environment.requiredMissing)).toBe(true);
+    expect(body.environment.keys.map((key) => key.name)).toContain("SUPABASE_URL");
+
+    expect(["ok", "failed"]).toContain(body.dependencies.supabase);
   });
 });
 

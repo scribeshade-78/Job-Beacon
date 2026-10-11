@@ -177,6 +177,19 @@ ssh "${SSH_OPTS[@]}" "${REMOTE}" "mkdir -p '${REMOTE_DIR}'"
 log "Uploading ${ARCHIVE_NAME} to ${REMOTE}:${REMOTE_DIR}"
 scp "${SCP_OPTS[@]}" "${ARCHIVE_PATH}" "${REMOTE}:${REMOTE_DIR}/${ARCHIVE_NAME}"
 
+# ---- 3.5 artefact identity ---------------------------------------------------
+# Brief 3. Computed here and carried into the build so the RUNNING container can
+# name the commit it came from - a fact it otherwise cannot know, because the image
+# contains no git history and the host holds no record beyond its own log.
+#
+# git rev-parse rather than a timestamp: the deploy ships a WORKING TREE, so the
+# honest question is "which commit was that tree at", and a dirty tree still
+# identifies the commit it diverged from.
+DEPLOY_GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+DEPLOY_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+[ -n "${DEPLOY_GIT_COMMIT}" ] || DEPLOY_GIT_COMMIT="unknown"
+log "Artefact identity: commit ${DEPLOY_GIT_COMMIT}, built ${DEPLOY_BUILT_AT}"
+
 # ---- 4. rebuild and restart --------------------------------------------------
 log "Rebuilding and restarting the container"
 ssh "${SSH_OPTS[@]}" "${REMOTE}" "
@@ -207,6 +220,14 @@ ssh "${SSH_OPTS[@]}" "${REMOTE}" "
     echo 'site serves a blank white page.' >&2
     exit 1
   fi
+
+  # Exported for two consumers: compose resolves build.args from the environment it
+  # is invoked with (these become the image's GIT_COMMIT and BUILT_AT), and
+  # DEPLOYED_AT is interpolated into the running container's environment at "up"
+  # time - it is a fact about the DEPLOY, not about the image.
+  export GIT_COMMIT='${DEPLOY_GIT_COMMIT}'
+  export BUILT_AT='${DEPLOY_BUILT_AT}'
+  export DEPLOYED_AT='${DEPLOY_BUILT_AT}'
 
   docker compose --env-file .env.build -f '${COMPOSE_FILE}' up -d --build
   docker image prune -f >/dev/null 2>&1 || true
@@ -248,6 +269,16 @@ if [ -n "${PUBLIC_HEALTH_URL}" ]; then
     sleep "${HEALTH_DELAY_SECONDS}"
   done
 fi
+
+# ---- 7. assert the running environment ---------------------------------------
+# THE LAST STAGE, AND THE ONE THAT ANSWERS WHAT THE OTHERS CANNOT. Steps 5 and 6
+# prove a process answers on the loopback and on the public route. Neither can tell
+# whether that process is the artefact just built with the configuration intended -
+# which is precisely how a deploy reported success while the container kept serving
+# the previous environment.
+log "Asserting the running environment"
+ENV_ASSERT_SSH="${REMOTE}" bash "${REPO_ROOT}/deploy/assert-environment.sh" "${DEPLOY_GIT_COMMIT}" "${HEALTH_URL}" \
+  || fail "The container is answering but is not running what was deployed."
 
 rm -f "${ARCHIVE_PATH}"
 rmdir "$(dirname "${ARCHIVE_PATH}")" 2>/dev/null || true

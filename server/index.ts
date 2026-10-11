@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_NAME, HEALTH_PATH, type HealthResponse } from "../shared/app.js";
+import { inspectEnv } from "./config/requiredEnv.js";
 import {
   createRequireAuth,
   type AccessTokenVerifier,
@@ -292,12 +293,48 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.disable("x-powered-by");
 
-  app.get(HEALTH_PATH, (_request, response) => {
+  /**
+   * A REAL ROUND TRIP, NOT A CONFIG READ. A present-but-invalid service key must
+   * not report ok, which is the "permissions" half of asserting the environment -
+   * reading process.env would only ever prove a string exists.
+   *
+   * BOUNDED AND NON-THROWING. This runs inside the liveness probe, which the
+   * Dockerfile already gives a 5s timeout, so a hanging database must not hang the
+   * probe; and an absent key must report "failed" rather than throwing out of the
+   * handler and turning a config problem into a 500.
+   */
+  async function probeSupabase(): Promise<"ok" | "failed"> {
+    try {
+      const result = (await Promise.race([
+        resolveServiceClient().from("subscription_plans").select("code").limit(1),
+        new Promise((resolveTimeout) => {
+          setTimeout(() => resolveTimeout({ error: new Error("probe timed out") }), 2500);
+        }),
+      ])) as { error?: unknown };
+
+      return result.error ? "failed" : "ok";
+    } catch {
+      return "failed";
+    }
+  }
+
+  app.get(HEALTH_PATH, async (_request, response) => {
     const body: HealthResponse = {
       status: "ok",
       service: APP_NAME,
+      version: {
+        // "unknown" rather than absent: a bare "docker compose up" with no build
+        // args must still answer, and deploy/assert-environment.sh treats "unknown"
+        // as NO CLAIM rather than as a mismatch.
+        commit: process.env.GIT_COMMIT?.trim() || "unknown",
+        builtAt: process.env.BUILT_AT?.trim() || "unknown",
+        deployedAt: process.env.DEPLOYED_AT?.trim() || "unknown",
+      },
+      environment: inspectEnv(),
+      dependencies: { supabase: await probeSupabase() },
     };
 
+    response.set("Cache-Control", "no-store");
     response.status(200).json(body);
   });
 
@@ -3406,6 +3443,41 @@ const app = createApp();
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 
 if (isMainModule) {
+  // ---------------------------------------------------------------------------
+  // Brief 3 - ASSERT THE ENVIRONMENT AT BOOT, LOUDLY AND WITHOUT CRASHING.
+  //
+  // THE APP DELIBERATELY DOES NOT EXIT WHEN A REQUIRED KEY IS MISSING. This
+  // container restarts under "restart: unless-stopped", so exiting produces a
+  // silent crash-loop - the exact failure mode docker-compose.prod.yml already
+  // documents for a scheduler without OPENROUTER_API_KEY, where the process logs
+  // "cannot start", exits 0, and restarts forever, visible only to whoever thinks
+  // to read the logs.
+  //
+  // Starting anyway keeps the process INSPECTABLE over /api/health, and the refusal
+  // belongs to the DEPLOY: deploy/assert-environment.sh reads this same report and
+  // fails the rollout. Stopping the artefact before it takes traffic is strictly
+  // better than a container that will not boot where nobody is looking.
+  // ---------------------------------------------------------------------------
+  const environment = inspectEnv();
+
+  if (!environment.ok) {
+    console.error(
+      `[env] MISSING REQUIRED CONFIGURATION: ${environment.requiredMissing.join(", ")}. ` +
+        "Starting anyway so the process stays inspectable at /api/health; " +
+        "deploy/assert-environment.sh will refuse the rollout.",
+    );
+  }
+
+  if (environment.optionalMissing.length > 0) {
+    console.error(
+      `[env] optional and not configured, so these features are off: ${environment.optionalMissing.join(", ")}`,
+    );
+  }
+
+  console.log(
+    `[env] commit=${process.env.GIT_COMMIT?.trim() || "unknown"} builtAt=${process.env.BUILT_AT?.trim() || "unknown"} requiredKeys=${environment.ok ? "ok" : "INCOMPLETE"}`,
+  );
+
   app.listen(port, host, () => {
     console.log(`${APP_NAME} server listening at http://${host}:${port}`);
 
