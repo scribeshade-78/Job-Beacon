@@ -30,7 +30,8 @@
     "build:client": "vite build --config vite.config.ts",
     "build:server": "tsc -p tsconfig.server.build.json",
     "preview": "vite preview --config vite.config.ts",
-    "start": "node dist/server/server/index.js"
+    "start": "node dist/server/server/index.js",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
