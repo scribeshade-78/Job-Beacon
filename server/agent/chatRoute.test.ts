@@ -3,7 +3,11 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AccessTokenVerifier } from "../requireAuth.js";
 import type { CreateAppOptions } from "../index.js";
-import { AGENT_ACTION_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_MAX } from "../../shared/agent.js";
+import {
+  AGENT_ACTION_RATE_LIMIT_MAX,
+  AGENT_RATE_LIMIT_MAX,
+  DEFAULT_AGENT_MODEL,
+} from "../../shared/agent.js";
 
 /**
  * Route-level tests for POST /api/agent/chat.
@@ -120,7 +124,11 @@ describe("POST /api/agent/chat", () => {
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({
           message: "You have two eligible plans.",
-          model: "openai/gpt-4o-mini",
+          // ASSERTED AS THE SYMBOL, NOT THE LITERAL. This case is "no model was
+      // requested, so the default applies" - hardcoding the id made the test fail
+      // the moment the default improved, which is exactly the drift that should not
+      // need a test edit.
+      model: DEFAULT_AGENT_MODEL,
           proposals: [],
         });
         // One candidate's answer must not be held by a shared proxy.

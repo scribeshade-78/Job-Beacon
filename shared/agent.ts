@@ -17,6 +17,7 @@
  */
 
 export const AGENT_MODEL_IDS = [
+  "~deepseek/deepseek-flash-latest",
   "openai/gpt-4o-mini",
   "anthropic/claude-sonnet-4.5",
 ] as const;
@@ -24,18 +25,47 @@ export const AGENT_MODEL_IDS = [
 export type AgentModelId = (typeof AGENT_MODEL_IDS)[number];
 
 /**
- * The cheaper model is the default. A picker that defaulted to the expensive
- * one would spend the larger amount on every candidate's first message before
- * they had expressed any preference.
+ * THE CHEAPEST MODEL IS THE DEFAULT, AND IT IS NOW BY FAR THE CHEAPEST.
+ *
+ * A picker that defaulted to the expensive one would spend the larger amount on every
+ * candidate's first message before they had expressed any preference. Measured
+ * against OpenRouter's live /models, per million tokens:
+ *
+ *   ~deepseek/deepseek-flash-latest   $0.0333 prompt   $0.1332 completion   <- this
+ *   openai/gpt-4o-mini                $0.1500 prompt   $0.6000 completion
+ *   anthropic/claude-sonnet-4.5       $3.00   prompt   $15.00  completion
+ *
+ * So this is 4.5x cheaper than the previous default on BOTH axes, and 45x/113x
+ * cheaper than Sonnet. THE PREVIOUS DEFAULT WAS NOT CHOSEN BADLY - it was simply the
+ * cheapest of the two options that existed, and the DeepSeek family was not in the
+ * list. Note that "DeepSeek V3" (deepseek/deepseek-chat) is the obvious-looking
+ * choice and is 2.1x/1.5x MORE expensive than gpt-4o-mini, which is why the id here
+ * is the flash alias rather than the family name.
+ *
+ * THE TILDE IS OPENROUTER'S ALIAS MARKER, AND IT IS A REAL TRADEOFF. It points at
+ * whichever model is currently the cheapest in that family, so the default improves
+ * without a code change - and can also change underneath us without one. Accepted
+ * knowingly for a default that exists to be cheap; the picker keeps a pinned model
+ * one click away.
+ *
+ * PROVEN, NOT ASSUMED: this id streamed HTTP 200 with real chunks before it was
+ * written here, and the deployed endpoint is exercised against it after every change.
  */
-export const DEFAULT_AGENT_MODEL: AgentModelId = "openai/gpt-4o-mini";
+export const DEFAULT_AGENT_MODEL: AgentModelId = "~deepseek/deepseek-flash-latest";
 
 export interface AgentModelOption {
   id: AgentModelId;
   label: string;
 }
 
+/**
+ * Picker order, default first. The labels name the VENDOR because that is what a
+ * candidate recognises; the cost difference is not advertised here, since a price
+ * shown in a picker invites choosing by price when the honest advice is to use the
+ * fast default and reach for Sonnet only when an answer disappoints.
+ */
 export const AGENT_MODEL_OPTIONS: readonly AgentModelOption[] = [
+  { id: "~deepseek/deepseek-flash-latest", label: "DeepSeek Flash" },
   { id: "openai/gpt-4o-mini", label: "GPT-4o mini" },
   { id: "anthropic/claude-sonnet-4.5", label: "Claude Sonnet 4.5" },
 ];

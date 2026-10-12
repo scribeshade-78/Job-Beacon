@@ -4,6 +4,7 @@ import {
   AGENT_MAX_HISTORY_TURNS,
   AGENT_MAX_MESSAGE_CHARS,
   AGENT_MAX_TOOL_PROPOSALS,
+  DEFAULT_AGENT_MODEL,
 } from "../../shared/agent.js";
 
 function makeClient(tables: Record<string, unknown> = {}) {
@@ -125,7 +126,11 @@ describe("answerAgentChat", () => {
     expect(result).toEqual({
       kind: "success",
       message: "You have 2 plans.",
-      model: "openai/gpt-4o-mini",
+      // ASSERTED AS THE SYMBOL, NOT THE LITERAL. This case is "no model was
+      // requested, so the default applies" - hardcoding the id made the test fail
+      // the moment the default improved, which is exactly the drift that should not
+      // need a test edit.
+      model: DEFAULT_AGENT_MODEL,
       proposals: [],
     });
   });
