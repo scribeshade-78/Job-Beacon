@@ -15,7 +15,26 @@ import { sanitizeUntrustedContent, wrapUntrustedContent } from "../security/sani
  */
 
 export const FIT_ANALYSIS_PROMPT_VERSION = "fit-analysis-v1";
-export const DEFAULT_FIT_MODEL = "openai/gpt-4o-mini";
+/**
+ * THE CHEAPEST MODEL, BECAUSE THIS ONE RUNS PER VACANCY.
+ *
+ * Every other AI call in this codebase is triggered by a person pressing something.
+ * This one is triggered by the CATALOGUE: a discovery run scores each vacancy it
+ * ingests, so a single "Fetch latest jobs" spent five of these against thirty-one
+ * hundred rows. It is the largest single line in the AI bill and the reason the
+ * Copilot default alone would not have moved it.
+ *
+ * Measured against OpenRouter's live /models, per million tokens:
+ *   ~deepseek/deepseek-flash-latest   $0.0333 prompt   $0.1332 completion   <- this
+ *   openai/gpt-4o-mini                $0.1500 prompt   $0.6000 completion
+ *
+ * 4.5x cheaper on both axes. The tradeoff is the same one recorded in shared/agent.ts:
+ * the tilde makes this an alias, so the underlying model can change without a code
+ * change. Accepted here for the same reason - a default whose whole purpose is to be
+ * cheap - and the fit scores it produces are reviewed against the previous model's
+ * output rather than assumed equivalent.
+ */
+export const DEFAULT_FIT_MODEL = "~deepseek/deepseek-flash-latest";
 
 export const FIT_DIMENSIONS = [
   "core_technical_skills",

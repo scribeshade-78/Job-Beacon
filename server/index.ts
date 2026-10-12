@@ -108,6 +108,7 @@ import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
+import { loadExtensionProfile } from "./extension/profile.js";
 import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
 import {
   AGENT_ACTION_RATE_LIMIT_MAX,
@@ -1303,6 +1304,37 @@ export function createApp(options: CreateAppOptions = {}) {
   );
 
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // GET /api/extension/profile
+  //
+  // THE BROWSER EXTENSION'S ONE READ. It returns the smallest set of fields a form
+  // filler can legitimately type into a third party's page, and nothing else. An
+  // extension that asks for more than it needs is how a convenience tool quietly
+  // becomes a data export.
+  //
+  // IT REUSES THE EXISTING SESSION RATHER THAN INTRODUCING A TOKEN SYSTEM.
+  // requireAuth verifies the same Supabase JWT every other candidate route accepts, so
+  // there is no token table, no migration, and no second long-lived credential to leak.
+  // The extension obtains a session the same way the web app does; it does not receive
+  // a parallel grant, and revoking the session revokes this too.
+  //
+  // The candidate id comes from the VERIFIED TOKEN, never from the request, so one
+  // candidate cannot read another's details by changing a parameter.
+  // ---------------------------------------------------------------------------
+  app.get("/api/extension/profile", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const profile = await loadExtensionProfile(resolveServiceClient(), request.user!.id);
+
+      // Per-candidate data behind a bearer token: no shared cache may hold it.
+      response.set("Cache-Control", "no-store");
+      response.status(200).json(profile);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Extension profile read failed:", message);
+      response.status(500).json({ error: "Could not load your profile" });
+    }
+  });
+
   // AI Career Copilot.
   //
   // POST /api/agent/chat
