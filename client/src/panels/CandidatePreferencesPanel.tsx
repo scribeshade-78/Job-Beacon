@@ -13,6 +13,7 @@ import {
   saveCandidatePreferences,
   type CandidatePreferences,
 } from "../lib/candidatePreferences";
+import { fetchLocationOptions, type LocationOptions } from "../lib/locationOptions";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { cn } from "../lib/utils";
 import {
@@ -103,15 +104,81 @@ function panelId(id: StepId) {
 }
 
 /**
- * The form's own state, which is TEXT where the stored value is a list.
+ * The form's own state, which is TEXT where the stored value is a free list.
  *
- * Parsing on every keystroke would make "India, " impossible to type — the
- * trailing separator would round-trip away — so the raw text is kept here and
- * split once, on save, with the same parseListInput the exclusions fields use.
+ * Parsing on every keystroke would make "Acme, " impossible to type — the trailing
+ * separator would round-trip away — so the raw text is kept here and split once, on
+ * save, with the same parseListInput the exclusions fields use.
+ *
+ * COUNTRIES AND CITIES ARE NO LONGER TEXT, and deliberately so: they are now
+ * SELECTIONS from values that exist in the catalogue, held as the arrays that are
+ * actually stored. The free-text box was the defect - it accepted "India", saved it,
+ * and then filtered the feed by a country no vacancy carries.
  */
+/**
+ * A multi-select over locations that EXIST in the catalogue.
+ *
+ * A CHECKBOX LIST, NOT A FREE-TEXT BOX. The box was the bug: it accepted "India",
+ * stored it, and filtered the feed by a country no vacancy carries - so choosing a
+ * location returned an empty feed and nothing explained why.
+ *
+ * SAVED VALUES THAT ARE NO LONGER OFFERED ARE STILL SHOWN, deliberately. A candidate
+ * who already entered "India" would otherwise watch it vanish from the form at the
+ * moment it stopped being valid - a worse failure than the one being fixed. It stays
+ * visible and removable.
+ */
+function LocationPicker({
+  id,
+  label,
+  options,
+  selected,
+  disabled,
+  onToggle,
+  emptyCopy,
+}: {
+  id: string;
+  label: string;
+  options: string[];
+  selected: string[];
+  disabled: boolean;
+  onToggle: (value: string, checked: boolean) => void;
+  emptyCopy: string;
+}) {
+  const offered = new Set(options);
+  const retired = selected.filter((value) => !offered.has(value));
+  const all = [...options, ...retired];
+
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs text-ios-text-secondary">{label}</Label>
+      {all.length === 0 ? (
+        <p className="rounded-control border border-dashed border-ios-separator p-2.5 text-xs text-ios-text-secondary">
+          {emptyCopy}
+        </p>
+      ) : (
+        <div className="max-h-40 space-y-1 overflow-y-auto rounded-control border border-ios-separator bg-ios-bg p-2.5">
+          {all.map((value) => (
+            <label key={value} className="flex items-center gap-2 text-sm text-black">
+              <input
+                type="checkbox"
+                id={id + "-" + value}
+                checked={selected.includes(value)}
+                disabled={disabled}
+                onChange={(event) => onToggle(value, event.target.checked)}
+                className="h-4 w-4 shrink-0 rounded border-ios-separator text-ios-blue focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
+              />
+              <span>{value}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface PreferencesDraft {
-  countries: string;
-  cities: string;
+  countries: string[];
+  cities: string[];
   remotePreference: RemotePreferenceValue | null;
   employmentTypes: EmploymentTypeValue[];
   workAuthorization: WorkAuthorizationValue | null;
@@ -126,8 +193,8 @@ interface PreferencesDraft {
 
 function toDraft(preferences: CandidatePreferences | null): PreferencesDraft {
   return {
-    countries: (preferences?.preferredCountries ?? []).join(", "),
-    cities: (preferences?.preferredCities ?? []).join(", "),
+    countries: preferences?.preferredCountries ?? [],
+    cities: preferences?.preferredCities ?? [],
     remotePreference: preferences?.remotePreference ?? null,
     employmentTypes: preferences?.employmentTypes ?? [],
     workAuthorization: preferences?.workAuthorization ?? null,
@@ -223,6 +290,42 @@ function TriStateField({
 
 export function CandidatePreferencesPanel({ candidateId }: CandidatePreferencesPanelProps) {
   const [draft, setDraft] = useState<PreferencesDraft>(() => toDraft(null));
+
+  /**
+   * The locations we can actually search, read from the vacancies table.
+   *
+   * A FAILED READ IS NOT AN EMPTY WORLD, so the error is held separately and shown:
+   * an empty picker and a broken request look identical on screen, and only one of
+   * them means "we have no coverage there yet".
+   */
+  const [locationOptions, setLocationOptions] = useState<LocationOptions>({ countries: [], cities: [] });
+  const [locationOptionsError, setLocationOptionsError] = useState<string | null>(null);
+  const [locationOptionsLoading, setLocationOptionsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchLocationOptions()
+      .then((options) => {
+        if (!cancelled) {
+          setLocationOptions(options);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocationOptionsError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLocationOptionsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -310,8 +413,8 @@ export function CandidatePreferencesPanel({ candidateId }: CandidatePreferencesP
     setSaving(true);
 
     const result = await saveCandidatePreferences(getSupabaseBrowserClient(), candidateId, {
-      preferredCountries: parseListInput(draft.countries),
-      preferredCities: parseListInput(draft.cities),
+      preferredCountries: draft.countries,
+      preferredCities: draft.cities,
       remotePreference: draft.remotePreference,
       employmentTypes: draft.employmentTypes,
       workAuthorization: draft.workAuthorization,
@@ -462,35 +565,40 @@ export function CandidatePreferencesPanel({ candidateId }: CandidatePreferencesP
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="preferred-countries" className="text-xs text-ios-text-secondary">
-                    Countries
-                  </Label>
-                  <Input
-                    id="preferred-countries"
-                    value={draft.countries}
-                    placeholder="India, Germany"
-                    disabled={!loaded}
-                    onChange={(event) => patch({ countries: event.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="preferred-cities" className="text-xs text-ios-text-secondary">
-                    Cities
-                  </Label>
-                  <Input
-                    id="preferred-cities"
-                    value={draft.cities}
-                    placeholder="Bengaluru, Berlin"
-                    disabled={!loaded}
-                    onChange={(event) => patch({ cities: event.target.value })}
-                  />
-                </div>
+                <LocationPicker
+                  id="preferred-countries"
+                  label="Countries"
+                  options={locationOptions.countries}
+                  selected={draft.countries}
+                  disabled={!loaded || locationOptionsLoading}
+                  onToggle={(value, checked) =>
+                    patch({ countries: toggleValue(draft.countries, value, checked) })
+                  }
+                  emptyCopy="No countries available yet. We can only offer a country once we hold live jobs there — fetch jobs from Opportunities first."
+                />
+                <LocationPicker
+                  id="preferred-cities"
+                  label="Cities"
+                  options={locationOptions.cities}
+                  selected={draft.cities}
+                  disabled={!loaded || locationOptionsLoading}
+                  onToggle={(value, checked) =>
+                    patch({ cities: toggleValue(draft.cities, value, checked) })
+                  }
+                  emptyCopy="No cities available yet. Only Adzuna reports a city, so this fills in as we fetch from it."
+                />
               </div>
 
+              {/* WHY THE LIST IS SHORT, SAID OUT LOUD. The options come from live
+                  vacancies, so a country absent from this list is one we cannot search
+                  yet — which is a fact about our coverage, not a restriction the
+                  candidate should have to infer. */}
               <p className="text-xs text-ios-text-secondary">
-                Separate entries with a comma or a new line. These are the starting values of the country
-                and city filters in Opportunities.
+                Only locations we can currently search are listed, because they come from live jobs.
+                Your selections drive which markets we fetch from.
+                {locationOptionsError ? (
+                  <span className="text-ios-red"> We could not load the list: {locationOptionsError}</span>
+                ) : null}
               </p>
 
               <div className="space-y-2">

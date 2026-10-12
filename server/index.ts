@@ -141,6 +141,7 @@ const FIT_ANALYSIS_BUDGET_MS = 45_000;
 import { runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
+import { loadLocationOptions } from "./opportunities/locationOptions.js";
 import { loadCandidateReadiness, setupRefusals } from "./applications/readinessGate.js";
 import {
   approveAttempt,
@@ -1036,6 +1037,33 @@ export function createApp(options: CreateAppOptions = {}) {
       // unavailable" from "we could not check", and a false would collapse the
       // two into the same misleading claim.
       response.status(500).json({ error: "Could not check application availability" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/opportunities/location-options
+  //
+  // THE OPTIONS THE LOCATION PICKERS OFFER, from the vacancies table so they provably
+  // exist. The candidate picks a market and the intake fan-out fetches once per
+  // market - so this endpoint is the control that finally makes cross-border
+  // discovery reachable rather than merely implemented.
+  //
+  // NOT CACHED: the catalogue changes as intake runs, and a cached option list would
+  // keep offering a country whose listings have since expired.
+  // ---------------------------------------------------------------------------
+  app.get("/api/opportunities/location-options", requireAuth, async (_request, response) => {
+    try {
+      const options = await loadLocationOptions(resolveServiceClient());
+
+      response.set("Cache-Control", "no-store");
+      response.status(200).json(options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Location options read failed:", message);
+      // 500 rather than two empty lists: a candidate must be able to tell "no markets
+      // are available" from "we could not check", because the first is a fact about
+      // our coverage and the second is a fault.
+      response.status(500).json({ error: "Could not load location options" });
     }
   });
 
