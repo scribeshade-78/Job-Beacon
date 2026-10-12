@@ -66,10 +66,16 @@ export const EMPTY_FILTERS: OpportunityFilters = {
 /**
  * The filter's starting state, derived from the profile.
  *
- * Only the three fields that genuinely overlap are seeded. Employment type is
+ * Only the fields that genuinely overlap are seeded. Employment type is
  * deliberately NOT seeded even though a preference exists for it: the filter has
  * no backing column, so seeding it would fill a disabled control with a value
  * and imply it was doing something.
+ *
+ * THE SEEDING IS NOW THE ONLY WAY A PREFERENCE REACHES THE PAGED QUERY, so the
+ * fields here must cover everything applySearchPreferenceConstraints used to add -
+ * including CITIES, which it applied but this function never seeded. Dropping the
+ * standing clause without adding that seed would have silently started ignoring a
+ * candidate's saved cities, which is a quieter version of the same bug.
  */
 export function deriveFiltersFromPreferences(
   preferences: CandidatePreferences | null,
@@ -80,7 +86,10 @@ export function deriveFiltersFromPreferences(
 
   return {
     ...EMPTY_FILTERS,
-    countries: preferences.preferredCountries ?? [],
+    // LOCATION IS DELIBERATELY NOT SEEDED. Its filter is unavailable because no
+    // listing carries a usable country or city, and seeding a value into a control
+    // the candidate cannot reach would apply an invisible, unclearable constraint -
+    // the same empty feed, with no way to clear it.
     // remotePreference null means "not stated"; 'any' is a stated non-preference.
     // Seeding from null leaves the filter open, which is the same visible result
     // but is reported differently by inheritedFilterLabels below.
@@ -393,18 +402,32 @@ export function filterOpportunitiesByRoleRelevance<T extends { title: string }>(
 }
 
 /**
- * The standing constraints SearchPreferences puts on every feed query, as
- * PostgREST clauses: work mode, salary floor and name exclusions.
+ * The STANDING constraints SearchPreferences puts on every feed query.
  *
- * THIS IS THE OPTIMISATION HALF OF THE SAME RULE. Everything applied here is
- * also checkable by the ledger below, which is what keeps the by-id path (a
- * freshly discovered vacancy is fetched with .in("id", ...), not through these
- * clauses) consistent with the paged one. The clauses exist so the database
- * does not send rows we already know we do not want.
+ * "STANDING" NOW MEANS "THE BAR HAS NO CONTROL FOR IT", and that is the whole test
+ * for what belongs here. Company and industry exclusions qualify: they have no chip,
+ * they apply to every search including the first, and a candidate cannot turn them
+ * off for one search without editing their profile - which is what "excluded" is
+ * supposed to mean.
  *
- * Returns the constraints that could NOT be expressed, so the caller can report
- * them rather than implying they took effect — excluded industries still have no
- * column on the view.
+ * WORK MODE, SALARY AND LOCATION DO NOT BELONG HERE. They are INHERITED by the
+ * filter bar (deriveFiltersFromPreferences seeds them, labelled "From your
+ * preferences"), and applying them a second time here made the bar decorative:
+ * PostgREST ANDs the clauses, so the profile's value won the intersection. Measured
+ * live, not theorised - Clear dropped the chip count to zero while the query stayed
+ * filtered, and choosing Hybrid against a Remote profile emitted
+ * remote_type=in.(remote,hybrid) AND remote_type=in.(remote), which is just remote.
+ * Every work-mode change was a no-op, and salary and location were doubled the same
+ * way.
+ *
+ * THE SEEDING IS WHAT CARRIES A PREFERENCE INTO THE QUERY, and it completes before
+ * the first read (OpportunitiesPanel refuses to query while filters is null), so the
+ * feed still OPENS on the candidate's stated preferences. It just lets them change
+ * or clear it for a search afterwards, which is what a filter bar is for.
+ *
+ * Returns the constraints that could NOT be expressed, so the caller can report them
+ * rather than implying they took effect - excluded industries still have no column
+ * on the view.
  */
 export function applySearchPreferenceConstraints<Q extends FilterableQuery>(
   query: Q,
@@ -414,45 +437,13 @@ export function applySearchPreferenceConstraints<Q extends FilterableQuery>(
     return { query, unapplied: [] };
   }
 
-  let next = query;
-
-  // A concrete work mode is a hard constraint; null ("not stated") and "any"
-  // constrain nothing. A listing whose remote_type is NULL is excluded by the
-  // in-list, which is the documented consequence of choosing a mode.
-  if (preferences.workMode === "remote" || preferences.workMode === "hybrid" || preferences.workMode === "on_site") {
-    next = next.in("remote_type", [preferences.workMode]) as Q;
-  }
-
-  // salary_max, not salary_min, so a range reaching the floor qualifies. The
-  // currency equality stops two currencies being compared as one unit; the
-  // builder guarantees a currency whenever a floor survives sanitisation.
-  if (preferences.salary.min !== null && preferences.salary.currency !== null) {
-    next = next.gte("salary_max", preferences.salary.min) as Q;
-    next = next.eq("currency", preferences.salary.currency) as Q;
-  }
-
-  // Location: ONLY when intent is stated. openToAny means no restriction, and
-  // an unstated location leaves the feed open — the server gate is what refuses
-  // to queue in that state, and hard-filtering here would hide the whole feed.
-  const { countries, cities, openToAny } = preferences.locations;
-
-  if (!openToAny && countries.length > 0 && cities.length > 0) {
-    next = next.or("country.in." + inList(countries) + ",city.in." + inList(cities)) as Q;
-  } else if (!openToAny && countries.length > 0) {
-    next = next.in("country", countries) as Q;
-  } else if (!openToAny && cities.length > 0) {
-    next = next.in("city", cities) as Q;
-  }
-
-  // Name exclusions reuse the existing standing-exclusion builder, so the
-  // quoting and the "no industry column on the view" reporting stay in one place.
-  const exclusions = applyPreferenceExclusions(next, {
+  // Name exclusions reuse the existing standing-exclusion builder, so the quoting
+  // and the "no industry column on the view" reporting stay in one place.
+  return applyPreferenceExclusions(query, {
     ...EMPTY_PREFERENCES,
     excludedCompanies: preferences.exclusions.companies,
     excludedIndustries: preferences.exclusions.industries,
   });
-
-  return { query: exclusions.query, unapplied: exclusions.unapplied };
 }
 
 export {

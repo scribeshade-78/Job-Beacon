@@ -1,7 +1,7 @@
 import type { ExtractedFact } from "./resumeExtraction";
 import { ROLE_TAXONOMY, type RoleCategory, type RoleTaxonomyEntry } from "./roleTaxonomy";
 
-export type SuggestionTier = "primary" | "strong" | "related";
+export type SuggestionTier = "primary" | "strong" | "related" | "default";
 
 export interface RoleSuggestion {
   entry: RoleTaxonomyEntry;
@@ -43,6 +43,33 @@ function titleMatchesEntry(confirmedTitle: string, entry: RoleTaxonomyEntry): bo
  * no approved signal source (years_of_experience heuristic vs per-entry
  * seniority tag) yet.
  */
+/**
+ * The broad fallback for a candidate with nothing to personalise from.
+ *
+ * ONE ENTRY PER CATEGORY, and that is what makes "diverse" checkable rather than a
+ * word. The catalog is grouped by category, so taking the first N entries would
+ * return seven Engineering roles and nothing else; walking it and keeping the first
+ * entry of each category guarantees the spread instead.
+ *
+ * NOT SUGGESTIONS IN THE MATCHING SENSE, which is why they carry their own tier:
+ * the panel renders them under a heading that does not claim the profile pointed
+ * at them.
+ */
+export function defaultRoleSuggestions(): RoleSuggestion[] {
+  const seen = new Set<RoleCategory>();
+  const picked: RoleSuggestion[] = [];
+
+  for (const entry of ROLE_TAXONOMY) {
+    if (seen.has(entry.category)) {
+      continue;
+    }
+    seen.add(entry.category);
+    picked.push({ entry, tier: "default" });
+  }
+
+  return picked;
+}
+
 export function suggestRoles(facts: ExtractedFact[]): RoleSuggestion[] {
   const confirmed = facts.filter((fact) => fact.confirmationStatus === "confirmed");
 
@@ -72,6 +99,15 @@ export function suggestRoles(facts: ExtractedFact[]): RoleSuggestion[] {
     } else if ((sameCategoryAsPrimary && sharedSkillCount === 1) || (!sameCategoryAsPrimary && sharedSkillCount >= 2)) {
       suggestions.push({ entry, tier: "related" });
     }
+  }
+
+  // NOTHING PERSONALISED -> STILL OFFER SOMETHING TO CLICK.
+  //
+  // A candidate with no parsed resume has no confirmed facts, so every tier above
+  // is empty and this panel rendered nothing at all: a new user's first visit was a
+  // blank page with a search box. The fallback gives day one somewhere to start.
+  if (suggestions.length === 0) {
+    return defaultRoleSuggestions();
   }
 
   return suggestions;

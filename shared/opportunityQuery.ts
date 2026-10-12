@@ -76,9 +76,17 @@ export const VACANCY_FILTERS: readonly FilterFieldSpec[] = [
   {
     id: "location",
     label: "Location",
-    columns: ["country", "city", "region"],
-    unavailableReason: null,
-    inheritsFrom: "preferredCountries",
+    // EMPTY COLUMNS BY MEASUREMENT, NOT BY PREFERENCE. All 265 active vacancies
+    // hold NULL in both country and city: the sources give a free-text location
+    // ("Berlin, Berlin" is a city plus a state with no country in it) and the
+    // adapters deliberately decline to guess. So in("country", ...) cannot match
+    // anything, and every location a candidate chose returned an empty feed.
+    columns: [],
+    unavailableReason:
+      "We can't filter by location yet: listings carry no reliable country or city. A country you selected would match nothing at all, which looked like your other filters were wrong. Your location preference is still saved and is still used when we check whether a job can be put forward for you.",
+    // No longer inherited: seeding a disabled control would put an invisible,
+    // unclearable value into the query, which is the same empty feed by another route.
+    inheritsFrom: null,
     caveat: null,
   },
   {

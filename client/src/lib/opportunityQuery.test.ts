@@ -70,9 +70,13 @@ describe("the shared spec is self-consistent", () => {
     }
   });
 
-  it("reports employment type and seniority as unavailable, and nothing else", () => {
+  it("reports location, employment type and seniority as unavailable, and nothing else", () => {
+    // LOCATION JOINED THIS LIST, and the reason is data rather than product taste:
+    // all 265 active vacancies hold NULL in country and city, so the filter could
+    // emit in("country", ...) and never match anything. It looked like the other
+    // filters were wrong.
     const unavailable = VACANCY_FILTERS.filter((spec) => !isFilterAvailable(spec.id)).map((spec) => spec.id);
-    expect(unavailable).toEqual(["employment_type", "seniority"]);
+    expect(unavailable).toEqual(["location", "employment_type", "seniority"]);
   });
 
   it("reports the three unbacked sorts as unavailable", () => {
@@ -258,13 +262,21 @@ describe("smart inheritance", () => {
     employmentTypes: ["contract"],
   };
 
-  it("seeds location, work mode and salary from the profile", () => {
+  it("seeds work mode and salary from the profile", () => {
     const derived = deriveFiltersFromPreferences(prefs);
 
-    expect(derived.countries).toEqual(["India"]);
     expect(derived.workModes).toEqual(["remote"]);
     expect(derived.minSalary).toBe(80000);
     expect(derived.minSalaryCurrency).toBe("USD");
+  });
+
+  it("does NOT seed location, because seeding a disabled control hides a constraint", () => {
+    // The filter is unavailable, so a seeded value would apply a constraint the
+    // candidate cannot see or clear - the same empty feed by a quieter route.
+    const derived = deriveFiltersFromPreferences(prefs);
+
+    expect(derived.countries).toEqual([]);
+    expect(derived.cities).toEqual([]);
   });
 
   it("does NOT seed employment type, because the filter cannot be applied", () => {
@@ -284,16 +296,18 @@ describe("smart inheritance", () => {
 
   it("labels a filter that still equals its inherited value", () => {
     const inherited = inheritedFilterLabels(deriveFiltersFromPreferences(prefs), prefs);
-    expect(inherited).toContain("countries");
     expect(inherited).toContain("workModes");
     expect(inherited).toContain("minSalary");
+    // Location is not inheritable any more: nothing is seeded, so there is nothing
+    // to attribute to the profile.
+    expect(inherited).not.toContain("countries");
   });
 
   it("stops labelling a filter once the candidate changes it for this search", () => {
     const changed = { ...deriveFiltersFromPreferences(prefs), minSalary: 120000 };
     expect(inheritedFilterLabels(changed, prefs)).not.toContain("minSalary");
     // The others are untouched, so they stay labelled.
-    expect(inheritedFilterLabels(changed, prefs)).toContain("countries");
+    expect(inheritedFilterLabels(changed, prefs)).toContain("workModes");
   });
 
   it("labels nothing when there is no profile to inherit from", () => {
@@ -420,7 +434,10 @@ describe("applySearchPreferenceConstraints", () => {
     ...overrides,
   });
 
-  it("emits work mode, salary and company-exclusion clauses", () => {
+  it("emits ONLY the standing exclusion clauses - work mode, salary and location are the bar's", () => {
+    // This test used to assert work mode, salary and currency clauses from the
+    // profile. That was the bug, sealed in as intended behaviour - which is why the
+    // filter bar looked decorative and nobody caught it. See the Proposal A block.
     const { query, calls } = recorder();
     const { unapplied } = applySearchPreferenceConstraints(
       query,
@@ -431,12 +448,7 @@ describe("applySearchPreferenceConstraints", () => {
       }),
     );
 
-    expect(calls).toEqual([
-      "in:remote_type=remote",
-      "gte:salary_max=80000",
-      "eq:currency=USD",
-      'not:company_name.in.("Acme, Inc")',
-    ]);
+    expect(calls).toEqual(['not:company_name.in.("Acme, Inc")']);
     expect(unapplied).toEqual([]);
   });
 
@@ -457,6 +469,98 @@ describe("applySearchPreferenceConstraints", () => {
     );
 
     expect(result.unapplied).toEqual(["Excluded industries"]);
+  });
+});
+
+describe("Proposal A - the filter bar is the authority for the paged feed", () => {
+  const preferences = (overrides: Partial<SearchPreferences> = {}): SearchPreferences => ({
+    ...buildSearchPreferences(null, []),
+    ...overrides,
+  });
+
+  /**
+   * The composed paged path, in the order listOpportunities applies it: the bar's
+   * own filters, then the standing preference constraints.
+   */
+  const pagedQuery = (bar: OpportunityFilters, prefs: SearchPreferences | null): string[] => {
+    const { query, calls } = recorder();
+    applySearchPreferenceConstraints(applyOpportunityFilters(query, bar), prefs);
+    return calls;
+  };
+
+  it("emits ONE remote_type clause when the bar sets a work mode the profile also states", () => {
+    const calls = pagedQuery(filters({ workModes: ["hybrid"] }), preferences({ workMode: "remote" }));
+
+    expect(calls.filter((call) => call.includes("remote_type"))).toEqual(["in:remote_type=hybrid"]);
+  });
+
+  it("emits NO remote_type clause after Clear, even though the profile states one", () => {
+    const calls = pagedQuery(filters(), preferences({ workMode: "remote" }));
+
+    expect(calls.filter((call) => call.includes("remote_type"))).toEqual([]);
+  });
+
+  it("emits no salary clause from the profile when the bar has no floor", () => {
+    const calls = pagedQuery(filters(), preferences({ salary: { min: 80000, currency: "USD" } }));
+
+    expect(calls.filter((call) => call.includes("salary_max") || call.startsWith("eq:currency"))).toEqual([]);
+  });
+
+  it("emits no country clause from the profile when the bar has none", () => {
+    const calls = pagedQuery(
+      filters(),
+      preferences({ locations: { countries: ["IN"], cities: [], openToAny: false } }),
+    );
+
+    expect(calls.filter((call) => call.includes("country"))).toEqual([]);
+  });
+
+  it("STILL applies the standing company exclusion, which has no control in the bar", () => {
+    const calls = pagedQuery(
+      filters(),
+      preferences({ exclusions: { companies: ["Acme, Inc"], industries: [] } }),
+    );
+
+    expect(calls).toContain('not:company_name.in.("Acme, Inc")');
+  });
+
+  it("does not seed countries or cities when the candidate is open to any location", () => {
+    const seeded = deriveFiltersFromPreferences({
+      ...EMPTY_PREFERENCES,
+      preferredCountries: ["IN", "US"],
+      preferredCities: ["Bengaluru"],
+      openToAnyLocation: true,
+    });
+
+    expect(seeded.countries).toEqual([]);
+    expect(seeded.cities).toEqual([]);
+  });
+});
+
+describe("the location filter is unavailable, and leaves no invisible constraint", () => {
+  it("is unavailable, because every active listing holds a NULL country and city", () => {
+    // Measured on production: 265 of 265 active vacancies, both columns NULL. The
+    // filter was enabled and emitted in("country", ...), so every selection returned
+    // an empty feed and the UI blamed the candidate's other filters.
+    expect(isFilterAvailable("location")).toBe(false);
+  });
+
+  it("carries a reason, so the UI explains itself rather than blaming the user", () => {
+    const spec = VACANCY_FILTERS.find((entry) => entry.id === "location");
+
+    expect((spec?.unavailableReason ?? "").length).toBeGreaterThan(40);
+  });
+
+  it("is not seeded from the profile, so nothing is filtered by an unreachable control", () => {
+    const seeded = deriveFiltersFromPreferences({
+      ...EMPTY_PREFERENCES,
+      preferredCountries: ["India"],
+      preferredCities: ["Bengaluru"],
+      openToAnyLocation: false,
+    });
+
+    expect(seeded.countries).toEqual([]);
+    expect(seeded.cities).toEqual([]);
   });
 });
 

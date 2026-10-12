@@ -24,6 +24,9 @@ const TIER_LABELS: Record<SuggestionTier, string> = {
   primary: "Primary matches",
   strong: "Strong matches",
   related: "Related roles",
+  // NOT "suggested for you". These are not derived from anything the candidate
+  // said, and claiming otherwise is the invented evidence this panel avoids.
+  default: "Popular roles to explore",
 };
 
 const NOT_RECORDED = "Preference not recorded";
@@ -144,7 +147,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
   );
 
   const suggestionsByTier = useMemo(() => {
-    const grouped: Record<SuggestionTier, ReturnType<typeof suggestRoles>> = { primary: [], strong: [], related: [] };
+    const grouped: Record<SuggestionTier, ReturnType<typeof suggestRoles>> = { primary: [], strong: [], related: [], default: [] };
     for (const suggestion of suggestRoles(facts)) {
       if (!selectedTitles.has(suggestion.entry.title)) {
         grouped[suggestion.tier].push(suggestion);
@@ -509,7 +512,7 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
         </section>
 
         {trimmedQuery === "" &&
-          (["primary", "strong", "related"] as const).map((tier) =>
+          (["primary", "strong", "related", "default"] as const).map((tier) =>
           suggestionsByTier[tier].length > 0 ? (
             <section key={tier}>
               <h3 className="text-sm font-semibold text-black">{TIER_LABELS[tier]}</h3>

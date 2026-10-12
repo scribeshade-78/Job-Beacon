@@ -40,7 +40,15 @@ describe("suggestRoles", () => {
       fact({ factType: "current_title", factValue: "Software Engineer", confirmationStatus: "pending" }),
     ]);
 
-    expect(suggestions).toEqual([]);
+    // NO PERSONALISED TIER MAY APPEAR - an unconfirmed fact is not a signal. What the
+    // candidate gets instead is the broad default list, which claims nothing about
+    // them, so the guarantee is unchanged and only its shape is.
+    // THE GUARANTEE IS THAT THE FACT CHANGES NOTHING, so the output is byte-identical
+    // to the no-facts baseline. Asserting "Software Engineer is absent" was wrong and
+    // failed correctly: that title IS in the broad default list, as the first
+    // Engineering entry - being present is not evidence the fact was used.
+    expect(suggestions.every((suggestion) => suggestion.tier === "default")).toBe(true);
+    expect(suggestions).toEqual(suggestRoles([]));
   });
 
   it("ignores rejected facts", () => {
@@ -48,7 +56,12 @@ describe("suggestRoles", () => {
       fact({ factType: "current_title", factValue: "Software Engineer", confirmationStatus: "rejected" }),
     ]);
 
-    expect(suggestions).toEqual([]);
+    // THE GUARANTEE IS THAT THE FACT CHANGES NOTHING, so the output is byte-identical
+    // to the no-facts baseline. Asserting "Software Engineer is absent" was wrong and
+    // failed correctly: that title IS in the broad default list, as the first
+    // Engineering entry - being present is not evidence the fact was used.
+    expect(suggestions.every((suggestion) => suggestion.tier === "default")).toBe(true);
+    expect(suggestions).toEqual(suggestRoles([]));
   });
 
   it("promotes a same-category entry to Strong with >=2 shared confirmed skills", () => {
@@ -124,7 +137,43 @@ describe("suggestRoles", () => {
     expect(suggestions.some((s) => s.entry.id === "data-analyst" && s.tier === "related")).toBe(true);
   });
 
-  it("returns no suggestions for no confirmed facts", () => {
-    expect(suggestRoles([])).toEqual([]);
+  it("returns no PERSONALISED tier for no confirmed facts", () => {
+    // It used to return nothing at all, which left a new candidate on a blank page.
+    // The fallback is deliberately a different tier so it can never be mistaken for
+    // a match derived from the profile.
+    const suggestions = suggestRoles([]);
+
+    expect(suggestions.some((suggestion) => ["primary", "strong", "related"].includes(suggestion.tier))).toBe(false);
+  });
+});
+
+describe("suggestRoles - the broad fallback for a candidate with nothing to personalise from", () => {
+  it("returns clickable suggestions instead of nothing when there are no confirmed facts", () => {
+    // The state a brand-new candidate is in before they upload a resume. This used
+    // to return [] and the panel rendered a blank page with a search box.
+    const suggestions = suggestRoles([]);
+
+    expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.every((suggestion) => suggestion.tier === "default")).toBe(true);
+  });
+
+  it("is DIVERSE - one entry per category, never several from the same one", () => {
+    // "Diverse" has to be checkable. The catalog is grouped by category, so the
+    // naive "first N entries" would return seven Engineering roles and nothing else.
+    const categories = suggestRoles([]).map((suggestion) => suggestion.entry.category);
+
+    expect(new Set(categories).size).toBe(categories.length);
+    expect(new Set(categories).size).toBeGreaterThan(3);
+  });
+
+  it("stays out of the way when there is something personal to say", () => {
+    const suggestions = suggestRoles([
+      fact({ factType: "current_title", factValue: "Frontend Engineer" }),
+      fact({ factType: "skill", factValue: "react" }),
+      fact({ factType: "skill", factValue: "typescript" }),
+    ]);
+
+    expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.some((suggestion) => suggestion.tier === "default")).toBe(false);
   });
 });
