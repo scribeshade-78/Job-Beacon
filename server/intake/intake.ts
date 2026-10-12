@@ -383,7 +383,14 @@ export async function runIntakeAcrossSources(
             // THE MARKET'S OWN LOCATION WINS over the shared context: for a market
             // routed to SerpApi, sending that country's name IS the point.
             location: entry.location ?? input.location,
-            country: entry.market,
+            // LOWER-CASE, AND NOT COSMETIC. Adzuna takes the country as a URL path
+            // segment and those segments are lower-case: /jobs/gb/ answers 200 while
+            // /jobs/GB/ answers 404. resolveCountry lower-cases for exactly this
+            // reason; the router labels in canonical upper-case, so the conversion
+            // belongs here. Getting it wrong fails EVERY market, and it failed in
+            // production first - the summary still read GB, so only the error text
+            // revealed it.
+            country: entry.market.toLowerCase(),
           },
           deps,
         ),
