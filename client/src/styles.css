@@ -91,3 +91,93 @@
 /* MP-UI2: the last consumers of .app-shell/.foundation-card/.eyebrow (the
    inline panel functions in App.tsx) were re-shelled into AppShell + Card
    this phase, so those selectors are now dead and have been removed. */
+
+/**
+ * Slide-over enter/exit motion (the Career Copilot drawer, ui/sheet.tsx).
+ *
+ * CSS ANIMATIONS, NOT TRANSITIONS, AND THAT IS LOAD-BEARING. Radix unmounts the
+ * panel when it closes only after an animationend fires. A transition never fires
+ * one, so a transition here would animate the way in and then make the panel
+ * disappear instantly - the exit half of this feature exists ONLY because these
+ * are keyframes. This is the reason the original author could not simply add
+ * transition classes, and it is why "just animate it" is a real change.
+ *
+ * THE EASING IS A DECELERATING CURVE, not ease. A surface 440px wide crossing the
+ * whole viewport at a constant rate reads as sluggish on the way in and abrupt at
+ * the end; this curve front-loads the movement and settles. Exit is slightly
+ * faster than entry, which is the usual asymmetry - closing should feel decisive.
+ *
+ * transform/opacity ONLY. Both are compositor properties, so the panel never
+ * triggers layout while it moves and the page behind it cannot reflow mid-slide.
+ */
+@keyframes jb-sheet-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes jb-sheet-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes jb-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes jb-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* `both` fill: the element holds its FROM state during any delay and its TO state
+   after, so a closed panel is already off-screen before the exit even starts and
+   cannot flash at its final position on the way out. */
+.jb-sheet-content[data-state="open"] {
+  animation: jb-sheet-in 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.jb-sheet-content[data-state="closed"] {
+  animation: jb-sheet-out 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.jb-sheet-overlay[data-state="open"] {
+  animation: jb-overlay-in 220ms ease-out both;
+}
+
+.jb-sheet-overlay[data-state="closed"] {
+  animation: jb-overlay-out 180ms ease-in both;
+}
+
+/**
+ * REDUCED MOTION: 1ms, DELIBERATELY NOT `animation: none`.
+ *
+ * `none` would stop animationend firing at all, and Radix would then never learn
+ * the exit had finished: the drawer would stay mounted and the page would appear
+ * frozen behind an invisible scrim. A 1ms animation is imperceptible to the user
+ * and still completes, so the unmount happens exactly as it always did.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .jb-sheet-content[data-state="open"],
+  .jb-sheet-content[data-state="closed"],
+  .jb-sheet-overlay[data-state="open"],
+  .jb-sheet-overlay[data-state="closed"] {
+    animation-duration: 1ms;
+  }
+}

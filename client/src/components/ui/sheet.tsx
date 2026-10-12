@@ -14,26 +14,49 @@ import { cn } from "../../lib/utils";
  * The bottom padding is the safe-area inset so the composer clears a home
  * indicator rather than sitting under it.
  *
- * DELIBERATELY UNANIMATED. ui/dialog.tsx sets no enter/exit transition either,
- * and styles.css defines no keyframes to hang one on, so adding a slide
- * animation here would mean introducing an animation system for this one
- * surface.
+ * ANIMATED VIA KEYFRAMES IN styles.css, WHICH WAS NOT ALWAYS TRUE. This surface
+ * was deliberately still - the note here read "DELIBERATELY UNANIMATED ... adding
+ * a slide animation would mean introducing an animation system for this one
+ * surface" - and that was the honest reason: there were no keyframes anywhere in
+ * the project. The animation now lives in styles.css as the smallest thing that
+ * works, rather than as a general system.
+ *
+ * `jb-sheet-content` / `jb-sheet-overlay` ARE DATA-STATE HOOKS, not styling.
+ * The rules are written against the element's own data-state so the motion is
+ * driven by the SAME state Radix already manages for mount and focus, and so
+ * there is no second source of truth about whether the panel is open.
  */
-
 export const Sheet = DialogPrimitive.Root;
 export const SheetTrigger = DialogPrimitive.Trigger;
 export const SheetClose = DialogPrimitive.Close;
+
+/**
+ * The scrim behind the panel. Exported rather than inlined, matching
+ * ui/dialog.tsx's DialogOverlay, so its enter/exit motion belongs to it instead of
+ * being buried in SheetContent.
+ */
+export const SheetOverlay = forwardRef<
+  ElementRef<typeof DialogPrimitive.Overlay>,
+  ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn("jb-sheet-overlay fixed inset-0 z-50 bg-slate-900/20 backdrop-blur-sm", className)}
+    {...props}
+  />
+));
+SheetOverlay.displayName = "SheetOverlay";
 
 export const SheetContent = forwardRef<
   ElementRef<typeof DialogPrimitive.Content>,
   ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-slate-900/20 backdrop-blur-sm" />
+    <SheetOverlay />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed inset-y-0 right-0 z-50 flex w-full flex-col sm:w-[440px]",
+        "jb-sheet-content fixed inset-y-0 right-0 z-50 flex w-full flex-col sm:w-[440px]",
         "border-l border-blue-100 bg-white text-slate-900 shadow-2xl focus:outline-none",
         "pb-[env(safe-area-inset-bottom)]",
         className,
