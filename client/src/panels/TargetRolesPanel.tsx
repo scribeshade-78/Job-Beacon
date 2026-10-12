@@ -12,6 +12,7 @@ import {
 import { listExtractedFacts, type ExtractedFact } from "../lib/resumeExtraction";
 import { suggestRoles, type SuggestionTier } from "../lib/roleSuggestions";
 import { relatedRoles, roleMatchKindOf, searchRoles } from "../lib/roleTaxonomy";
+import { RoleSearchCombobox } from "./RoleSearchCombobox";
 import { qualifierPreferenceLabel, preferredQualifiers } from "../../../shared/candidateQualifiers";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { describeRankingRefresh, runRankingRefresh } from "../lib/feedRankingRefresh";
@@ -403,112 +404,18 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
 
         <section>
           <h3 className="text-sm font-semibold text-black">Search roles</h3>
-          <Input
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="Search by title, e.g. engineer"
-            aria-label="Search target roles"
-            className="mt-2"
-          />
-
-          {searchResults.length > 0 && (
-            <ul className="mt-2 space-y-2">
-              {searchResults.map((entry) => {
-                const kind = roleMatchKindOf(entry, searchQuery);
-
-                return (
-                  <li
-                    key={entry.id}
-                    className="flex items-center justify-between gap-2 rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
-                  >
-                    <span>
-                      {entry.title} <span className="text-ios-text-secondary">· {entry.category}</span>
-                      <span className="ml-2 text-xs text-ios-text-secondary">
-                        {kind === "exact" ? "Exact match" : "Partial match · keyword only"}
-                      </span>
-                    </span>
-                    <Button
-                      size="sm"
-                      disabled={busyKey === entry.title}
-                      onClick={() => void handleSelect(entry.title, undefined, entry.id)}
-                    >
-                      Add
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          {/* Phrase confirmation. The query is NOT saved as intent unless the
-              candidate presses this, and the canonical occupation it maps to is
-              shown beside it. */}
-          {intentOffer !== null && (
-            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
-              <p className="font-medium">Save this preference?</p>
-              <p className="mt-1 text-ios-text-secondary">
-                You searched for <span className="font-medium text-black">“{trimmedQuery}”</span>, which maps to{" "}
-                <span className="font-medium text-black">{intentOffer.entry.title}</span> · {intentOffer.label}.
-                Jobs matching {intentOffer.entry.title} will be ranked, not filtered, by this preference.
-              </p>
-              <Button
-                size="sm"
-                className="mt-2"
-                disabled={busyKey === intentOffer.entry.title}
-                onClick={() => void handleSelect(intentOffer.entry.title, trimmedQuery, intentOffer.entry.id)}
-              >
-                Save “{trimmedQuery}” as {intentOffer.entry.title}
-              </Button>
-            </div>
-          )}
-
-          {/* Related occupations: an explanation, and an explicit Add. They are
-              never selected on the candidate's behalf. */}
-          {relatedForQuery.length > 0 && (
-            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
-              <p className="font-medium">Related roles</p>
-              <ul className="mt-2 space-y-2">
-                {relatedForQuery.map((related) => (
-                  <li key={related.entry.id}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span>{related.entry.title}</span>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busyKey === related.entry.title}
-                        onClick={() => void handleSelect(related.entry.title, undefined, related.entry.id)}
-                      >
-                        Add
-                      </Button>
-                    </div>
-                    <p className="text-xs text-ios-text-secondary">{related.explanation}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {trimmedQuery !== "" && rawSearchResults.length === 0 && (
-            <div className="mt-2 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
-              <p className="font-medium">No matching roles found.</p>
-              <p className="mt-1 text-ios-text-secondary">
-                Add it as a custom role and JobBeacon will search for it exactly as written.
-              </p>
-              <Button
-                size="sm"
-                variant="secondary"
-                className="mt-2"
-                disabled={busyKey === trimmedQuery}
-                onClick={() => void handleAddCustomRole()}
-              >
-                Add "{trimmedQuery}" as a custom role
-              </Button>
-            </div>
-          )}
-
-          {trimmedQuery !== "" && rawSearchResults.length > 0 && searchResults.length === 0 && (
-            <p className="mt-2 text-sm text-ios-text-secondary">Every matching role is already in your list.</p>
-          )}
+          {/* The overlay REPLACES the static result list that used to render here.
+              Keeping both would mean the same matches shown twice, once floating and
+              once in flow, which is the duplication this section had already been
+              trimmed of once. */}
+          <div className="mt-2">
+            <RoleSearchCombobox
+              value={searchQuery}
+              onValueChange={setSearchQuery}
+              onSelect={(entry) => void handleSelect(entry.title, undefined, entry.id)}
+              selectedTitles={selectedTitles}
+            />
+          </div>
         </section>
 
         {trimmedQuery === "" &&

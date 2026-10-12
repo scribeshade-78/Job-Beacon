@@ -20,6 +20,12 @@ export const ROLE_CATEGORIES = [
   "Healthcare",
   "Finance",
   "Education",
+  // Named in the role-picker brief and genuinely absent until now. Adding a category is
+  // a content decision, not a code one: the catalog is curated, and these three carry
+  // the occupations a candidate outside tech is most likely to search for.
+  "Human Resources",
+  "Retail",
+  "Hospitality",
 ] as const;
 
 export type RoleCategory = (typeof ROLE_CATEGORIES)[number];
@@ -73,6 +79,74 @@ export function relatedRoles(entry: RoleTaxonomyEntry): Array<{ entry: RoleTaxon
 }
 
 export const ROLE_TAXONOMY: RoleTaxonomyEntry[] = [
+  // --- Human Resources -------------------------------------------------------
+  {
+    id: "hr-manager",
+    title: "HR Manager",
+    category: "Human Resources",
+    aliases: ["human resources manager", "people manager", "hr business partner"],
+    skills: ["employee relations", "performance management", "hris", "recruiting", "policy"],
+  },
+  {
+    id: "recruiter",
+    title: "Recruiter",
+    category: "Human Resources",
+    aliases: ["talent acquisition", "talent partner", "technical recruiter"],
+    skills: ["sourcing", "interviewing", "ats", "employer branding", "screening"],
+  },
+  {
+    id: "hr-coordinator",
+    title: "HR Coordinator",
+    category: "Human Resources",
+    aliases: ["people operations coordinator", "hr administrator", "hr assistant"],
+    skills: ["onboarding", "record keeping", "scheduling", "compliance", "excel"],
+  },
+
+  // --- Retail ---------------------------------------------------------------
+  {
+    id: "retail-store-manager",
+    title: "Retail Store Manager",
+    category: "Retail",
+    aliases: ["store manager", "shop manager", "branch manager"],
+    skills: ["p&l", "rostering", "stock control", "team leadership", "visual merchandising"],
+  },
+  {
+    id: "sales-associate",
+    title: "Sales Associate",
+    category: "Retail",
+    aliases: ["retail assistant", "shop assistant", "sales advisor"],
+    skills: ["customer service", "pos", "upselling", "stock replenishment", "cash handling"],
+  },
+  {
+    id: "visual-merchandiser",
+    title: "Visual Merchandiser",
+    category: "Retail",
+    aliases: ["vm", "display designer", "merchandising executive"],
+    skills: ["store layout", "window display", "planogram", "brand standards", "styling"],
+  },
+
+  // --- Hospitality ----------------------------------------------------------
+  {
+    id: "hotel-manager",
+    title: "Hotel Manager",
+    category: "Hospitality",
+    aliases: ["general manager hotel", "property manager", "hospitality manager"],
+    skills: ["revenue management", "guest experience", "team leadership", "ota", "budgeting"],
+  },
+  {
+    id: "front-desk-agent",
+    title: "Front Desk Agent",
+    category: "Hospitality",
+    aliases: ["receptionist", "front office", "guest services agent"],
+    skills: ["check-in", "reservations", "customer service", "pms", "conflict resolution"],
+  },
+  {
+    id: "chef",
+    title: "Chef",
+    category: "Hospitality",
+    aliases: ["head chef", "sous chef", "cook", "kitchen manager"],
+    skills: ["menu planning", "food safety", "kitchen management", "costing", "haccp"],
+  },
   // Engineering
   {
     id: "software-engineer",
