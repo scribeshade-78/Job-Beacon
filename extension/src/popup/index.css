@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/**
+ * THE SAME TOKENS AS THE WEB APP, on purpose. The popup is the first and sometimes the
+ * only thing a candidate sees of this product while they are on someone else's site, so
+ * it should look like JobBeacon rather than like a browser tool. Copied rather than
+ * imported because the extension is a separate bundle with its own build root;
+ * if these drift the popup will look subtly foreign, which is the cost of the copy.
+ */
+@theme {
+  --color-ios-blue: #007aff;
+  --color-ios-blue-button: #0066d6;
+  --color-ios-bg: #f2f2f7;
+  --color-ios-card: #ffffff;
+  --color-ios-separator: #e5e5ea;
+  --color-ios-text: #000000;
+  --color-ios-text-secondary: rgba(60, 60, 67, 0.78);
+  --radius-card: 12px;
+  --radius-control: 10px;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  width: 340px;
+  background: var(--color-ios-bg);
+  color: var(--color-ios-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ios-blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
