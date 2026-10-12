@@ -77,6 +77,8 @@ export function RoleSearchCombobox({
 
   const query = value.trim();
 
+
+
   const options = useMemo<Option[]>(
     () => (query === "" ? browseOptions() : matchesOptions(query)),
     [query],
@@ -98,7 +100,10 @@ export function RoleSearchCombobox({
   useEffect(() => {
     if (!open || activeIndex < 0) return;
     const node = list.current?.querySelector('[data-active="true"]');
-    node?.scrollIntoView({ block: "nearest" });
+    // OPTIONAL CALL: scrollIntoView is not implemented in jsdom (or in every embedded
+    // webview), and an unguarded call throws inside an effect - which took down the
+    // component in tests rather than merely skipping the scroll.
+    node?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex, open]);
 
   function move(delta: number) {

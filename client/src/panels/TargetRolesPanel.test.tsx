@@ -95,7 +95,15 @@ describe("phrase confirmation", () => {
     render(<TargetRolesPanel candidateId="candidate-1" />);
     await screen.findByText(/No target roles yet/);
 
-    fireEvent.change(screen.getByLabelText("Search target roles"), { target: { value: "Data Engineer" } });
+    // FOCUS FIRST, BECAUSE THE RESULTS NOW LIVE IN AN OVERLAY THAT OPENS ON FOCUS.
+    // This assertion is a sanity check that the query resolves to a canonical entry;
+    // the entry is still rendered, just inside the combobox rather than in the static
+    // list that used to sit below the input.
+    const input = screen.getByLabelText("Search target roles");
+    // focusIn, not focus: React 17+ delegates onFocus through the focusin event, so
+    // dispatching a bare "focus" never reaches the handler and the overlay stays shut.
+    fireEvent.focusIn(input);
+    fireEvent.change(input, { target: { value: "Data Engineer" } });
 
     await screen.findByText("Data Engineer");
     expect(screen.queryByText(/Save this preference?/)).toBeNull();

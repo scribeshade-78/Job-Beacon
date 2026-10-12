@@ -405,9 +405,9 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
         <section>
           <h3 className="text-sm font-semibold text-black">Search roles</h3>
           {/* The overlay REPLACES the static result list that used to render here.
-              Keeping both would mean the same matches shown twice, once floating and
-              once in flow, which is the duplication this section had already been
-              trimmed of once. */}
+              Keeping both would show the same matches twice, once floating and once in
+              flow. Everything after this input - the preference confirmation, the
+              related roles and the custom-role offer - is untouched. */}
           <div className="mt-2">
             <RoleSearchCombobox
               value={searchQuery}
@@ -416,6 +416,77 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
               selectedTitles={selectedTitles}
             />
           </div>
+
+
+          {/* Phrase confirmation. The query is NOT saved as intent unless the
+              candidate presses this, and the canonical occupation it maps to is
+              shown beside it. */}
+          {intentOffer !== null && (
+            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
+              <p className="font-medium">Save this preference?</p>
+              <p className="mt-1 text-ios-text-secondary">
+                You searched for <span className="font-medium text-black">“{trimmedQuery}”</span>, which maps to{" "}
+                <span className="font-medium text-black">{intentOffer.entry.title}</span> · {intentOffer.label}.
+                Jobs matching {intentOffer.entry.title} will be ranked, not filtered, by this preference.
+              </p>
+              <Button
+                size="sm"
+                className="mt-2"
+                disabled={busyKey === intentOffer.entry.title}
+                onClick={() => void handleSelect(intentOffer.entry.title, trimmedQuery, intentOffer.entry.id)}
+              >
+                Save “{trimmedQuery}” as {intentOffer.entry.title}
+              </Button>
+            </div>
+          )}
+
+          {/* Related occupations: an explanation, and an explicit Add. They are
+              never selected on the candidate's behalf. */}
+          {relatedForQuery.length > 0 && (
+            <div className="mt-3 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
+              <p className="font-medium">Related roles</p>
+              <ul className="mt-2 space-y-2">
+                {relatedForQuery.map((related) => (
+                  <li key={related.entry.id}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{related.entry.title}</span>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyKey === related.entry.title}
+                        onClick={() => void handleSelect(related.entry.title, undefined, related.entry.id)}
+                      >
+                        Add
+                      </Button>
+                    </div>
+                    <p className="text-xs text-ios-text-secondary">{related.explanation}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {trimmedQuery !== "" && rawSearchResults.length === 0 && (
+            <div className="mt-2 rounded-control border border-ios-separator bg-ios-bg p-3 text-sm text-black">
+              <p className="font-medium">No matching roles found.</p>
+              <p className="mt-1 text-ios-text-secondary">
+                Add it as a custom role and JobBeacon will search for it exactly as written.
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="mt-2"
+                disabled={busyKey === trimmedQuery}
+                onClick={() => void handleAddCustomRole()}
+              >
+                Add "{trimmedQuery}" as a custom role
+              </Button>
+            </div>
+          )}
+
+          {trimmedQuery !== "" && rawSearchResults.length > 0 && searchResults.length === 0 && (
+            <p className="mt-2 text-sm text-ios-text-secondary">Every matching role is already in your list.</p>
+          )}
         </section>
 
         {trimmedQuery === "" &&
