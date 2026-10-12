@@ -3,7 +3,10 @@
   "compilerOptions": {
     "outDir": "../dist/extension-types",
     "noEmit": true,
-    "types": [],
+    // vite/client declares ImportMeta.env, which is how the Supabase URL and publishable
+    // key reach this code. Without it tsc has no idea import.meta.env exists - the build
+    // would still work, and the types would be wrong, which is the worst combination.
+    "types": ["vite/client"],
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]

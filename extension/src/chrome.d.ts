@@ -11,15 +11,27 @@ declare namespace chrome {
     namespace local {
       function get(keys: string | string[]): Promise<Record<string, unknown>>;
       function set(items: Record<string, unknown>): Promise<void>;
+      // Used to drop the stored session on sign-out.
+      function remove(keys: string | string[]): Promise<void>;
     }
   }
   namespace runtime {
     interface MessageSender { tab?: { id?: number } }
-    function sendMessage(message: unknown): Promise<{ ok: boolean; profile?: unknown; report?: unknown; error?: string }>;
+    interface MessageReply {
+      ok: boolean;
+      profile?: unknown;
+      report?: unknown;
+      session?: unknown;
+      error?: string;
+    }
+    function sendMessage(message: unknown): Promise<MessageReply>;
     namespace onMessage {
       function addListener(
         listener: (
-          message: { type?: string; profile?: unknown },
+          // The message envelope the extension actually sends: a discriminator plus the
+          // fields each variant carries. email/password only travel popup -> worker, and
+          // the worker hands them straight to Supabase without keeping them.
+          message: { type?: string; profile?: unknown; email?: string; password?: string },
           sender: MessageSender,
           sendResponse: (response: unknown) => void,
         ) => boolean | void,

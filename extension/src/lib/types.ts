@@ -20,3 +20,16 @@ export interface FillReport {
   filled: string[];
   skipped: { field: string; reason: string }[];
 }
+
+/**
+ * What the popup needs to know about the session - never the token itself.
+ *
+ * THE ACCESS TOKEN IS DELIBERATELY ABSENT. The popup never handles a credential; it
+ * asks the worker to perform the fetch and receives the result. Keeping the token in one
+ * context means there is exactly one place that can leak it, and that place never renders
+ * anything.
+ */
+export interface SessionInfo {
+  signedIn: boolean;
+  email: string;
+}

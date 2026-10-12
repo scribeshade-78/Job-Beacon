@@ -17,6 +17,12 @@ import { defineConfig, type UserConfig } from "vite";
  * IIFE format without a bundler shim.
  */
 const outDir = fileURLToPath(new URL("../dist/extension", import.meta.url));
+
+// THE REPO ROOT, NOT extension/. Vite resolves VITE_* from envDir, and the Supabase
+// publishable URL/key live in the root .env alongside everything else. Left at the
+// default, the extension would build with those undefined and fail at runtime with no
+// obvious cause - the same failure mode the web app's own config documents.
+const envDir = fileURLToPath(new URL("..", import.meta.url));
 const entry = process.env.EXT_ENTRY ?? "popup";
 
 // ANNOTATED AS UserConfig. Without it TypeScript infers each branch's shape
@@ -27,6 +33,7 @@ export default defineConfig((): UserConfig => {
   if (entry === "popup") {
     return {
       root: fileURLToPath(new URL("./src/popup", import.meta.url)),
+      envDir,
       // Copies public/manifest.json into the output, which is how the manifest ships
       // without a copy step of its own.
       publicDir: fileURLToPath(new URL("./public", import.meta.url)),
@@ -52,6 +59,7 @@ export default defineConfig((): UserConfig => {
 
   return {
     root: fileURLToPath(new URL(".", import.meta.url)),
+    envDir,
     publicDir: false,
     build: {
       outDir,

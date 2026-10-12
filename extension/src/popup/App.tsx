@@ -1,16 +1,23 @@
 import { useEffect, useState } from "react";
+import type { SessionInfo } from "../lib/types.js";
 
 /**
- * The popup: connect once, then one button.
+ * The popup has two faces: sign in, or auto-fill.
  *
- * NOTHING FILLS UNTIL THE BUTTON IS PRESSED, and nothing is ever submitted. The
- * extension's whole value is that it saves typing into a form the candidate is already
- * looking at; it does not decide to apply anywhere, and it cannot - there is no submit
- * path in this codebase.
+ * IT NEVER TOUCHES A CREDENTIAL BEYOND THE MOMENT OF SIGN-IN. The password goes straight
+ * to the service worker, which hands it to Supabase, and nothing is kept here. The popup
+ * cannot read the session token either - it asks the worker what the session IS
+ * (signedIn, email) and asks the worker to do the fetching.
+ *
+ * NOTHING FILLS UNTIL THE BUTTON IS PRESSED, and nothing is ever submitted.
  */
 export function App() {
-  const [token, setToken] = useState("");
-  const [stored, setStored] = useState(false);
+  // 'checking' first, so the popup never flashes a login form at someone who is already
+  // signed in - reading the session is async and the first render happens before it.
+  const [checking, setChecking] = useState(true);
+  const [session, setSession] = useState<SessionInfo>({ signedIn: false, email: "" });
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ tone: "idle" | "ok" | "error"; text: string }>({
     tone: "idle",
@@ -18,17 +25,49 @@ export function App() {
   });
 
   useEffect(() => {
-    void chrome.storage.local.get("apiToken").then((result) => {
-      const existing = typeof result.apiToken === "string" ? result.apiToken : "";
-      setToken(existing);
-      setStored(existing.length > 0);
-    });
+    void chrome.runtime
+      .sendMessage({ type: "GET_SESSION" })
+      .then((reply) => {
+        if (reply?.ok && reply.session) {
+          setSession(reply.session as SessionInfo);
+        }
+      })
+      .finally(() => setChecking(false));
   }, []);
 
-  async function saveToken() {
-    await chrome.storage.local.set({ apiToken: token.trim() });
-    setStored(token.trim().length > 0);
-    setStatus({ tone: "ok", text: token.trim() ? "Token saved." : "Token cleared." });
+  async function signIn() {
+    setBusy(true);
+    setStatus({ tone: "idle", text: "Signing in..." });
+
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: "SIGN_IN", email, password });
+      if (!reply?.ok) {
+        throw new Error(reply?.error ?? "Could not sign in.");
+      }
+      setSession(reply.session as SessionInfo);
+      // Cleared immediately: a password left in component state is a password left in a
+      // DOM node, and this popup can stay open on screen.
+      setPassword("");
+      setStatus({ tone: "idle", text: "Open a job application form, then press Auto-Fill." });
+    } catch (error) {
+      setStatus({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function signOut() {
+    setBusy(true);
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: "SIGN_OUT" });
+      if (reply?.ok && reply.session) {
+        setSession(reply.session as SessionInfo);
+      }
+      setPassword("");
+      setStatus({ tone: "idle", text: "Signed out." });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function autoFill() {
@@ -37,7 +76,13 @@ export function App() {
 
     try {
       const profileReply = await chrome.runtime.sendMessage({ type: "FETCH_PROFILE" });
+
       if (!profileReply?.ok) {
+        // An expired session is a STATE, not a failure: show the login screen again
+        // rather than an error the candidate cannot act on.
+        if (/expired|refused/i.test(profileReply?.error ?? "")) {
+          setSession({ signedIn: false, email: "" });
+        }
         throw new Error(profileReply?.error ?? "Could not read your profile.");
       }
 
@@ -55,17 +100,12 @@ export function App() {
         throw new Error(fillReply?.error ?? "The page refused the fill.");
       }
 
-      // REPORT WHAT ACTUALLY HAPPENED, including what was left alone. A popup that
-      // said "Done!" without this would hide the case that matters most: a field it
-      // chose not to touch because the candidate had already answered it.
       const report = fillReply.report as {
         filled: string[];
         skipped: { field: string; reason: string }[];
       };
       const summary =
-        report.filled.length > 0
-          ? "Filled " + report.filled.join(", ") + "."
-          : "Nothing filled - see below.";
+        report.filled.length > 0 ? "Filled " + report.filled.join(", ") + "." : "Nothing filled - see below.";
       const skipped = report.skipped.map((s) => s.field + ": " + s.reason).join(" ");
       setStatus({
         tone: report.filled.length > 0 ? "ok" : "error",
@@ -78,56 +118,83 @@ export function App() {
     }
   }
 
+  const fieldClass = "rounded-control border border-ios-separator bg-ios-card px-2.5 py-1.5 text-sm";
+
   return (
     <div className="flex flex-col gap-3 p-4">
       <header className="flex items-center gap-2">
         <span className="flex h-8 w-8 items-center justify-center rounded-control bg-ios-blue text-sm font-bold text-white">
           JB
         </span>
-        <div>
+        <div className="min-w-0 flex-1">
           <h1 className="text-sm font-semibold">Auto-Apply</h1>
-          <p className="text-xs text-ios-text-secondary">
-            {stored ? "Connected to JobBeacon" : "Not connected"}
+          <p className="truncate text-xs text-ios-text-secondary">
+            {checking ? "Checking your session..." : session.signedIn ? session.email : "Signed out"}
           </p>
         </div>
+        {session.signedIn ? (
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            disabled={busy}
+            className="rounded-control border border-ios-separator bg-ios-card px-2 py-1 text-xs font-medium"
+          >
+            Sign out
+          </button>
+        ) : null}
       </header>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-ios-text-secondary">API token</span>
-        <input
-          type="password"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
-          placeholder="Paste the token from JobBeacon"
-          className="rounded-control border border-ios-separator bg-ios-card px-2.5 py-1.5 text-sm"
-        />
-      </label>
+      {checking ? null : !session.signedIn ? (
+        <>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-ios-text-secondary">Email</span>
+            <input
+              type="email"
+              value={email}
+              autoComplete="username"
+              onChange={(event) => setEmail(event.target.value)}
+              className={fieldClass}
+            />
+          </label>
 
-      <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={() => void saveToken()}
-          className="rounded-control border border-ios-separator bg-ios-card px-3 py-1.5 text-sm font-medium"
-        >
-          Save token
-        </button>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-ios-text-secondary">Password</span>
+            <input
+              type="password"
+              value={password}
+              autoComplete="current-password"
+              onChange={(event) => setPassword(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && email && password && !busy) {
+                  void signIn();
+                }
+              }}
+              className={fieldClass}
+            />
+          </label>
+
+          <button
+            type="button"
+            onClick={() => void signIn()}
+            disabled={busy || !email || !password}
+            className="rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            {busy ? "Signing in..." : "Sign in to JobBeacon"}
+          </button>
+        </>
+      ) : (
         <button
           type="button"
           onClick={() => void autoFill()}
-          disabled={busy || !stored}
-          className="flex-1 rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
+          disabled={busy}
+          className="rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
         >
           {busy ? "Filling..." : "Auto-Fill Page"}
         </button>
-      </div>
+      )}
 
       <p
-        className={
-          "rounded-control border p-2.5 text-xs " +
-          (status.tone === "error"
-            ? "border-ios-separator bg-ios-card text-ios-text"
-            : "border-ios-separator bg-ios-card text-ios-text-secondary")
-        }
+        className="rounded-control border border-ios-separator bg-ios-card p-2.5 text-xs text-ios-text-secondary"
         role="status"
         aria-live="polite"
       >

@@ -1,42 +1,71 @@
 /**
- * The service worker. It exists for ONE reason, and it is not optional.
+ * The service worker. It owns the session and the network, and the popup owns the UI.
  *
- * A CONTENT SCRIPT'S FETCH CARRIES THE PAGE'S ORIGIN. Fetching jobbeacon.in from a
- * content script running on greenhouse.io is a cross-origin request judged against
- * greenhouse's policy, not ours - so it fails unless JobBeacon happens to send permissive
- * CORS headers to every ATS on the internet. A service worker with host_permissions
- * fetches as the EXTENSION, which is a different and much narrower grant.
+ * WHY THE WORKER AND NOT THE POPUP:
  *
- * THE TOKEN LIVES IN chrome.storage.local, NOT HERE IN CODE, and is never sent
- * anywhere except jobbeacon.in. There is no server-side exchange: the candidate pastes
- * a token, exactly as a CLI would.
+ *  1. A CONTENT SCRIPT'S FETCH CARRIES THE PAGE'S ORIGIN. Calling jobbeacon.in from a
+ *     content script on greenhouse.io is judged against greenhouse's CORS policy, so it
+ *     fails unless JobBeacon sends permissive headers to every ATS on the internet. The
+ *     worker fetches as the extension, against host_permissions naming one origin.
+ *
+ *  2. THE POPUP IS DESTROYED WHEN IT CLOSES. A session that lived only there would be
+ *     gone the moment the candidate clicked away, and the refresh timer with it.
+ *
+ *  3. ONE COPY OF THE TOKEN. The popup asks for work to be done and receives results; it
+ *     never holds the credential, so there is a single context that could leak it.
+ *
+ * THE SESSION IS THE CANDIDATE'S OWN SUPABASE SESSION, obtained by signing in with their
+ * email and password exactly as the web app does. No long-lived API token is issued,
+ * stored, or rotated, and signing out in either place ends it.
  */
-import type { CandidateProfile } from "./lib/types.js";
+import { freshAccessToken, supabase } from "./lib/supabase.js";
+import type { CandidateProfile, SessionInfo } from "./lib/types.js";
 
 const API_BASE = "https://jobbeacon.in";
 
-interface StoredSettings {
-  apiToken?: string;
+/** The popup's view of the session - never the token. */
+async function sessionInfo(): Promise<SessionInfo> {
+  const { data } = await supabase().auth.getSession();
+  const session = data.session;
+
+  return {
+    signedIn: Boolean(session),
+    email: session?.user?.email ?? "",
+  };
 }
 
-async function readToken(): Promise<string | null> {
-  const stored = (await chrome.storage.local.get("apiToken")) as StoredSettings;
-  const token = stored.apiToken?.trim();
-  return token ? token : null;
+async function signIn(email: string, password: string): Promise<SessionInfo> {
+  const { data, error } = await supabase().auth.signInWithPassword({ email, password });
+
+  if (error || !data.session) {
+    // Re-thrown rather than returned so the popup has one error path. Supabase's own
+    // wording is kept: "Invalid login credentials" is more useful than a rewrite.
+    throw new Error(error?.message ?? "Could not sign in.");
+  }
+
+  return { signedIn: true, email: data.session.user.email ?? email };
+}
+
+async function signOut(): Promise<SessionInfo> {
+  await supabase().auth.signOut();
+  // Belt and braces: a signOut that failed to clear the store would leave a session the
+  // user believes they ended. The storage key is the client's own, set in supabase.ts.
+  await chrome.storage.local.remove("jobbeacon-extension-auth");
+  return { signedIn: false, email: "" };
 }
 
 /**
- * The candidate's profile, from the endpoint the web app already trusts.
+ * The candidate's profile, from the endpoint the web app's own session already trusts.
  *
- * The extension holds a TOKEN, never a password and never a Supabase session: the
- * browser session that signs a candidate into jobbeacon.in is not readable from here
- * (different origin) and should not be, so the two are deliberately separate grants.
+ * THE TOKEN IS OBTAINED HERE AND USED IMMEDIATELY, never stored separately and never
+ * returned to the popup. An expired session returns null rather than an error, so the
+ * popup can show the login screen again instead of a failure message.
  */
 async function fetchProfile(): Promise<CandidateProfile> {
-  const token = await readToken();
+  const token = await freshAccessToken();
 
   if (!token) {
-    throw new Error("Not connected. Paste your JobBeacon API token in the popup.");
+    throw new Error("Your session has expired. Sign in again.");
   }
 
   const response = await fetch(API_BASE + "/api/extension/profile", {
@@ -44,7 +73,7 @@ async function fetchProfile(): Promise<CandidateProfile> {
   });
 
   if (response.status === 401) {
-    throw new Error("That token was refused. Generate a new one in JobBeacon.");
+    throw new Error("The server refused this session. Sign in again.");
   }
   if (!response.ok) {
     throw new Error("JobBeacon answered HTTP " + response.status + ".");
@@ -53,27 +82,40 @@ async function fetchProfile(): Promise<CandidateProfile> {
   return (await response.json()) as CandidateProfile;
 }
 
+/**
+ * One listener, one async dispatcher.
+ *
+ * EVERY BRANCH MUST ANSWER. A message that returns undefined leaves the popup's promise
+ * pending forever, so the dispatcher is written to always send something - including on a
+ * thrown error - and returns true to keep the channel open for the async reply.
+ */
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== "FETCH_PROFILE") {
+  const type = message?.type;
+
+  if (type !== "GET_SESSION" && type !== "SIGN_IN" && type !== "SIGN_OUT" && type !== "FETCH_PROFILE") {
     return false;
   }
 
-  fetchProfile()
-    .then((profile) => sendResponse({ ok: true, profile }))
-    .catch((error: unknown) =>
-      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
-    );
+  void (async () => {
+    try {
+      switch (type) {
+        case "GET_SESSION":
+          sendResponse({ ok: true, session: await sessionInfo() });
+          return;
+        case "SIGN_IN":
+          sendResponse({ ok: true, session: await signIn(String(message.email ?? ""), String(message.password ?? "")) });
+          return;
+        case "SIGN_OUT":
+          sendResponse({ ok: true, session: await signOut() });
+          return;
+        case "FETCH_PROFILE":
+          sendResponse({ ok: true, profile: await fetchProfile() });
+          return;
+      }
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
 
-  // Keeps the message channel open for the async reply above.
   return true;
-});
-
-/** Arms the toolbar icon per tab, so the popup can say whether filling is possible here. */
-async function refreshBadge(tabId: number, url: string | undefined): Promise<void> {
-  const supported = /greenhouse\.io|lever\.co|myworkdayjobs\.com|workday\.com/.test(url ?? "");
-  await chrome.action.setBadgeText({ tabId, text: supported ? "" : "" });
-}
-
-chrome.tabs.onUpdated.addListener((tabId, _change, tab) => {
-  void refreshBadge(tabId, tab.url);
 });
