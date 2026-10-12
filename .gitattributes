@@ -6,3 +6,35 @@
 # This file pins itself for the same reason: a CRLF here would attach a stray
 # carriage return to the last token and corrupt the eol value below/above.
 .gitattributes text eol=lf
+
+# NORMALISE EVERY TEXT FILE TO LF IN THE REPOSITORY, so a Windows checkout and a
+# Linux container build cannot disagree about line endings.
+#
+# WHY THIS WAS ADDED. Commit f51a3b9 reported "75 files changed, 23821 insertions,
+# 23791 deletions" for what was a two-file, 34-line fix. Ignoring CR-at-EOL the
+# same commit was exactly 2 files / 34 lines; the other 73 were core.autocrlf=true
+# rewriting every CRLF it staged. The code was unharmed, but real changes were
+# buried in thousands of phantom lines - and the one-line defect that commit fixed
+# was itself nearly lost in that noise.
+#
+# eol=lf IS THE POINT, not text=auto alone: it pins the working tree too, so the
+# next Windows edit does not reintroduce CRLF and start the churn again. The *.sh
+# rule above is now redundant but kept, because it documents the concrete failure
+# that motivated it.
+* text=auto eol=lf
+
+# Binary: text normalisation would CORRUPT these. auto usually detects them, but an
+# explicit list is cheap and this is not a place to rely on a heuristic.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.xlsx binary
+*.docx binary
