@@ -126,3 +126,63 @@ describe("adzunaAdapter (MP-A2.1 registry wrapper)", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe("Adzuna structured location (captured from real 200s)", () => {
+  const withLocation = (location: Record<string, unknown>) =>
+    (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            id: "1",
+            title: "Engineer",
+            redirect_url: "https://example.test/1",
+            company: { display_name: "Kannanware" },
+            location,
+          },
+        ],
+      }),
+    })) as unknown as Parameters<typeof discoverAdzuna>[3];
+
+  it("reads the city from location.area[2] - the field this adapter never declared", async () => {
+    // Real payload: area ["India","Tamil Nadu","Bangalore"], display_name
+    // "Bangalore, Karnataka". BEFORE this change the mapper returned city: null for
+    // every Adzuna row, which is why Phase 2 had no cities to offer.
+    const [row] = await discoverAdzuna(
+      "in",
+      { resultsPerPage: 1 },
+      { appId: "a", appKey: "k" },
+      withLocation({ display_name: "Bangalore, Karnataka", area: ["India", "Tamil Nadu", "Bangalore"] }),
+    );
+
+    expect(row.city).toBe("Bangalore");
+    expect(row.country).toBe("IN");
+  });
+
+  it("returns null rather than inventing a city when area carries only a country", async () => {
+    // Real payload: area ["India"] - one element, no city. The ?? null is load-bearing.
+    const [row] = await discoverAdzuna(
+      "in",
+      { resultsPerPage: 1 },
+      { appId: "a", appKey: "k" },
+      withLocation({ display_name: "India", area: ["India"] }),
+    );
+
+    expect(row.city).toBeNull();
+  });
+
+  it("returns null when there is no area at all, instead of decomposing display_name", async () => {
+    // display_name IS free text ("London, South East England") and the mapper still
+    // refuses to guess a city out of it. Only the structured array is trusted.
+    const [row] = await discoverAdzuna(
+      "gb",
+      { resultsPerPage: 1 },
+      { appId: "a", appKey: "k" },
+      withLocation({ display_name: "London, South East England" }),
+    );
+
+    expect(row.city).toBeNull();
+    expect(row.country).toBe("GB");
+  });
+});

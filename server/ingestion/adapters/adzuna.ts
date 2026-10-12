@@ -26,7 +26,11 @@ interface AdzunaResult {
   id: string;
   title: string;
   company?: { display_name?: string };
-  location?: { display_name?: string };
+  // CAPTURED FROM REAL 200s, NOT FROM DOCUMENTATION. `area` is absent from the
+  // first version of this interface, which is why city was null on every Adzuna row
+  // and why Phase 2 had no cities to offer. Live shape: ["US","Kansas","Sedgwick
+  // County"], ["India","Tamil Nadu","Bangalore"], sometimes just ["India"].
+  location?: { display_name?: string; area?: string[] };
   salary_min?: number;
   salary_max?: number;
   created?: string;
@@ -71,10 +75,21 @@ export async function discoverAdzuna(
     companyDomain: null,
     country: countryCode.toUpperCase(),
     region: null,
-    // location.display_name is a single freeform string (e.g. "London,
-    // South East England"), same ambiguity as the other providers — not
-    // decomposed without guessing.
-    city: null,
+    // CITY FROM location.area[2], WHICH IS STRUCTURED - NOT from display_name, which
+    // is not. display_name is free text ("London, South East England") and is still
+    // never decomposed, because that would be guessing.
+    //
+    // ?? null IS LOAD-BEARING: some rows carry area ["India"] with no third element,
+    // and inventing one from display_name would put a guess into a column a filter
+    // matches on.
+    //
+    // KNOWN GRANULARITY CAVEAT, stated rather than hidden: area[2] is the city for
+    // some markets ("Bangalore") and a county or district for others -
+    // "Lancashire", "Sedgwick County" and "Tiruvallur" were all observed live. The
+    // Cities filter will therefore offer some administrative areas alongside cities.
+    // The alternative is display_name's first comma segment, which reads closer to a
+    // locality but is exactly the free-text decomposition this mapper refuses.
+    city: result.location?.area?.[2] ?? null,
     remoteType: null,
     currency: null,
     salaryMin: result.salary_min ?? null,
