@@ -218,7 +218,15 @@ describe("loadIntakeQueryContext — failure handling", () => {
 
     const context = await loadIntakeQueryContext(client, CANDIDATE);
 
-    expect(context).toEqual({ keywords: "Data Engineer", location: undefined, country: undefined });
+    // countries: [] is asserted rather than tolerated: no preferences row means NO
+    // markets, so every source stays on its single-fetch path. A non-empty default
+    // here would make an unconfigured candidate fan out over markets they never chose.
+    expect(context).toEqual({
+      keywords: "Data Engineer",
+      location: undefined,
+      country: undefined,
+      countries: [],
+    });
   });
 
   it("propagates a database error rather than reporting it as an empty profile", async () => {

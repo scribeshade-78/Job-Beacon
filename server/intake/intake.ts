@@ -4,6 +4,8 @@ import type { FetchImpl } from "../ingestion/types.js";
 import { scoreVacancy } from "../trust/scoreVacancy.js";
 import { getIntakeAdapter, listIntakeAdapters } from "./adapters/registry.js";
 import type { IntakeAdapter } from "./adapters/types.js";
+import { dispatchMarketFetches, isMarketAddressable } from "./marketDispatch.js";
+import { planMarketFetch } from "./marketRouting.js";
 
 /**
  * Task W — on-demand job intake.
@@ -128,6 +130,13 @@ export interface RunIntakeDeps {
  */
 export interface IntakeSourceSummary {
   sourceCode: string;
+  /**
+   * The market this run was for, when the source is fetched per-market.
+   *
+   * ONE ENTRY PER (SOURCE, MARKET) means a source can appear more than once, so the
+   * code alone no longer identifies a row. Null for sources fetched once.
+   */
+  market?: string | null;
   displayName: string;
   /** The source's own attribution, which must travel with its data. */
   attribution: string;
@@ -160,8 +169,16 @@ export interface RunIntakeFanOutResult {
   newVacancyIds: string[];
   trustStatusCounts: Record<string, number>;
   durationMs: number;
-  /** How many sources were skipped, so a caller can report partial success. */
+  /** How many source runs were skipped, so a caller can report partial success. */
   failedSources: number;
+  /**
+   * Market codes the router could not use, so a caller can say so.
+   *
+   * WITHOUT THIS THEY VANISH. A candidate who typed a country the router cannot turn
+   * into a market would see nothing happen and no reason why - the silent fallback
+   * this codebase keeps removing.
+   */
+  unusableMarkets?: string[];
   /**
    * True when the fan-out stopped because its time budget ran out, not because
    * it finished the source list. An in-flight source is never interrupted; this
@@ -173,6 +190,14 @@ export interface RunIntakeFanOutResult {
 export interface RunIntakeFanOutInput {
   /** Restrict to these sources. Omitted or empty means every registered source. */
   sourceCodes?: readonly string[];
+  /**
+   * The candidate's markets, as ISO-2 codes. Market-routed sources fetch once per entry.
+   *
+   * OMITTED MEANS "BEHAVE AS BEFORE": with no list, every source stays on its
+   * single-fetch path using `country`, so this is additive rather than a change to
+   * what existing callers already get.
+   */
+  countries?: readonly string[];
   search?: string;
   /** Same candidate-derived context RunIntakeInput carries; sent to every source. */
   keywords?: string;
@@ -230,6 +255,66 @@ export async function runIntakeAcrossSources(
   const sources: IntakeSourceSummary[] = [];
   const runOne = deps.runOne ?? runIntake;
 
+  // THE MARKET PLAN IS BUILT ONCE, BEFORE THE LOOP, so the whole run's cost is
+  // knowable up front. Empty when the caller supplied no markets, in which case every
+  // source stays on the single-fetch path it had before this existed.
+  const marketPlan =
+    input.countries && input.countries.length > 0
+      ? planMarketFetch(input.countries)
+      : { fetches: [], unusable: [], serpapiSearchCost: 0 };
+
+  /**
+   * One source run, as the summary the response carries.
+   *
+   * EXTRACTED BECAUSE BOTH PATHS MUST PRODUCE IDENTICAL SUMMARIES. The per-market path
+   * and the single path feed the same response contract, and two copies of this would
+   * drift the moment one was edited.
+   */
+  const summariseRun = (result: RunIntakeResult, market: string | null): IntakeSourceSummary => {
+    const created = result.outcomes.filter((outcome) => outcome.outcome === "created");
+    const updated = result.outcomes.filter((outcome) => outcome.outcome === "updated");
+
+    return {
+      sourceCode: result.sourceCode,
+      market,
+      displayName: result.displayName,
+      attribution: result.attribution,
+      status: "ok",
+      search: result.search,
+      received: result.received,
+      ingested: result.ingested,
+      created: created.length,
+      updated: updated.length,
+      skippedByAdapter: result.skippedByAdapter,
+      newVacancyIds: created.map((outcome) => outcome.vacancyId),
+      trustStatusCounts: result.trustStatusCounts,
+      durationMs: result.durationMs,
+    };
+  };
+
+  const summariseFailure = (
+    adapter: IntakeAdapter,
+    message: string,
+    durationMs: number,
+    market: string | null,
+  ): IntakeSourceSummary => ({
+    sourceCode: adapter.sourceCode,
+    market,
+    displayName: adapter.displayName,
+    attribution: adapter.attribution,
+    status: "failed",
+    error: message,
+    search: null,
+    received: 0,
+    ingested: 0,
+    created: 0,
+    updated: 0,
+    skippedByAdapter: 0,
+    newVacancyIds: [],
+    trustStatusCounts: {},
+    durationMs,
+  });
+
   for (const adapter of wanted) {
     // Checked before each source, never mid-fetch: stopping a request already in
     // flight is not something this loop can do, and pretending otherwise would
@@ -241,66 +326,85 @@ export async function runIntakeAcrossSources(
 
     const sourceStartedAt = now();
 
-    try {
-      const result = await runOne(
-        client,
-        {
-          sourceCode: adapter.sourceCode,
-          search: input.search,
-          limit: input.limit,
-          // Every source receives the same context and each decides whether it
-          // can use it. The fan-out deliberately has no per-source knowledge:
-          // teaching it "jooble needs a location" would put one source's
-          // requirements in the shared layer, which is the coupling the
-          // registry exists to avoid.
-          keywords: input.keywords,
-          location: input.location,
-          country: input.country,
-        },
-        deps,
+    // ONLY a source the router knows how to address per-market, and only when the
+    // caller actually supplied markets, takes the loop below. Everything else is
+    // untouched by cross-border work.
+    const markets = isMarketAddressable(adapter.sourceCode)
+      ? marketPlan.fetches.filter((fetch) => fetch.source === adapter.sourceCode)
+      : [];
+
+    if (markets.length === 0) {
+      try {
+        const result = await runOne(
+          client,
+          {
+            sourceCode: adapter.sourceCode,
+            search: input.search,
+            limit: input.limit,
+            // Every source receives the same context and each decides whether it
+            // can use it. The fan-out deliberately has no per-source knowledge:
+            // teaching it "jooble needs a location" would put one source's
+            // requirements in the shared layer, which is the coupling the
+            // registry exists to avoid.
+            keywords: input.keywords,
+            location: input.location,
+            country: input.country,
+          },
+          deps,
+        );
+
+        sources.push(summariseRun(result, null));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        // Logged, not swallowed: a skipped source is invisible to the candidate
+        // unless someone can see why. The response carries it too.
+        console.error(`[intake] source "${adapter.sourceCode}" skipped: ${message}`);
+
+        sources.push(summariseFailure(adapter, message, now() - sourceStartedAt, null));
+      }
+
+      continue;
+    }
+
+    // ONE RUN PER MARKET. The reliability guard and the per-market budget check both
+    // live inside dispatchMarketFetches, so they exist in exactly one tested place
+    // rather than being re-implemented here.
+    const dispatched = await dispatchMarketFetches(
+      { ...marketPlan, fetches: markets },
+      (entry) =>
+        runOne(
+          client,
+          {
+            sourceCode: adapter.sourceCode,
+            search: input.search,
+            limit: input.limit,
+            keywords: input.keywords,
+            // THE MARKET'S OWN LOCATION WINS over the shared context: for a market
+            // routed to SerpApi, sending that country's name IS the point.
+            location: entry.location ?? input.location,
+            country: entry.market,
+          },
+          deps,
+        ),
+      { now, deadline },
+    );
+
+    if (dispatched.stopped) {
+      stoppedOnDeadline = true;
+    }
+
+    for (const { entry, result } of dispatched.results) {
+      sources.push(summariseRun(result, entry.market));
+    }
+
+    // Each failed market becomes its own failed summary, so failedSources counts the
+    // markets that were skipped rather than the sources.
+    for (const failure of dispatched.failures) {
+      console.error(
+        `[intake] source "${adapter.sourceCode}" skipped for market ${failure.market}: ${failure.message}`,
       );
-
-      const created = result.outcomes.filter((outcome) => outcome.outcome === "created");
-      const updated = result.outcomes.filter((outcome) => outcome.outcome === "updated");
-
-      sources.push({
-        sourceCode: result.sourceCode,
-        displayName: result.displayName,
-        attribution: result.attribution,
-        status: "ok",
-        search: result.search,
-        received: result.received,
-        ingested: result.ingested,
-        created: created.length,
-        updated: updated.length,
-        skippedByAdapter: result.skippedByAdapter,
-        newVacancyIds: created.map((outcome) => outcome.vacancyId),
-        trustStatusCounts: result.trustStatusCounts,
-        durationMs: result.durationMs,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-
-      // Logged, not swallowed: a skipped source is invisible to the candidate
-      // unless someone can see why. The response carries it too.
-      console.error(`[intake] source "${adapter.sourceCode}" skipped: ${message}`);
-
-      sources.push({
-        sourceCode: adapter.sourceCode,
-        displayName: adapter.displayName,
-        attribution: adapter.attribution,
-        status: "failed",
-        error: message,
-        search: null,
-        received: 0,
-        ingested: 0,
-        created: 0,
-        updated: 0,
-        skippedByAdapter: 0,
-        newVacancyIds: [],
-        trustStatusCounts: {},
-        durationMs: now() - sourceStartedAt,
-      });
+      sources.push(summariseFailure(adapter, failure.message, now() - sourceStartedAt, failure.market));
     }
   }
 
@@ -325,6 +429,7 @@ export async function runIntakeAcrossSources(
     trustStatusCounts,
     durationMs: now() - startedAt,
     failedSources: sources.filter((source) => source.status === "failed").length,
+    ...(marketPlan.unusable.length > 0 ? { unusableMarkets: marketPlan.unusable } : {}),
     ...(stoppedOnDeadline ? { stoppedOnDeadline: true } : {}),
   };
 }

@@ -109,10 +109,17 @@ export interface ScheduledRefreshDeps {
   loadContext: (
     client: SupabaseClient,
     candidateId: string,
-  ) => Promise<{ keywords?: string; location?: string; country?: string }>;
+  ) => Promise<{ keywords?: string; location?: string; country?: string; countries?: string[] }>;
   runIntake: (
     client: SupabaseClient,
-    input: { sourceCodes: readonly string[]; keywords?: string; location?: string; country?: string; deadlineMs: number },
+    input: {
+      sourceCodes: readonly string[];
+      keywords?: string;
+      location?: string;
+      country?: string;
+      countries?: readonly string[];
+      deadlineMs: number;
+    },
   ) => Promise<RunIntakeFanOutResult>;
 }
 
@@ -266,6 +273,10 @@ export async function runScheduledDiscovery(
         keywords: context.keywords,
         location: context.location,
         country: context.country,
+        // Multi-market on the scheduled path too, so a candidate's cross-border
+        // markets refresh on the same schedule as everything else. Inert while this
+        // path only runs keyless sources - and correct the moment that changes.
+        countries: context.countries,
         deadlineMs: budget.perCandidateDeadlineMs,
       });
 

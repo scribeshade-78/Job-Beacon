@@ -25,6 +25,13 @@ export interface IntakeQueryContext {
   location?: string;
   /** ISO-3166 alpha-2, lower-cased for direct use as Adzuna's URL path segment. */
   country?: string;
+  /**
+   * The candidate's markets AS TYPED, for the market router to accept or reject.
+   *
+   * Not filtered to valid codes here - see loadIntakeQueryContext's return for why
+   * rejecting belongs to the router, which can report what it rejected.
+   */
+  countries: string[];
 }
 
 /**
@@ -223,5 +230,12 @@ export async function loadIntakeQueryContext(
     keywords,
     location,
     country: resolveCountry(preferences?.preferred_countries),
+    // THE RAW LIST, NOT THE FILTERED ONE - and that is deliberate.
+    // resolveCountry above accepts only a literal ISO-2 code, but the ROUTER is the
+    // right place to decide what is usable: it reports rejects back as
+    // unusableMarkets, whereas filtering them out here would drop a candidate's typo
+    // with no trace. Blank entries are dropped because they are not a value anyone
+    // typed.
+    countries: (preferences?.preferred_countries ?? []).filter((code) => code.trim().length > 0),
   };
 }

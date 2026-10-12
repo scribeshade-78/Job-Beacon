@@ -1,51 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 import { dispatchMarketFetches } from "./marketDispatch.js";
 import type { MarketFetch } from "./marketRouting.js";
-import type { DiscoveredVacancy } from "../ingestion/types.js";
-
-function vacancy(id: string): DiscoveredVacancy {
-  return { sourceVacancyId: id } as DiscoveredVacancy;
-}
 
 const GB: MarketFetch = { source: "adzuna", market: "GB", location: null };
 const AE: MarketFetch = { source: "serpapi", market: "AE", location: "United Arab Emirates" };
 const US: MarketFetch = { source: "adzuna", market: "US", location: null };
 
-describe("dispatchMarketFetches", () => {
-  it("merges what every market returned, in plan order", async () => {
-    const result = await dispatchMarketFetches(
-      { fetches: [GB, AE, US], unusable: [], serpapiSearchCost: 1 },
-      async (entry) => ({ vacancies: [vacancy(entry.market)], received: 1, skipped: 0 }),
-    );
+const plan = (...fetches: MarketFetch[]) => ({ fetches, unusable: [], serpapiSearchCost: 0 });
 
-    expect(result.vacancies.map((v) => v.sourceVacancyId)).toEqual(["GB", "AE", "US"]);
-    expect(result.received).toBe(3);
-    expect(result.skipped).toBe(0);
+describe("dispatchMarketFetches - generic over the caller's result type", () => {
+  it("returns each market's result WITH its entry, so the caller can merge as it needs", async () => {
+    // Approach (i): the fan-out's unit is runIntake (which PERSISTS and returns
+    // RunIntakeResult), not the adapter-level IntakeFetchResult. Being generic here is
+    // what keeps the reliability guard in ONE tested place instead of duplicating it.
+    const result = await dispatchMarketFetches(plan(GB, AE, US), async (entry) => ({ persisted: entry.market }));
+
+    expect(result.results).toEqual([
+      { entry: GB, result: { persisted: "GB" } },
+      { entry: AE, result: { persisted: "AE" } },
+      { entry: US, result: { persisted: "US" } },
+    ]);
     expect(result.failures).toEqual([]);
+    expect(result.stopped).toBe(false);
   });
 
-  it("RELIABILITY GUARD: one market failing does not cost the others their jobs", async () => {
-    // The whole point. SerpApi runs out of quota mid-loop, or Adzuna times out: the
-    // Adzuna jobs already fetched must still reach the candidate rather than the
-    // whole fan-out returning nothing.
+  it("RELIABILITY GUARD: one market failing does not cost the others their result", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const result = await dispatchMarketFetches(
-      { fetches: [GB, AE, US], unusable: [], serpapiSearchCost: 1 },
-      async (entry) => {
-        if (entry.market === "AE") {
-          throw new Error("SerpApi search failed: HTTP 429 — out of searches");
-        }
-        return { vacancies: [vacancy(entry.market)], received: 1, skipped: 0 };
-      },
-    );
+    const result = await dispatchMarketFetches(plan(GB, AE, US), async (entry) => {
+      if (entry.market === "AE") {
+        throw new Error("SerpApi search failed: HTTP 429 — out of searches");
+      }
+      return { persisted: entry.market };
+    });
 
-    expect(result.vacancies.map((v) => v.sourceVacancyId)).toEqual(["GB", "US"]);
+    expect(result.results.map((r) => r.entry.market)).toEqual(["GB", "US"]);
     expect(result.failures).toEqual([
       { source: "serpapi", market: "AE", message: "SerpApi search failed: HTTP 429 — out of searches" },
     ]);
-    // Logged, not silently dropped - a partial fan-out that says nothing about the
-    // missing market is the silent-fallback failure this codebase keeps removing.
     expect(errorSpy.mock.calls.some((call) => String(call[0]).includes("market fetch failed"))).toBe(true);
     errorSpy.mockRestore();
   });
@@ -54,42 +46,46 @@ describe("dispatchMarketFetches", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const attempted: string[] = [];
 
-    const result = await dispatchMarketFetches(
-      { fetches: [GB, AE, US], unusable: [], serpapiSearchCost: 1 },
-      async (entry) => {
-        attempted.push(entry.market);
-        if (entry.market === "AE") throw new Error("boom");
-        return { vacancies: [], received: 0, skipped: 0 };
-      },
-    );
+    const result = await dispatchMarketFetches(plan(GB, AE, US), async (entry) => {
+      attempted.push(entry.market);
+      if (entry.market === "AE") throw new Error("boom");
+      return entry.market;
+    });
 
     expect(attempted).toEqual(["GB", "AE", "US"]);
     expect(result.failures).toHaveLength(1);
     errorSpy.mockRestore();
   });
 
-  it("sums the counts across sources and reports EVERY failure, not just the first", async () => {
+  it("DEADLINE: stops before STARTING a market, never mid-fetch, and says it stopped", async () => {
+    // Same contract as the fan-out's own: an in-flight fetch always completes, so a
+    // budget that cut one off would be a lie. Checked per MARKET now, not per source,
+    // because one source can be several markets.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let clock = 0;
+    const attempted: string[] = [];
 
     const result = await dispatchMarketFetches(
-      { fetches: [GB, AE, US], unusable: [], serpapiSearchCost: 1 },
+      plan(GB, AE, US),
       async (entry) => {
-        if (entry.market !== "GB") throw new Error("down: " + entry.market);
-        return { vacancies: [], received: 7, skipped: 3 };
+        attempted.push(entry.market);
+        clock += 10;
+        return entry.market;
       },
+      { now: () => clock, deadline: 15 },
     );
 
-    expect(result.received).toBe(7);
-    expect(result.skipped).toBe(3);
-    expect(result.failures.map((f) => f.market)).toEqual(["AE", "US"]);
+    expect(attempted).toEqual(["GB", "AE"]);
+    expect(result.stopped).toBe(true);
+    expect(result.results.map((r) => r.entry.market)).toEqual(["GB", "AE"]);
     errorSpy.mockRestore();
   });
 
   it("does nothing at all for an empty plan", async () => {
     const call = vi.fn();
-    const result = await dispatchMarketFetches({ fetches: [], unusable: [], serpapiSearchCost: 0 }, call);
+    const result = await dispatchMarketFetches(plan(), call);
 
     expect(call).not.toHaveBeenCalled();
-    expect(result).toEqual({ vacancies: [], received: 0, skipped: 0, failures: [] });
+    expect(result).toEqual({ results: [], failures: [], stopped: false });
   });
 });

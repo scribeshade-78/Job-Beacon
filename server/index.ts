@@ -866,6 +866,10 @@ export function createApp(options: CreateAppOptions = {}) {
           keywords: queryContext.keywords,
           location: queryContext.location,
           country: queryContext.country,
+          // ONE FETCH PER MARKET. Without this the fan-out still receives a single
+          // country and every source stays on its single-fetch path, which is exactly
+          // why the routing layer was unreachable before this line existed.
+          countries: queryContext.countries,
         },
         {},
       );
