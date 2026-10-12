@@ -303,6 +303,35 @@ export function createApp(options: CreateAppOptions = {}) {
    * probe; and an absent key must report "failed" rather than throwing out of the
    * handler and turning a config problem into a 500.
    */
+  /**
+   * The compensating credit grant, retried ONCE and reported rather than swallowed.
+   *
+   * ONE retry, not a loop: a persistent failure here is a database problem that more
+   * attempts will not fix, and this runs inside a request that is already failing, so
+   * a retry storm is the last thing it needs. Returning false is the caller's signal
+   * to say so out loud.
+   *
+   * This replaced `.catch(() => undefined)`, which meant a failed refund left the
+   * candidate a credit short with no ledger row and no trace anywhere - a quota
+   * signed off against evidence that was never written.
+   */
+  async function releaseAiCreditWithRetry(
+    client: ReturnType<typeof resolveServiceClient>,
+    candidateId: string,
+    spendKey: string,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await releaseAiCredit(client, candidateId, spendKey, "generation_failed");
+        return true;
+      } catch {
+        // Fall through to the retry, then report the failure to the caller.
+      }
+    }
+
+    return false;
+  }
+
   async function probeSupabase(): Promise<"ok" | "failed"> {
     try {
       const result = (await Promise.race([
@@ -1456,11 +1485,28 @@ export function createApp(options: CreateAppOptions = {}) {
           );
         } catch (error) {
           // A COMPENSATING GRANT, never a delete of the spend: the failed run stays
-          // visible in the ledger and the pair reconciles. Swallowed here because the
-          // original generation error is the one worth reporting.
-          await releaseAiCredit(client, request.user!.id, reservationKey, "generation_failed").catch(
-            () => undefined,
-          );
+          // visible in the ledger and the pair reconciles.
+          //
+          // AND NEVER SILENT. A refund that cannot be written leaves the candidate a
+          // credit short with nothing in the ledger to show it, so the failure is
+          // logged with a greppable marker AND returned to the caller rather than
+          // being reported as an ordinary generation failure.
+          const refunded = await releaseAiCreditWithRetry(client, request.user!.id, reservationKey);
+
+          if (!refunded) {
+            console.error(
+              "[usage] CREDIT REFUND FAILED - the candidate is one credit short and the ledger does not show it.",
+              { candidateId: request.user!.id, spendKey: reservationKey },
+            );
+
+            response.status(500).json({
+              code: "CREDIT_REFUND_FAILED",
+              error:
+                "We couldn't prepare your preview, and we couldn't confirm that your credit was returned. It will be reconciled — please contact support if it does not reappear.",
+            });
+            return;
+          }
+
           throw error;
         }
 
@@ -2727,21 +2773,42 @@ export function createApp(options: CreateAppOptions = {}) {
     try {
       const client = resolveServiceClient();
 
+      // THE LIMIT IS RESOLVED FIRST, AND A NULL ONE REFUSES THE WHOLE REQUEST.
+      //
+      // loadDailyDiscoveryLimit returns null when the plan row or the column is
+      // missing, and treating that as "not exhausted" switched enforcement off
+      // SILENTLY: the route answered 200 and kept recording, so a quota nobody could
+      // evaluate behaved exactly like an unlimited one. That is the failure this
+      // whole phase exists to remove.
+      //
+      // THE CONSEQUENCE IS DELIBERATE AND BLUNT. A missing plan_limits row now stops
+      // discovery for EVERY candidate rather than for one who is over quota, which
+      // is the point: a configuration gap that halts the feature is found in
+      // minutes, while one that merely relaxes a limit is never found at all.
+      const limit = await loadDailyDiscoveryLimit(client, request.user!.id);
+
+      if (limit === null) {
+        console.error(
+          "[usage] discovery limit UNRESOLVED - refusing the write. " +
+            "A plan_limits row, or its max_daily_discovery_jobs column, is missing.",
+          { candidateId: request.user!.id },
+        );
+
+        response.status(503).json({
+          code: "DISCOVERY_LIMIT_UNRESOLVED",
+          error:
+            "We can't record discovery usage: no daily allowance is configured for your plan. That is a fault on our side, and it stops here rather than being ignored.",
+        });
+        return;
+      }
+
       // ALWAYS RECORD, EVEN WHEN OVER THE ALLOWANCE. The ledger is the audit trail,
       // and refusing the write at exactly the point over-consumption begins would
       // blind it at the one moment it matters. The refusal is reported to the
       // caller; it is not applied to the recording.
       const result = await recordDiscoverySurfaces(client, request.user!.id, vacancyIds);
-
-      const limit = await loadDailyDiscoveryLimit(client, request.user!.id);
       const consumed = await loadDiscoveryConsumption(client, request.user!.id);
-
-      // A NULL LIMIT IS A MISSING plan_limits ROW, NOT A SPENT ALLOWANCE, so it is
-      // not exhausted. This is the deliberate opposite of the credit check, which
-      // throws rather than defaulting: there the failure mode is unmetered SPEND,
-      // here it would be switching discovery off for every candidate in order to be
-      // strict about one who is merely over quota.
-      const exhausted = limit !== null && consumed >= limit;
+      const exhausted = consumed >= limit;
 
       response.set("Cache-Control", "no-store");
       response.status(exhausted ? 429 : 200).json({

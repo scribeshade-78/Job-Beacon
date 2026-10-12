@@ -24,6 +24,14 @@ import {
   AttemptNotPreviewedError,
   generateAttemptPreview,
 } from "./applications/attemptReview.js";
+// The ledger is mocked at the module seam above; importing the mocks here is what
+// lets each test say which fallback it is exercising.
+import {
+  loadDailyDiscoveryLimit,
+  loadDiscoveryConsumption,
+  recordDiscoverySurfaces,
+  releaseAiCredit,
+} from "./usage/ledger.js";
 import { listPlans } from "./billing/plans.js";
 import { createCheckoutSession, readStripeConfig } from "./billing/stripe.js";
 import { cancelCandidateSubscription, getCandidateSubscription } from "./billing/subscription.js";
@@ -4373,5 +4381,79 @@ describe("POST /api/opportunities/ranking-refresh", () => {
         expect(await response.json()).toEqual({ error: "Failed to refresh preference ranking" });
       },
     );
+  });
+});
+
+describe("Proposal B - a fallback that cannot be evaluated refuses, loudly", () => {
+  const verifier = async (token: string) =>
+    token === "valid-test-token" ? { id: "user-123", email: "person@example.com", aal: "aal1" as const } : null;
+
+  const VACANCY = "11111111-1111-4111-8111-111111111111";
+  const ATTEMPT = "22222222-2222-4222-8222-222222222222";
+
+  it("B2: refuses with 503 AND logs, when the daily discovery limit cannot be resolved", async () => {
+    // The state this replaces: a null limit was read as "not exhausted", so the route
+    // answered 200 and kept recording. A quota nobody can evaluate behaved exactly
+    // like an unlimited one, silently.
+    vi.mocked(loadDailyDiscoveryLimit).mockResolvedValue(null);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/usage/discovery-surface`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+        body: JSON.stringify({ vacancyIds: [VACANCY] }),
+      });
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: "DISCOVERY_LIMIT_UNRESOLVED" });
+    });
+
+    expect(
+      errorSpy.mock.calls.some((call) => String(call[0]).includes("discovery limit UNRESOLVED")),
+    ).toBe(true);
+    errorSpy.mockRestore();
+  });
+
+  it("B2: still records normally when the limit IS resolvable, so this is not a blanket refusal", async () => {
+    vi.mocked(loadDailyDiscoveryLimit).mockResolvedValue(50);
+    vi.mocked(recordDiscoverySurfaces).mockResolvedValue({ recorded: 1, duplicates: 0 });
+    vi.mocked(loadDiscoveryConsumption).mockResolvedValue(1);
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/usage/discovery-surface`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+        body: JSON.stringify({ vacancyIds: [VACANCY] }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ recorded: 1, consumed: 1, limit: 50, exhausted: false });
+    });
+  });
+
+  it("B3: a failed refund is LOGGED and SURFACED, not swallowed by an empty catch", async () => {
+    // The state this replaces: `releaseAiCredit(...).catch(() => undefined)`. A refund
+    // that could not be written left the candidate a credit short with no ledger row
+    // and no trace anywhere, and the caller got an ordinary generation failure.
+    vi.mocked(releaseAiCredit).mockRejectedValue(new Error("insert denied"));
+    vi.mocked(generateAttemptPreview).mockRejectedValue(new Error("model unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/candidate/attempts/${ATTEMPT}/generate-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer valid-test-token" },
+        body: JSON.stringify({}),
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ code: "CREDIT_REFUND_FAILED" });
+    });
+
+    expect(
+      errorSpy.mock.calls.some((call) => String(call[0]).includes("CREDIT REFUND FAILED")),
+    ).toBe(true);
+    errorSpy.mockRestore();
   });
 });
