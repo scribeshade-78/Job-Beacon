@@ -94,3 +94,108 @@ export function routeMarkets(codes: readonly string[]): {
 
   return { adzuna, serpapi, unusable };
 }
+
+/**
+ * The English display name for an ISO-2 region code, or null.
+ *
+ * WHY A NAME AND NOT THE CODE. SerpApi's `location` is free text handed to Google,
+ * so a bare "AE" is unstructured input the API has to guess at - it could match a
+ * company called AE rather than the country. A name is unambiguous, and this is
+ * deterministic: no network call, so resolving a name cannot fail for a reason
+ * unrelated to the request and cannot spend a search.
+ */
+export function isoCountryName(code: string): string | null {
+  const normalized = code.trim().toUpperCase();
+
+  if (!/^[A-Z]{2}$/.test(normalized)) {
+    return null;
+  }
+
+  try {
+    const name = new Intl.DisplayNames(["en"], { type: "region" }).of(normalized);
+
+    if (typeof name !== "string" || name.length === 0) {
+      return null;
+    }
+
+    // INTL ANSWERS UNHELPFULLY FOR A CODE IT DOES NOT KNOW: it echoes the code back,
+    // or returns the literal "Unknown Region". Neither is a country name, and
+    // sending either to a search API is worse than sending nothing at all.
+    if (name.toUpperCase() === normalized || name === "Unknown Region") {
+      return null;
+    }
+
+    return name;
+  } catch {
+    // Intl.DisplayNames is absent in a stripped ICU build. Returning null keeps that
+    // a routing gap rather than a crash in the middle of a fan-out.
+    return null;
+  }
+}
+
+export interface MarketFetch {
+  source: MarketSource;
+  /** ISO-2, upper case - what Adzuna takes as its URL path segment. */
+  market: string;
+  /** For serpapi, the free-text location to send. For adzuna, null: it takes the code. */
+  location: string | null;
+}
+
+export interface MarketPlan {
+  fetches: MarketFetch[];
+  /** Entries that are not usable markets, in the order they arrived. */
+  unusable: string[];
+  /** SerpApi searches this plan will cost - surfaced BEFORE the loop spends them. */
+  serpapiSearchCost: number;
+}
+
+/**
+ * The whole loop's work, decided before a single request is made.
+ *
+ * COST BEFORE ACTION. `serpapiSearchCost` is knowable here, so a caller can cap it,
+ * report it, or refuse before spending from a 100-per-month budget. A loop that
+ * discovered the cost as it went could only report it afterwards.
+ *
+ * DEDUPLICATED, because "AE", "ae" and " AE " are one market and must not cost three
+ * searches. And an entry that routes to SerpApi but has no name is NOT sent as a
+ * code: it is reported unusable, on the grounds that a request we cannot phrase
+ * correctly is worse than a request we do not make.
+ */
+export function planMarketFetch(codes: readonly string[]): MarketPlan {
+  const fetches: MarketFetch[] = [];
+  const unusable: string[] = [];
+  const seen = new Set<string>();
+  let serpapiSearchCost = 0;
+
+  for (const raw of codes) {
+    const normalized = raw.trim().toUpperCase();
+    const source = routeMarket(normalized);
+
+    if (source === null) {
+      unusable.push(raw);
+      continue;
+    }
+
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+
+    if (source === "adzuna") {
+      fetches.push({ source, market: normalized, location: null });
+      continue;
+    }
+
+    const location = isoCountryName(normalized);
+
+    if (location === null) {
+      unusable.push(raw);
+      continue;
+    }
+
+    fetches.push({ source, market: normalized, location });
+    serpapiSearchCost += 1;
+  }
+
+  return { fetches, unusable, serpapiSearchCost };
+}
