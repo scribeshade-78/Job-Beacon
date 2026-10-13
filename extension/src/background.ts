@@ -69,6 +69,27 @@ async function authedFetch(path: string, init?: RequestInit): Promise<unknown> {
  * response carries no submission permission, only the data and the credentials Trip 2 will
  * present.
  */
+
+/**
+ * Records the candidate's approval on the attempt itself.
+ *
+ * THE EXTENSION DOES NOT DECIDE THAT A FORM WAS REVIEWED - the server records it. This calls
+ * the same endpoint the web app's review screen uses, which stamps
+ * application_attempts.review_approved_at. authorizeSubmission reads that column and refuses
+ * with NOT_APPROVED if it is null, so the popup button cannot assert an approval the server
+ * has no record of: a buggy or hostile client can press this, but it cannot fake the row.
+ *
+ * IT IS DELIBERATELY A SEPARATE CALL FROM authorizeSubmit, in that order. Approval is a
+ * statement about the form; authorization is a statement about the submission. Collapsing
+ * them into one round trip would mean the server could never tell which one it was granting.
+ */
+async function approveAttempt(attemptId: string): Promise<unknown> {
+  return authedFetch("/api/candidate/attempts/" + encodeURIComponent(attemptId) + "/approve", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 async function prepareFill(attemptId: string): Promise<unknown> {
   return authedFetch("/api/extension/auto-apply/fill-payload?attemptId=" + encodeURIComponent(attemptId));
 }
@@ -177,6 +198,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     type !== "SIGN_OUT" &&
     type !== "FETCH_PROFILE" &&
     type !== "PREPARE_FILL" &&
+    type !== "APPROVE_ATTEMPT" &&
     type !== "AUTHORIZE_SUBMIT" &&
     type !== "REPORT_OUTCOME"
   ) {
@@ -197,6 +219,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         case "FETCH_PROFILE":
           sendResponse({ ok: true, profile: await fetchProfile() });
+          return;
+        case "APPROVE_ATTEMPT":
+          sendResponse({ ok: true, result: await approveAttempt(String(message.attemptId ?? "")) });
           return;
         case "PREPARE_FILL":
           sendResponse({ ok: true, payload: await prepareFill(String(message.attemptId ?? "")) });

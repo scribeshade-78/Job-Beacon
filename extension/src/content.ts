@@ -20,6 +20,7 @@
  * auto-filler destroys an answer the candidate typed themselves.
  */
 import type { CandidateProfile, FillReport } from "./lib/types.js";
+import { classifySubmissionEvidence, readAttemptId, type EvidenceInput } from "./lib/loop.js";
 
 /**
  * The resume the server has authorised for this fill, if any.
@@ -321,5 +322,234 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   } catch (error) {
     sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
+  return true;
+});
+
+/* ===========================================================================
+ * THE LOOP. Added below the filler, and it never clicks anything.
+ *
+ * THE CANDIDATE PRESSES SUBMIT. This file's original invariant - there is no submit here and
+ * there must not be - is intact: we WATCH for the click, we never make it. A form filled by
+ * pattern-matching is exactly the kind of thing that is confidently wrong, so the one
+ * irreversible action stays with the person who can see the form.
+ *
+ * WHAT WE DO INSTEAD: on load, if the Tracker armed this page, fill it and hold the lease.
+ * Then listen, in the capture phase, for a click on a submit control. After the candidate
+ * submits, wait for evidence to appear, and report what we SAW - never what we hoped.
+ * ======================================================================== */
+
+/** Held in memory only, for the lifetime of the page. Never written to storage. */
+let armedAttemptId: string | null = null;
+let armedLeaseToken: string | null = null;
+let outcomeReported = false;
+
+/**
+ * Urls a portal redirects to when it has accepted an application. Conservative on purpose:
+ * a false positive here reports a submission that did not happen, which is the one mistake
+ * that leaves a candidate believing something was sent.
+ */
+const CONFIRMATION_URL = [/\/confirmation/i, /\/application\/requested/i, /\/applied/i, /\/thank[-_]?you/i];
+
+/** Text a portal renders once it has accepted. */
+const CONFIRMATION_TEXT = [
+  /application (?:was |has been )?(?:submitted|received|sent)/i,
+  /thank you for applying/i,
+  /successfully applied/i,
+];
+
+/**
+ * What the page shows, if anything. Reads only; it never clicks or navigates.
+ *
+ * BOUNDED TO VISIBLE TEXT of the document body, and no more: a portal's page can carry
+ * unrelated marketing copy containing the word "submit", and matching that would report a
+ * confirmation that never happened.
+ */
+function readConfirmationEvidence(): EvidenceInput {
+  const href = location.href;
+  const fromUrl = CONFIRMATION_URL.some((pattern) => pattern.test(href)) ? href : undefined;
+
+  let fromText: string | undefined;
+  const body = document.body;
+  if (body) {
+    const text = (body.innerText ?? "").slice(0, 20000);
+    for (const pattern of CONFIRMATION_TEXT) {
+      const match = text.match(pattern);
+      if (match) {
+        fromText = match[0];
+        break;
+      }
+    }
+  }
+
+  return { confirmationUrl: fromUrl, confirmationText: fromText };
+}
+
+function isSubmitControl(element: Element): boolean {
+  const tag = element.tagName.toLowerCase();
+
+  if (tag === "input") {
+    return (element as HTMLInputElement).type === "submit";
+  }
+  if (tag !== "button") {
+    return false;
+  }
+  const button = element as HTMLButtonElement;
+  if (button.type === "submit") {
+    return true;
+  }
+  // NO SEPARATE CHECK FOR A MISSING type ATTRIBUTE: HTMLButtonElement.type already reports
+  // "submit" for a bare button inside a form, which is the default portals rely on. An
+  // earlier version tested button.type === "" after the return above, which TypeScript
+  // correctly flagged as unreachable.
+  const label = (button.innerText || button.getAttribute("aria-label") || "").trim();
+  return /^(submit|apply|send application|send)$/i.test(label);
+}
+
+/**
+ * Waits for the portal to say something, then reports it.
+ *
+ * IT DOES NOT ASSUME THE CLICK WORKED. It polls for a URL change or for confirmation text
+ * for as long as the budget allows; if neither appears, the classifier returns
+ * needs_verification and the Tracker shows "Action Required: Verify Submission". That is the
+ * honest answer, and it is deliberately different from reporting success.
+ */
+async function watchForOutcome(deadlineMs: number): Promise<void> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < deadlineMs) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const evidence = readConfirmationEvidence();
+    if (evidence.confirmationUrl !== undefined || evidence.confirmationText !== undefined) {
+      break;
+    }
+  }
+
+  if (outcomeReported || armedAttemptId === null || armedLeaseToken === null) {
+    return;
+  }
+
+  let classification;
+  try {
+    classification = classifySubmissionEvidence(readConfirmationEvidence());
+  } catch (error) {
+    classification = classifySubmissionEvidence({
+      error: { message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+
+  outcomeReported = true;
+
+  await chrome.runtime.sendMessage({
+    type: "REPORT_OUTCOME",
+    payload: {
+      attemptId: armedAttemptId,
+      leaseToken: armedLeaseToken,
+      outcome: classification.outcome,
+      evidence: classification.evidence ?? null,
+      error: classification.error ?? null,
+    },
+  });
+}
+
+/**
+ * Trip 1, on load, and only when the Tracker armed this page.
+ *
+ * NO jb_attempt_id MEANS NOTHING HAPPENS. A candidate browsing a job board normally gets no
+ * fill, no prompt and no network call - which is also why this cannot fill the wrong form.
+ */
+async function armFromUrl(): Promise<void> {
+  const attemptId = readAttemptId(location.href);
+  if (attemptId === undefined) {
+    return;
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "PREPARE_FILL", attemptId });
+    const payload = response?.payload as { allowed?: boolean; leaseToken?: string; fill?: { profile?: CandidateProfile } } | null;
+
+    if (!response?.ok || !payload?.allowed || typeof payload.leaseToken !== "string") {
+      // A refusal is not an error: the attempt may already be sent, or the plan may be
+      // out of allowance. Nothing is filled, and the candidate is not interrupted.
+      return;
+    }
+
+    armedAttemptId = attemptId;
+    armedLeaseToken = payload.leaseToken;
+
+    if (payload.fill?.profile) {
+      fillForm({ profile: payload.fill.profile });
+    }
+  } catch {
+    // The worker can be asleep, or the session expired. Either way, fill nothing.
+  }
+}
+
+// CAPTURE PHASE, so the click is seen even when the portal stops propagation on its own
+// handler - a very common pattern on application forms.
+document.addEventListener(
+  "click",
+  (event) => {
+    if (armedAttemptId === null || outcomeReported) {
+      return;
+    }
+    const target = event.target as Element | null;
+    if (target === null) {
+      return;
+    }
+    // A click can land on a span inside the button.
+    const control = target.closest("button, input[type=submit]") ?? target;
+    if (!isSubmitControl(control)) {
+      return;
+    }
+    void watchForOutcome(20000);
+  },
+  true,
+);
+
+/* ===========================================================================
+ * THE APPROVAL HANDLER. The popup asks; this script performs.
+ *
+ * THE LEASE TOKEN NEVER LEAVES THIS CONTEXT. Trip 1 minted it here, and Trip 2 needs it, so
+ * the popup asks the page to authorize rather than holding the credential itself. The popup
+ * owns the UI and this owns the lease - one copy, in the context that already had it.
+ *
+ * THE ORDER IS THE DESIGN: approve, THEN authorize. The first writes review_approved_at on
+ * the attempt; the second reads it. Reversed, a review_before_submit candidate would be
+ * refused with NOT_APPROVED because the server had no record of an approval yet.
+ * ======================================================================== */
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== "JB_APPROVE") {
+    return false;
+  }
+
+  void (async () => {
+    try {
+      if (armedAttemptId === null || armedLeaseToken === null) {
+        sendResponse({ ok: false, error: "This page is not armed for an application." });
+        return;
+      }
+
+      // 1. The server records the approval. It reads the row, not our word for it.
+      const approval = await chrome.runtime.sendMessage({ type: "APPROVE_ATTEMPT", attemptId: armedAttemptId });
+      if (!approval?.ok) {
+        sendResponse({ ok: false, error: approval?.error ?? "Could not record the approval." });
+        return;
+      }
+
+      // 2. Only now is a submission token minted. Nothing has been sent yet - the candidate
+      //    still presses submit on the page, and this script only watches for it.
+      const authorized = await chrome.runtime.sendMessage({
+        type: "AUTHORIZE_SUBMIT",
+        attemptId: armedAttemptId,
+        leaseToken: armedLeaseToken,
+      });
+
+      const result = authorized?.result as { allowed?: boolean; refusal?: string; reasonCode?: string } | null;
+      sendResponse({ ok: true, allowed: result?.allowed === true, refusal: result?.refusal, reasonCode: result?.reasonCode });
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
+
   return true;
 });

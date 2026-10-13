@@ -21,9 +21,16 @@ declare namespace chrome {
       ok: boolean;
       profile?: unknown;
       report?: unknown;
+  /** JB_APPROVE: whether the server authorised the submission after the approval. */
+  allowed?: boolean;
+  /** JB_APPROVE: why it did not, when allowed is false. */
+  refusal?: string;
+  reasonCode?: string;
       session?: unknown;
       error?: string;
-    }
+      payload?: unknown;
+  result?: unknown;
+}
     function sendMessage(message: unknown): Promise<MessageReply>;
     namespace onMessage {
       function addListener(
@@ -52,7 +59,9 @@ declare namespace chrome {
   }
   namespace tabs {
     function query(query: { active: boolean; currentWindow: boolean }): Promise<{ id?: number; url?: string }[]>;
-    function sendMessage(tabId: number, message: unknown): Promise<{ ok: boolean; report?: unknown; error?: string }>;
+    // Shares MessageReply with runtime.sendMessage. It used to declare its own inline
+    // shape, so widening the shared one silently did nothing for every tabs reply.
+    function sendMessage(tabId: number, message: unknown): Promise<runtime.MessageReply>;
     namespace onUpdated {
       function addListener(
         listener: (tabId: number, change: unknown, tab: { url?: string }) => void,

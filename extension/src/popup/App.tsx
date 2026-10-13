@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SessionInfo } from "../lib/types.js";
+import { readAttemptId } from "../lib/loop.js";
 
 /**
  * The popup has two faces: sign in, or auto-fill.
@@ -19,6 +20,10 @@ export function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  // The attempt this tab was opened for, or null. Read from the tab's URL, which the Tracker
+  // tagged; a page opened normally has none and the approval block simply does not render.
+  const [armed, setArmed] = useState<string | null>(null);
+  const [approved, setApproved] = useState(false);
   const [status, setStatus] = useState<{ tone: "idle" | "ok" | "error"; text: string }>({
     tone: "idle",
     text: "Open a job application form, then press Auto-Fill.",
@@ -33,7 +38,57 @@ export function App() {
         }
       })
       .finally(() => setChecking(false));
+
+    void (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.url) {
+        setArmed(readAttemptId(tab.url) ?? null);
+      }
+    })();
   }, []);
+
+  /**
+   * The candidate's explicit approval, and only then a submission token.
+   *
+   * THE ORDER IS THE DESIGN AND IT IS ENFORCED SERVER-SIDE. This records the approval on the
+   * attempt, then authorizes - two calls, in that order. authorizeSubmission refuses with
+   * NOT_APPROVED when application_attempts.review_approved_at is null, so a client that
+   * skipped the first call would be refused rather than trusted.
+   *
+   * IT DOES NOT SUBMIT. The candidate presses submit on the page themselves; the content
+   * script only watches for the click and reports what the portal said afterwards.
+   */
+  async function approveAndAuthorize() {
+    setBusy(true);
+    setStatus({ tone: "idle", text: "Recording your approval..." });
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        throw new Error("No active tab.");
+      }
+
+      const reply = await chrome.tabs.sendMessage(tab.id, { type: "JB_APPROVE" });
+
+      if (!reply?.ok) {
+        throw new Error(reply?.error ?? "The page could not complete the approval.");
+      }
+
+      if (!reply.allowed) {
+        // A refusal carries a reason code from the server, which is more useful than a
+        // generic failure: the attempt may already be sent, or the allowance may be spent.
+        setStatus({ tone: "error", text: "Not ready to submit: " + String(reply.refusal ?? "refused") + "." });
+        return;
+      }
+
+      setApproved(true);
+      setStatus({ tone: "ok", text: "Approved. Review the form, then press the site's submit button." });
+    } catch (error) {
+      setStatus({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function signIn() {
     setBusy(true);
@@ -183,14 +238,33 @@ export function App() {
           </button>
         </>
       ) : (
-        <button
-          type="button"
-          onClick={() => void autoFill()}
-          disabled={busy}
-          className="rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-        >
-          {busy ? "Filling..." : "Auto-Fill Page"}
-        </button>
+        <>
+          {armed !== null ? (
+            <div className="rounded-control border border-ios-separator bg-ios-bg p-2.5">
+              <p className="text-xs font-medium">Application ready to review</p>
+              <p className="mt-1 text-[11px] text-ios-text-secondary">
+                Check every answer below, then approve. We never press submit for you.
+              </p>
+              <button
+                type="button"
+                onClick={() => void approveAndAuthorize()}
+                disabled={busy || approved}
+                className="mt-2 w-full rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                {approved ? "Approved" : busy ? "Approving..." : "Approve this application"}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void autoFill()}
+              disabled={busy}
+              className="rounded-control bg-ios-blue-button px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {busy ? "Filling..." : "Auto-Fill Page"}
+            </button>
+          )}
+        </>
       )}
 
       <p
