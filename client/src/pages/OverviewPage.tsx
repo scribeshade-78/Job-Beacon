@@ -1,4 +1,5 @@
 import { SetupChecklist } from "../components/SetupChecklist";
+import { AutoApplyLimitsPanel } from "../panels/AutoApplyLimitsPanel";
 import { AutomationPanel } from "../panels/AutomationPanel";
 import { ActionRequiredPanel } from "../panels/ActionRequiredPanel";
 import { TodayPanel } from "../panels/TodayPanel";
@@ -37,6 +38,7 @@ export function OverviewPage({ candidateId, ready }: OverviewPageProps) {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-4">{ready && candidateId && <AutomationPanel candidateId={candidateId} />}</div>
+        <div className="lg:col-span-4">{ready && <AutoApplyLimitsPanel />}</div>
 
         <div className="lg:col-span-8">{ready && <TodayPanel />}</div>
 

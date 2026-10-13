@@ -2752,9 +2752,15 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/api/billing/subscription", requireAuth, async (request: AuthenticatedRequest, response) => {
     try {
       const client = resolveServiceClient();
-      const [subscription, entitlements] = await Promise.all([
+      const [subscription, entitlements, usage] = await Promise.all([
         getCandidateSubscription(client, request.user!.id),
         evaluateEntitlements(client, request.user!.id),
+        // THE REMAINDER NEEDS THE TOTAL, AND entitlements DOES NOT CARRY IT. The evaluated
+        // dimensions expose usage per dimension; "consumed, across both destinations" is
+        // not one of them, so the unattributed count (total - india - us) could not be
+        // derived in the browser. One extra read on a settings page is cheaper than
+        // teaching evaluateEntitlements to return a row its other ten callers ignore.
+        client.rpc("candidate_entitlement_usage", { p_candidate_id: request.user!.id }),
       ]);
 
       // WHICH PROVIDERS ARE CONFIGURED rides along with the subscription, and it
@@ -2766,6 +2772,15 @@ export function createApp(options: CreateAppOptions = {}) {
       response.status(200).json({
         subscription,
         entitlements,
+        // THE UNATTRIBUTED REMAINDER IS REAL. 265 vacancies carry a NULL country, so
+        // india + us is routinely LESS than consumed - the difference is attempts we
+        // cannot attribute to a destination, and the card shows it rather than hiding a
+        // total that does not add up.
+        autoApplyUsage: {
+          consumedThisPeriod: (usage.data as { consumed_applications_this_period?: number } | null)?.consumed_applications_this_period ?? 0,
+          indiaConsumed: (usage.data as { consumed_applications_india_this_period?: number } | null)?.consumed_applications_india_this_period ?? 0,
+          usConsumed: (usage.data as { consumed_applications_us_this_period?: number } | null)?.consumed_applications_us_this_period ?? 0,
+        },
         providers: {
           razorpayConfigured: readRazorpayConfig() !== null,
           stripeConfigured: readStripeConfig() !== null,
