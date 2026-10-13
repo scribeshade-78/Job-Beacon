@@ -110,6 +110,7 @@ import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
 import { loadExtensionProfile } from "./extension/profile.js";
 import { authorizeSubmission } from "./applications/autoApplyClaim.js";
+import { claimFillForExtension } from "./applications/claimFillForExtension.js";
 import { reportAutoApplyOutcome } from "./applications/reportAutoApplyOutcome.js";
 import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
 import {
@@ -1406,6 +1407,55 @@ export function createApp(options: CreateAppOptions = {}) {
         const message = error instanceof Error ? error.message : String(error);
         console.error("[auto-apply] authorize failed:", message);
         response.status(500).json({ error: "Could not authorize this submission." });
+      }
+    },
+  );
+  // ---------------------------------------------------------------------------
+  // GET /api/extension/auto-apply/fill-payload
+  //
+  // TRIP 1. Claims an attempt for filling and returns what the extension needs to populate
+  // a form: the candidate's confirmed profile, the attempt id, and A LEASE TOKEN.
+  //
+  // IT IS NOT READ-ONLY, AND THAT IS THE POINT. It was specified as a read, but
+  // authorizeSubmission requires an attemptId and a leaseToken, and nothing else hands a
+  // client one - so a read-only version would return the data, let the candidate review it,
+  // and leave Trip 2 with no credential. The loop would look complete and submit nothing.
+  //
+  // IT DOES NOT AUTHORIZE A SUBMISSION. A lease means 'this worker may prepare a form'.
+  // Sending still requires every gate to pass again at Trip 2, with review approval.
+  //
+  // Like the other two, this route adds no rule of its own.
+  // ---------------------------------------------------------------------------
+  app.get(
+    "/api/extension/auto-apply/fill-payload",
+    requireAuth,
+    autoApplyAuthorizeRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const attemptId = typeof request.query.attemptId === "string" ? request.query.attemptId : "";
+
+      if (!UUID_PATTERN.test(attemptId)) {
+        response.status(400).json({ error: "attemptId must be a uuid." });
+        return;
+      }
+
+      try {
+        const result = await claimFillForExtension(resolveServiceClient(), {
+          candidateId: request.user!.id,
+          attemptId,
+        });
+
+        response.set("Cache-Control", "no-store");
+
+        if (result.allowed) {
+          response.status(200).json(result);
+          return;
+        }
+
+        response.status(result.refusal === "NOT_FOUND" ? 404 : 409).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[auto-apply] fill payload failed:", message);
+        response.status(500).json({ error: "Could not prepare a form for this application." });
       }
     },
   );
