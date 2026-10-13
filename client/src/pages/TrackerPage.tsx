@@ -28,7 +28,23 @@ import type { ResponseCategory } from "../../../shared/priorityScore";
  * interview happened - only a classified message can.
  */
 
-type TrackerStage = "applied" | "interview" | "offer" | "rejection" | "in_progress" | "archived";
+type TrackerStage =
+  | "applied"
+  | "interview"
+  | "offer"
+  | "rejection"
+  | "in_progress"
+  | "archived"
+  /**
+   * THE HONEST NAME FOR A STUCK APPLICATION.
+   *
+   * An attempt sits in 'submitting' when we believe it was sent but hold no receipt - the
+   * extension reported success with nothing that proves it. Left as it was, that rendered
+   * as "In progress", which reads as "working on it" when the truth is "we do not know,
+   * and you should check". It is the one status where the candidate can still act, so it
+   * gets the loudest label.
+   */
+  | "needs_verification";
 
 const STAGE: Record<TrackerStage, { label: string; badge: string; dot: string }> = {
   applied: {
@@ -61,6 +77,11 @@ const STAGE: Record<TrackerStage, { label: string; badge: string; dot: string }>
     badge: "border-ios-separator bg-ios-bg text-ios-text-secondary",
     dot: "bg-ios-separator",
   },
+  needs_verification: {
+    label: "Action Required",
+    badge: "border-status-blocked/40 bg-status-blocked/10 text-status-blocked-fg",
+    dot: "bg-status-blocked",
+  },
 };
 
 const FILTERS: Array<{ id: "all" | TrackerStage; label: string }> = [
@@ -70,6 +91,7 @@ const FILTERS: Array<{ id: "all" | TrackerStage; label: string }> = [
   { id: "offer", label: "Offer" },
   { id: "rejection", label: "Rejection" },
   { id: "in_progress", label: "In progress" },
+  { id: "needs_verification", label: "Action Required" },
   { id: "archived", label: "Archived" },
 ];
 
@@ -99,6 +121,15 @@ function stageOf(application: ApplicationSummary): TrackerStage {
   const statuses = application.attempts.map((attempt) => attempt.status);
 
   if (statuses.includes("cancelled")) return "archived";
+
+  // CHECKED BEFORE acceptedEvidence, because 'submitting' is the state an unverified
+  // extension report leaves behind and it must not be filtered into "In progress".
+  if (statuses.includes("submitting")) return "needs_verification";
+
+  // 'action_required' carries its own label already ("Needs your input"); it is surfaced
+  // as Action Required because that is what it asks of the candidate.
+  if (statuses.includes("action_required")) return "needs_verification";
+
   // "succeeded" is a receipt-backed acceptance on the attempt itself, which is what
   // makes an application Applied - the status alone is a claim the worker made.
   if (application.attempts.some((attempt) => attempt.acceptedEvidence)) return "applied";
@@ -359,6 +390,17 @@ export function TrackerPage() {
                   </p>
                 </div>
               </div>
+
+              {selected.stage === "needs_verification" ? (
+                <p
+                  role="status"
+                  className="mt-4 rounded-control border border-status-blocked/40 bg-status-blocked/10 p-3 text-sm text-status-blocked-fg"
+                >
+                  <span className="font-semibold">Action Required: Verify Submission.</span>{" "}
+                  We could not confirm this application was received. Check the employer&apos;s site or your
+                  email, and apply again if it is not there.
+                </p>
+              ) : null}
 
               {selected.application.ineligibleReason !== null ? (
                 <p className="mt-4 rounded-control border border-status-under-review/40 bg-status-under-review/10 p-3 text-xs text-status-under-review-fg">

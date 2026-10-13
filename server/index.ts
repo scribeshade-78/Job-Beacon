@@ -110,6 +110,7 @@ import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
 import { loadExtensionProfile } from "./extension/profile.js";
 import { authorizeSubmission } from "./applications/autoApplyClaim.js";
+import { reportAutoApplyOutcome } from "./applications/reportAutoApplyOutcome.js";
 import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
 import {
   AGENT_ACTION_RATE_LIMIT_MAX,
@@ -1408,6 +1409,61 @@ export function createApp(options: CreateAppOptions = {}) {
       }
     },
   );
+  // ---------------------------------------------------------------------------
+  // POST /api/extension/auto-apply/outcome
+  //
+  // THE LAST TRIP. The extension reports what actually happened when it submitted.
+  //
+  // LIKE THE AUTHORIZE ROUTE, THIS ADDS NO RULE OF ITS OWN. Which outcomes exist, what
+  // counts as proof, whether the attempt may report at all, and what each branch writes
+  // are all decided by reportAutoApplyOutcome. A route that decided any of that would be a
+  // second place an application could be marked as sent.
+  //
+  // Same rate limit as authorizing, for the same reason: this is the other half of an
+  // irreversible act.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/extension/auto-apply/outcome",
+    requireAuth,
+    autoApplyAuthorizeRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const attemptId = typeof body.attemptId === "string" ? body.attemptId : "";
+      const leaseToken = typeof body.leaseToken === "string" ? body.leaseToken : "";
+
+      if (!UUID_PATTERN.test(attemptId) || !UUID_PATTERN.test(leaseToken)) {
+        response.status(400).json({ error: "attemptId and leaseToken must both be uuids." });
+        return;
+      }
+
+      try {
+        const result = await reportAutoApplyOutcome(resolveServiceClient(), {
+          candidateId: request.user!.id,
+          attemptId,
+          leaseToken,
+          // Passed through, NOT validated here: the reporter owns which outcomes exist,
+          // and duplicating that list is how the two drift apart.
+          outcome: body.outcome as never,
+          evidence: (body.evidence ?? null) as never,
+          error: (body.error ?? null) as never,
+        });
+
+        response.set("Cache-Control", "no-store");
+
+        if (result.accepted) {
+          response.status(200).json(result);
+          return;
+        }
+
+        response.status(result.refusal === "NOT_FOUND" ? 404 : 409).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[auto-apply] outcome report failed:", message);
+        response.status(500).json({ error: "Could not record the submission outcome." });
+      }
+    },
+  );
+
   // AI Career Copilot.
   //
   // POST /api/agent/chat
