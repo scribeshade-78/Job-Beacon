@@ -1,33 +1,35 @@
-import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ExternalLink, Search } from "lucide-react";
 import { Input } from "../components/ui/input";
+import { Spinner } from "../components/ui/spinner";
+import { ATTEMPT_STATUS_LABELS, listApplications, type ApplicationSummary } from "../lib/applications";
+import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { safeVacancyHref } from "../panels/shared";
 import { cn } from "../lib/utils";
+import type { ResponseCategory } from "../../../shared/priorityScore";
 
 /**
- * The application tracker: a list of what the candidate has sent, and what came back.
+ * The application tracker: what the candidate has sent, and what came back.
  *
- * SCAFFOLDED WITH MOCK DATA, deliberately and visibly. The real feed is the application
- * attempts the rest of this app already records; until that is wired, every card here
- * carries `isMock` and the page says so in the header. A tracker that looked real while
- * showing invented applications would be the worst kind of placeholder - a candidate
- * could reasonably believe they had applied somewhere they had not.
+ * REAL DATA, FROM THE SAME SOURCE THE OLD APPLICATIONS PANEL USED - listApplications.
+ * There is no mock and no sample-data banner any more.
+ *
+ * THERE IS NO EMAIL BODY IN THIS DATA, AND THE PANE DOES NOT PRETEND OTHERWISE. The
+ * scaffolded version showed invented messages; ApplicationSummary exposes no subject or
+ * body, only the attempt lifecycle, the recorded evidence and the classified response
+ * categories. Full messages live in the Inbox, which reads a different table. Showing
+ * what this source actually holds is the honest option; fetching bodies from a second
+ * source here would duplicate the Inbox and blur what each page is for.
+ *
+ * THE STAGE IS DERIVED, NOT INVENTED. An employer's response stage comes from
+ * responseCategories (a classified reply, highest stage wins); with no reply, a
+ * successful submission is "Applied". The lifecycle status alone cannot tell you an
+ * interview happened - only a classified message can.
  */
 
-type TrackerStatus = "applied" | "interview" | "offer" | "rejection" | "archived";
+type TrackerStage = "applied" | "interview" | "offer" | "rejection" | "in_progress" | "archived";
 
-interface TrackerEntry {
-  id: string;
-  company: string;
-  role: string;
-  status: TrackerStatus;
-  /** ISO, so the relative time can be derived rather than stored as prose. */
-  updatedAt: string;
-  subject: string;
-  body: string;
-}
-
-/** Status metadata in one place, so a card and a pill cannot disagree about a colour. */
-const STATUS: Record<TrackerStatus, { label: string; badge: string; dot: string }> = {
+const STAGE: Record<TrackerStage, { label: string; badge: string; dot: string }> = {
   applied: {
     label: "Applied",
     badge: "border-ios-blue/30 bg-ios-blue/10 text-ios-blue",
@@ -48,94 +50,66 @@ const STATUS: Record<TrackerStatus, { label: string; badge: string; dot: string 
     badge: "border-status-blocked/40 bg-status-blocked/10 text-status-blocked-fg",
     dot: "bg-status-blocked",
   },
-  archived: {
-    label: "Archived",
+  in_progress: {
+    label: "In progress",
     badge: "border-ios-separator bg-ios-bg text-ios-text-secondary",
     dot: "bg-status-action-required",
   },
+  archived: {
+    label: "Archived",
+    badge: "border-ios-separator bg-ios-bg text-ios-text-secondary",
+    dot: "bg-ios-separator",
+  },
 };
 
-const FILTERS: Array<{ id: "all" | TrackerStatus; label: string }> = [
+const FILTERS: Array<{ id: "all" | TrackerStage; label: string }> = [
   { id: "all", label: "All" },
   { id: "applied", label: "Applied" },
   { id: "interview", label: "Interview" },
   { id: "offer", label: "Offer" },
   { id: "rejection", label: "Rejection" },
+  { id: "in_progress", label: "In progress" },
   { id: "archived", label: "Archived" },
 ];
 
-const MOCK: TrackerEntry[] = [
-  {
-    id: "t1",
-    company: "Northwind Analytics",
-    role: "Senior Frontend Engineer",
-    status: "interview",
-    updatedAt: "2026-10-11T09:20:00Z",
-    subject: "Interview invitation — technical round",
-    body:
-      "Hi Priya,\n\nThanks for your application. We would like to invite you to a 60-minute technical interview focused on React and performance.\n\nWould Thursday or Friday afternoon work?\n\nBest,\nDana Whitfield\nTalent Partner, Northwind Analytics",
-  },
-  {
-    id: "t2",
-    company: "Halcyon Health",
-    role: "Product Engineer",
-    status: "offer",
-    updatedAt: "2026-10-10T15:05:00Z",
-    subject: "Your offer from Halcyon Health",
-    body:
-      "Hi Priya,\n\nWe are delighted to offer you the Product Engineer role. The attached letter covers compensation, equity and the start date.\n\nPlease let us know by the 24th if you would like to proceed.\n\nWarm regards,\nMarcus Bell",
-  },
-  {
-    id: "t3",
-    company: "Cobalt Systems",
-    role: "Full Stack Developer",
-    status: "applied",
-    updatedAt: "2026-10-09T11:42:00Z",
-    subject: "Application received",
-    body:
-      "Hi Priya,\n\nWe have received your application for Full Stack Developer and will review it shortly. You can expect to hear from us within two weeks.\n\nCobalt Systems Recruiting",
-  },
-  {
-    id: "t4",
-    company: "Verity Retail Group",
-    role: "Frontend Engineer",
-    status: "rejection",
-    updatedAt: "2026-10-08T08:15:00Z",
-    subject: "Update on your application",
-    body:
-      "Hi Priya,\n\nThank you for your interest in Verity Retail Group. After careful consideration we have decided to move forward with other candidates.\n\nWe appreciate the time you invested and wish you well.\n\nVerity Talent Team",
-  },
-  {
-    id: "t5",
-    company: "Ardent Hospitality",
-    role: "Web Platform Engineer",
-    status: "interview",
-    updatedAt: "2026-10-07T13:30:00Z",
-    subject: "Next steps — hiring manager call",
-    body:
-      "Hi Priya,\n\nOur hiring manager would like to speak with you for 30 minutes about the platform team and the work ahead.\n\nAre you free early next week?\n\nArdent People Team",
-  },
-  {
-    id: "t6",
-    company: "Meridian Capital",
-    role: "UI Engineer",
-    status: "archived",
-    updatedAt: "2026-09-28T10:00:00Z",
-    subject: "Role closed",
-    body:
-      "Hi Priya,\n\nThe UI Engineer position has been closed and we are no longer accepting applications. We will keep your details on file.\n\nMeridian Recruiting",
-  },
-  {
-    id: "t7",
-    company: "Lumen Design Studio",
-    role: "Design Systems Engineer",
-    status: "applied",
-    updatedAt: "2026-09-26T16:45:00Z",
-    subject: "Thanks for applying",
-    body:
-      "Hi Priya,\n\nThanks for applying to Lumen. Our team is reviewing applications now and we will be in touch.\n\nLumen Studio",
-  },
+/** Highest stage wins, mirroring RESPONSE_STAGE_VALUE's ordering in shared/priorityScore. */
+const CATEGORY_ORDER: ResponseCategory[] = [
+  "offer",
+  "interview",
+  "action_required",
+  "recruiter_followup",
+  "application_received",
+  "other",
+  "rejection",
 ];
+
+function stageOf(application: ApplicationSummary): TrackerStage {
+  const categories = application.responseCategories ?? [];
+
+  for (const category of CATEGORY_ORDER) {
+    if (!categories.includes(category)) continue;
+    if (category === "offer") return "offer";
+    if (category === "interview") return "interview";
+    if (category === "rejection") return "rejection";
+    // A real reply that is not a stage signal: the application is live, not rejected.
+    return "applied";
+  }
+
+  const statuses = application.attempts.map((attempt) => attempt.status);
+
+  if (statuses.includes("cancelled")) return "archived";
+  // "succeeded" is a receipt-backed acceptance on the attempt itself, which is what
+  // makes an application Applied - the status alone is a claim the worker made.
+  if (application.attempts.some((attempt) => attempt.acceptedEvidence)) return "applied";
+
+  return "in_progress";
+}
+
+/** The most recent thing that happened to this application. */
+function lastTouched(application: ApplicationSummary): string {
+  const stamps = application.attempts.map((attempt) => attempt.updatedAt);
+  return stamps.length > 0 ? stamps.sort().slice(-1)[0] : application.createdAt;
+}
 
 function relativeTime(iso: string, now: number): string {
   const minutes = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60000));
@@ -147,7 +121,6 @@ function relativeTime(iso: string, now: number): string {
   return Math.round(days / 30) + "mo ago";
 }
 
-/** Two-letter initials, because a real logo is not available for mock entries. */
 function initials(company: string): string {
   return company
     .split(/\s+/)
@@ -158,28 +131,67 @@ function initials(company: string): string {
 }
 
 export function TrackerPage() {
+  const [applications, setApplications] = useState<ApplicationSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | TrackerStatus>("all");
+  const [filter, setFilter] = useState<"all" | TrackerStage>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // One timestamp for the whole render, so two cards cannot disagree about "now"
-  // halfway down the list.
   const now = useMemo(() => Date.now(), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    listApplications(getSupabaseBrowserClient())
+      .then((result) => {
+        if (cancelled) return;
+        if (result.kind === "error") {
+          setError(result.message);
+          return;
+        }
+        setApplications(result.applications);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const entries = useMemo(
+    () =>
+      (applications ?? []).map((application) => ({
+        application,
+        stage: stageOf(application),
+        company: application.companyName ?? "Unknown company",
+        touched: lastTouched(application),
+      })),
+    [applications],
+  );
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return MOCK.filter((entry) => {
-      if (filter !== "all" && entry.status !== filter) return false;
+    return entries.filter((entry) => {
+      if (filter !== "all" && entry.stage !== filter) return false;
       if (needle === "") return true;
       return (
         entry.company.toLowerCase().includes(needle) ||
-        entry.role.toLowerCase().includes(needle) ||
-        entry.subject.toLowerCase().includes(needle)
+        entry.application.vacancyTitle.toLowerCase().includes(needle)
       );
     });
-  }, [query, filter]);
+  }, [entries, query, filter]);
 
-  const selected = visible.find((entry) => entry.id === selectedId) ?? null;
+  const selected = visible.find((entry) => entry.application.planId === selectedId) ?? null;
+
+  if (applications === null && error === null) {
+    return (
+      <div className="flex items-center gap-3 p-6 text-sm text-ios-text-secondary">
+        <Spinner /> Loading your applications...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -188,11 +200,15 @@ export function TrackerPage() {
         <p className="mt-1 text-sm text-ios-text-secondary">
           Every application you have sent, and what came back.
         </p>
-        {/* SAID OUT LOUD, because a placeholder that looks real is worse than none. */}
-        <p className="mt-2 inline-block rounded-control border border-status-under-review/40 bg-status-under-review/10 px-2.5 py-1 text-xs font-medium text-status-under-review-fg">
-          Showing sample data — not yet connected to your applications
-        </p>
       </header>
+
+      {/* A FAILED READ IS NOT AN EMPTY TRACKER. Saying "no applications" when the query
+          failed would tell a candidate their applications had vanished. */}
+      {error !== null ? (
+        <p role="alert" className="rounded-card border border-status-blocked/40 bg-status-blocked/10 p-4 text-sm text-status-blocked-fg">
+          Could not load your applications: {error}
+        </p>
+      ) : null}
 
       <div className="space-y-3 rounded-card border border-ios-separator bg-ios-card p-3">
         <div className="relative">
@@ -203,14 +219,12 @@ export function TrackerPage() {
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search by company, role or subject"
+            placeholder="Search by company or role"
             aria-label="Search applications"
             className="pl-9"
           />
         </div>
 
-        {/* Pills rather than a select: five statuses are few enough to show at once, and
-            seeing the counts is most of what a tracker is for. */}
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter by status">
           {FILTERS.map((option) => {
             const active = filter === option.id;
@@ -235,31 +249,29 @@ export function TrackerPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
-        {/* LEFT: the list. Its own scroll region, so a long list never pushes the
-            reading pane off the screen. */}
         <section
           aria-label="Applications"
           className="max-h-[70vh] space-y-2 overflow-y-auto rounded-card border border-ios-separator bg-ios-card p-2"
         >
           {visible.length === 0 ? (
             <p className="p-4 text-sm text-ios-text-secondary">
-              No applications match this search or filter.
+              {entries.length === 0
+                ? "You have not applied to anything yet. Jobs you apply to will appear here."
+                : "No applications match this search or filter."}
             </p>
           ) : (
             visible.map((entry) => {
-              const status = STATUS[entry.status];
-              const active = entry.id === selected?.id;
+              const stage = STAGE[entry.stage];
+              const active = entry.application.planId === selected?.application.planId;
               return (
                 <button
-                  key={entry.id}
+                  key={entry.application.planId}
                   type="button"
-                  onClick={() => setSelectedId(entry.id)}
+                  onClick={() => setSelectedId(entry.application.planId)}
                   aria-current={active}
                   className={cn(
                     "flex w-full items-start gap-3 rounded-control border p-3 text-left transition-colors",
-                    active
-                      ? "border-ios-blue bg-ios-blue/5"
-                      : "border-ios-separator bg-ios-card hover:bg-ios-bg",
+                    active ? "border-ios-blue bg-ios-blue/5" : "border-ios-separator bg-ios-card hover:bg-ios-bg",
                   )}
                 >
                   <span
@@ -273,25 +285,20 @@ export function TrackerPage() {
                     <span className="flex items-center justify-between gap-2">
                       <span className="truncate text-sm font-semibold text-black">{entry.company}</span>
                       <span className="shrink-0 text-[11px] text-ios-text-secondary">
-                        {relativeTime(entry.updatedAt, now)}
+                        {relativeTime(entry.touched, now)}
                       </span>
                     </span>
                     <span className="mt-0.5 block truncate text-xs text-ios-text-secondary">
-                      {entry.role}
+                      {entry.application.vacancyTitle}
                     </span>
-                    <span className="mt-1.5 flex items-center gap-2">
-                      <span
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                          status.badge,
-                        )}
-                      >
-                        <span className={cn("h-1.5 w-1.5 rounded-full", status.dot)} aria-hidden="true" />
-                        {status.label}
-                      </span>
-                    </span>
-                    <span className="mt-1.5 block truncate text-xs text-ios-text-secondary">
-                      {entry.subject}
+                    <span
+                      className={cn(
+                        "mt-1.5 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                        stage.badge,
+                      )}
+                    >
+                      <span className={cn("h-1.5 w-1.5 rounded-full", stage.dot)} aria-hidden="true" />
+                      {stage.label}
                     </span>
                   </span>
                 </button>
@@ -300,7 +307,6 @@ export function TrackerPage() {
           )}
         </section>
 
-        {/* RIGHT: the reading pane. */}
         <section
           aria-label="Application detail"
           className="min-h-[420px] rounded-card border border-ios-separator bg-ios-card p-5"
@@ -312,7 +318,7 @@ export function TrackerPage() {
               </span>
               <p className="mt-3 text-sm font-medium text-black">Select a message to read</p>
               <p className="mt-1 max-w-xs text-xs text-ios-text-secondary">
-                Pick an application on the left to see the full message and where it stands.
+                Pick an application on the left to see where it stands.
               </p>
             </div>
           ) : (
@@ -325,35 +331,110 @@ export function TrackerPage() {
                   {initials(selected.company)}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <h2 className="truncate text-base font-semibold text-black">{selected.subject}</h2>
-                  <p className="mt-0.5 text-sm text-ios-text-secondary">
-                    {selected.company} · {selected.role}
-                  </p>
+                  <h2 className="truncate text-base font-semibold text-black">
+                    {selected.application.vacancyTitle}
+                  </h2>
+                  <p className="mt-0.5 text-sm text-ios-text-secondary">{selected.company}</p>
                   <p className="mt-1.5 flex items-center gap-2">
                     <span
                       className={cn(
                         "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                        STATUS[selected.status].badge,
+                        STAGE[selected.stage].badge,
                       )}
                     >
                       <span
-                        className={cn("h-1.5 w-1.5 rounded-full", STATUS[selected.status].dot)}
+                        className={cn("h-1.5 w-1.5 rounded-full", STAGE[selected.stage].dot)}
                         aria-hidden="true"
                       />
-                      {STATUS[selected.status].label}
+                      {STAGE[selected.stage].label}
                     </span>
                     <span className="text-xs text-ios-text-secondary">
-                      {relativeTime(selected.updatedAt, now)}
+                      {relativeTime(selected.touched, now)}
                     </span>
                   </p>
                 </div>
               </div>
 
-              {/* whitespace-pre-line so the mocked line breaks in a message body read as
-                  a message rather than one run-on paragraph. */}
-              <p className="mt-4 whitespace-pre-line text-sm leading-relaxed text-ios-text">
-                {selected.body}
-              </p>
+              {selected.application.ineligibleReason !== null ? (
+                <p className="mt-4 rounded-control border border-status-under-review/40 bg-status-under-review/10 p-3 text-xs text-status-under-review-fg">
+                  {selected.application.ineligibleReason}
+                </p>
+              ) : null}
+
+              {selected.application.responseCategories.length > 0 ? (
+                <div className="mt-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-ios-text-secondary">
+                    Replies received
+                  </h3>
+                  <ul className="mt-2 flex flex-wrap gap-1.5">
+                    {selected.application.responseCategories.map((category) => (
+                      <li
+                        key={category}
+                        className="rounded-full border border-ios-separator bg-ios-bg px-2.5 py-1 text-xs text-ios-text"
+                      >
+                        {category.replace(/_/g, " ")}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div className="mt-4">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-ios-text-secondary">
+                  Submission
+                </h3>
+                {selected.application.attempts.length === 0 ? (
+                  <p className="mt-2 text-sm text-ios-text-secondary">
+                    No submission has been attempted yet.
+                  </p>
+                ) : (
+                  <ul className="mt-2 space-y-2">
+                    {selected.application.attempts.map((attempt) => (
+                      <li
+                        key={attempt.id}
+                        className="rounded-control border border-ios-separator bg-ios-bg p-2.5 text-sm"
+                      >
+                        <p className="font-medium text-black">
+                          {ATTEMPT_STATUS_LABELS[attempt.status] ?? attempt.status}
+                        </p>
+                        <p className="mt-0.5 text-xs text-ios-text-secondary">
+                          Attempt {attempt.attempts} of {attempt.maxAttempts} ·{" "}
+                          {relativeTime(attempt.updatedAt, now)}
+                        </p>
+                        {attempt.evidence.length > 0 ? (
+                          <ul className="mt-1.5 space-y-0.5">
+                            {attempt.evidence.map((item) => (
+                              <li key={item.id} className="text-xs text-ios-text-secondary">
+                                <span className="font-medium text-ios-text">{item.title}</span>
+                                {item.details.map((detail, index) => (
+                                  <span key={index} className="block">
+                                    {detail}
+                                  </span>
+                                ))}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {attempt.lastError !== null ? (
+                          <p className="mt-1.5 text-xs text-status-blocked-fg">{attempt.lastError}</p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {safeVacancyHref(selected.application.vacancyUrl) !== null ? (
+                <a
+                  href={safeVacancyHref(selected.application.vacancyUrl) ?? "#"}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-ios-blue"
+                >
+                  Open the job posting
+                  <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                </a>
+              ) : null}
             </article>
           )}
         </section>
