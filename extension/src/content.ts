@@ -21,6 +21,25 @@
  */
 import type { CandidateProfile, FillReport } from "./lib/types.js";
 
+/**
+ * The resume the server has authorised for this fill, if any.
+ *
+ * SENT AS BASE64 OVER EXTENSION MESSAGING, NOT AS A URL. A content script running on
+ * greenhouse.io fetching the resume from jobbeacon.in would be a cross-origin request
+ * judged against GREENHOUSE's policy, and on an authenticated URL it would carry no
+ * session. The bytes travel the same channel as the rest of the profile.
+ */
+interface ResumePayload {
+  fileName: string;
+  mimeType: string;
+  base64: string;
+}
+
+interface FillRequest {
+  profile: CandidateProfile;
+  resume?: ResumePayload | null;
+}
+
 interface FieldSpec {
   key: keyof CandidateProfile;
   label: string;
@@ -142,6 +161,79 @@ function setValue(element: HTMLInputElement | HTMLTextAreaElement, value: string
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+/**
+ * A resume file input, if this page has one.
+ *
+ * FILE INPUTS ARE FOUND DIFFERENTLY, because none of the text heuristics apply: there is
+ * no autocomplete token for "resume", and the value is not a string. The signals used are
+ * the ones an ATS actually sets - the input's accept list, its id/name, and its label.
+ *
+ * DELIBERATELY NARROW. A page can carry several file inputs (cover letter, portfolio,
+ * transcript, right-to-work document). Attaching a resume to the wrong one is worse than
+ * attaching nothing, so this refuses unless the field says "resume"/"cv" in its own words.
+ */
+function findResumeInput(): HTMLInputElement | null {
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+  return (
+    inputs.find((input) => {
+      if (input.disabled) return false;
+      if (input.files && input.files.length > 0) return false;
+
+      const text = describingText(input);
+      const accept = (input.getAttribute("accept") ?? "").toLowerCase();
+      const looksLikeResume = /\b(resume|cv|curriculum)\b/.test(text);
+
+      // A PDF/DOC accept list alone is NOT enough - a transcript or a portfolio also
+      // takes PDFs. It only narrows a field that already called itself a resume.
+      const plausibleFile = accept === "" || /pdf|msword|officedocument|doc/.test(accept);
+
+      return looksLikeResume && plausibleFile;
+    }) ?? null
+  );
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+/**
+ * Attaches the resume to a file input.
+ *
+ * A FILE INPUT'S VALUE CANNOT BE ASSIGNED. Setting `input.value = "C:\\resume.pdf"` is
+ * refused by the browser as a security measure, and it is a common trap: the code looks
+ * correct and the field stays empty. The only supported route is a DataTransfer holding a
+ * real File, which is what this builds.
+ *
+ * The file is CONSTRUCTED in this document, so it is same-origin and attachable. It is not
+ * read from disk and not uploaded by this script - the form does that when the candidate
+ * submits.
+ */
+function attachResume(input: HTMLInputElement, resume: ResumePayload): boolean {
+  try {
+    const file = new File([base64ToBytes(resume.base64)], resume.fileName, { type: resume.mimeType });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+
+    // React and every other controlled-framework file field listens for this.
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+
+    input.setAttribute("data-jobbeacon-filled", "resume");
+    return true;
+  } catch {
+    // A DataTransfer that the browser will not accept is a "could not attach", not a
+    // crash that takes the rest of the fill down with it.
+    return false;
+  }
+}
+
 function fillField(element: HTMLInputElement | HTMLTextAreaElement, spec: FieldSpec, value: string): "filled" | "occupied" {
   if (element.value.trim() !== "") {
     return "occupied";
@@ -151,7 +243,8 @@ function fillField(element: HTMLInputElement | HTMLTextAreaElement, spec: FieldS
   return "filled";
 }
 
-function fillForm(profile: CandidateProfile): FillReport {
+function fillForm(request: FillRequest): FillReport {
+  const { profile } = request;
   const report: FillReport = { filled: [], skipped: [] };
   const inputs = Array.from(document.querySelectorAll("input, textarea")).filter(isFillable);
   const claimed = new Set<Element>();
@@ -198,6 +291,21 @@ function fillForm(profile: CandidateProfile): FillReport {
     }
   }
 
+  // THE RESUME IS FILLED LAST, deliberately. If attaching it throws, every text field is
+  // already filled and the candidate keeps that work; the reverse order would risk losing
+  // the whole fill to one unsupported file input.
+  if (request.resume) {
+    const input = findResumeInput();
+
+    if (!input) {
+      report.skipped.push({ field: "Resume", reason: "No resume upload field on this page." });
+    } else if (attachResume(input, request.resume)) {
+      report.filled.push("Resume");
+    } else {
+      report.skipped.push({ field: "Resume", reason: "The page refused the file - upload it manually." });
+    }
+  }
+
   return report;
 }
 
@@ -206,7 +314,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   try {
-    sendResponse({ ok: true, report: fillForm(message.profile as CandidateProfile) });
+    sendResponse({
+      ok: true,
+      report: fillForm({ profile: message.profile as CandidateProfile, resume: (message.resume as ResumePayload | null) ?? null }),
+    });
   } catch (error) {
     sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
