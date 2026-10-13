@@ -342,67 +342,6 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
         )}
 
         <section>
-          <h3 className="text-sm font-semibold text-black">Selected roles</h3>
-          {selectedRoles !== null && selectedRoles.length === 0 && (
-            <p className="mt-2 text-sm text-ios-text-secondary">
-              No target roles yet. Search below or pick a suggestion.
-            </p>
-          )}
-          <ul className="mt-2 space-y-2">
-            {selectedRoles?.map((role) => (
-              <li
-                key={role.id}
-                className="rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span>{role.roleName}</span>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => {
-                        setEditingId(editingId === role.id ? null : role.id);
-                        setEditValue(role.rawRoleName ?? "");
-                      }}
-                    >
-                      Edit preference
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={busyKey === role.id}
-                      onClick={() => void handleRemove(role.id)}
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                </div>
-                <p className="mt-1 text-xs text-ios-text-secondary">{describeIntent(role)}</p>
-
-                {editingId === role.id && (
-                  <div className="mt-2 space-y-2">
-                    <Input
-                      value={editValue}
-                      onChange={(event) => setEditValue(event.target.value)}
-                      aria-label={"Preferred phrase for " + role.roleName}
-                      placeholder="e.g. Azure Data Engineer"
-                    />
-                    <div className="flex items-center gap-2">
-                      <Button size="sm" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, editValue)}>
-                        Save preference
-                      </Button>
-                      <Button size="sm" variant="secondary" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, "")}>
-                        Clear preference
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section>
           <h3 className="text-sm font-semibold text-black">Search roles</h3>
           {/* The overlay REPLACES the static result list that used to render here.
               Keeping both would show the same matches twice, once floating and once in
@@ -487,6 +426,67 @@ export function TargetRolesPanel({ candidateId }: TargetRolesPanelProps) {
           {trimmedQuery !== "" && rawSearchResults.length > 0 && searchResults.length === 0 && (
             <p className="mt-2 text-sm text-ios-text-secondary">Every matching role is already in your list.</p>
           )}
+        </section>
+
+        <section>
+          <h3 className="text-sm font-semibold text-black">Selected roles</h3>
+          {selectedRoles !== null && selectedRoles.length === 0 && (
+            <p className="mt-2 text-sm text-ios-text-secondary">
+              No target roles yet. Search above or pick a suggestion.
+            </p>
+          )}
+          <ul className="mt-2 space-y-2">
+            {selectedRoles?.map((role) => (
+              <li
+                key={role.id}
+                className="rounded-control border border-ios-separator bg-ios-card p-2.5 text-sm text-black"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span>{role.roleName}</span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setEditingId(editingId === role.id ? null : role.id);
+                        setEditValue(role.rawRoleName ?? "");
+                      }}
+                    >
+                      Edit preference
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={busyKey === role.id}
+                      onClick={() => void handleRemove(role.id)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-ios-text-secondary">{describeIntent(role)}</p>
+
+                {editingId === role.id && (
+                  <div className="mt-2 space-y-2">
+                    <Input
+                      value={editValue}
+                      onChange={(event) => setEditValue(event.target.value)}
+                      aria-label={"Preferred phrase for " + role.roleName}
+                      placeholder="e.g. Azure Data Engineer"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, editValue)}>
+                        Save preference
+                      </Button>
+                      <Button size="sm" variant="secondary" disabled={busyKey === role.id} onClick={() => void handleSaveIntent(role, "")}>
+                        Clear preference
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         </section>
 
         {trimmedQuery === "" &&
