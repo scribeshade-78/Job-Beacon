@@ -138,6 +138,30 @@ export function stageOf(application: ApplicationSummary): TrackerStage {
 }
 
 /** The most recent thing that happened to this application. */
+/**
+ * WHICH ATTEMPT THE EXTENSION MAY PREPARE, IF ANY.
+ *
+ * A SUCCEEDED ATTEMPT MUST NEVER BE HANDED TO THE EXTENSION. Tagging a job-board URL with an
+ * attempt that cannot be filled sends the candidate through a Trip 1 that refuses with 409,
+ * for a reason the extension has no good way to explain - the application is already sent.
+ * The honest behaviour is to append nothing, so the extension simply does not engage.
+ *
+ * LEASED IS NOT CLAIMABLE EITHER. A lease means another worker already holds this attempt
+ * and is preparing a form; a second claimant would be refused, and the exclusion here keeps
+ * that refusal off the candidate's screen.
+ *
+ * 'pending' and 'pending_review' are the two states claimFillForExtension accepts, and this
+ * list is deliberately the same two - the client should not offer an action the server will
+ * refuse, and it must not withhold one the server would have allowed.
+ */
+export function extensionAttemptId(application: ApplicationSummary): string | undefined {
+  const first = application.attempts[0] as { id: string; status: string } | undefined;
+  if (!first) {
+    return undefined;
+  }
+  return first.status === "pending" || first.status === "pending_review" ? first.id : undefined;
+}
+
 export function lastTouched(application: ApplicationSummary): string {
   const stamps = application.attempts.map((attempt) => attempt.updatedAt);
   return stamps.length > 0 ? stamps.sort().slice(-1)[0] : application.createdAt;
@@ -484,7 +508,7 @@ export function TrackerPage() {
 
               {safeVacancyHref(selected.application.vacancyUrl) !== null ? (
                 <a
-                  href={appendAttemptId(safeVacancyHref(selected.application.vacancyUrl) ?? "#", selected.application.attempts[0]?.id)}
+                  href={appendAttemptId(safeVacancyHref(selected.application.vacancyUrl) ?? "#", extensionAttemptId(selected.application))}
                   target="_blank"
                   rel="noreferrer noopener"
                   className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-ios-blue"

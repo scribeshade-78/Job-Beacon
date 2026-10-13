@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stageOf } from "./TrackerPage";
+import { extensionAttemptId, stageOf } from "./TrackerPage";
 import type { ApplicationSummary } from "../lib/applications";
 import type { ResponseCategory } from "../../../shared/priorityScore";
 
@@ -97,5 +97,41 @@ describe("stageOf", () => {
 
   it("maps an application with NO attempts to in_progress rather than crashing", () => {
     expect(stageOf(application({ statuses: [] }))).toBe("in_progress");
+  });
+});
+
+describe("extensionAttemptId", () => {
+  const at = (status: string) => application({ statuses: [status] });
+
+  it("hands over pending and pending_review, the states the server accepts", () => {
+    expect(extensionAttemptId(at("pending"))).toBe("attempt-0");
+    expect(extensionAttemptId(at("pending_review"))).toBe("attempt-0");
+  });
+
+  it("REFUSES a succeeded attempt - the application is already sent", () => {
+    // Tagging this would send the candidate through a Trip 1 that refuses with 409 for a
+    // reason the extension cannot usefully explain.
+    expect(extensionAttemptId(at("succeeded"))).toBeUndefined();
+  });
+
+  it("REFUSES a leased attempt - another worker already holds it", () => {
+    expect(extensionAttemptId(at("leased"))).toBeUndefined();
+  });
+
+  it("refuses every other non-claimable state", () => {
+    for (const status of ["submitting", "cancelled", "failed", "action_required"]) {
+      expect(extensionAttemptId(at(status)), status).toBeUndefined();
+    }
+  });
+
+  it("returns undefined for an application with no attempts, instead of crashing", () => {
+    expect(extensionAttemptId(application({ statuses: [] }))).toBeUndefined();
+  });
+
+  it("judges only the LATEST attempt", () => {
+    // attempts[0] is the latest. A succeeded head with an older pending tail must not be
+    // offered, and a pending head must be offered regardless of what precedes it.
+    expect(extensionAttemptId(application({ statuses: ["succeeded", "pending"] }))).toBeUndefined();
+    expect(extensionAttemptId(application({ statuses: ["pending", "succeeded"] }))).toBe("attempt-0");
   });
 });
