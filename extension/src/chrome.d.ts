@@ -31,7 +31,19 @@ declare namespace chrome {
           // The message envelope the extension actually sends: a discriminator plus the
           // fields each variant carries. email/password only travel popup -> worker, and
           // the worker hands them straight to Supabase without keeping them.
-          message: { type?: string; profile?: unknown; resume?: unknown; email?: string; password?: string },
+          message: {
+    type?: string;
+    profile?: unknown;
+    resume?: unknown;
+    email?: string;
+    password?: string;
+    /** Trip 1/2: which attempt this page is armed for. */
+    attemptId?: string;
+    /** Trip 2: the lease token minted by Trip 1. Travels to authorize and nowhere else. */
+    leaseToken?: string;
+    /** Trip 3: the outcome report, assembled by the content script from what it saw. */
+    payload?: unknown;
+  },
           sender: MessageSender,
           sendResponse: (response: unknown) => void,
         ) => boolean | void,

@@ -23,6 +23,85 @@ import type { CandidateProfile, SessionInfo } from "./lib/types.js";
 
 const API_BASE = "https://jobbeacon.in";
 
+/**
+ * An authenticated call to a JobBeacon extension endpoint.
+ *
+ * THE PATH IS ALWAYS A LITERAL. No caller supplies one, so the extension can never be talked
+ * into fetching an arbitrary URL with the candidate's bearer token attached - the failure
+ * mode a message-passing API invites when the path is a parameter.
+ */
+async function authedFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const token = await freshAccessToken();
+
+  if (!token) {
+    throw new Error("Your session has expired. Sign in again.");
+  }
+
+  const response = await fetch(API_BASE + path, {
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      Authorization: "Bearer " + token,
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+
+  const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+
+  if (response.status === 401) {
+    throw new Error("The server refused this session. Sign in again.");
+  }
+
+  // A REFUSAL IS NOT A TRANSPORT ERROR, and the caller needs the reason. The routes answer
+  // 404 and 409 with a refusal payload, so the body is returned rather than thrown: the
+  // extension's job is to show the candidate why, not to flatten every no into "failed".
+  if (!response.ok && response.status !== 404 && response.status !== 409) {
+    throw new Error("JobBeacon answered HTTP " + response.status + ".");
+  }
+
+  return body;
+}
+
+/**
+ * TRIP 1. Claims the attempt and returns what to type into the form.
+ *
+ * This is the call that MINTS the lease. Nothing is submitted here, and nothing can be: the
+ * response carries no submission permission, only the data and the credentials Trip 2 will
+ * present.
+ */
+async function prepareFill(attemptId: string): Promise<unknown> {
+  return authedFetch("/api/extension/auto-apply/fill-payload?attemptId=" + encodeURIComponent(attemptId));
+}
+
+/**
+ * TRIP 2. Called ONLY after the candidate has approved the filled form.
+ *
+ * The lease token travels here and nowhere else. There is no timer, no retry and no
+ * automatic path into this function: if the candidate never presses Approve, it is never
+ * called, and no submission token is ever minted.
+ */
+async function authorizeSubmit(attemptId: string, leaseToken: string): Promise<unknown> {
+  return authedFetch("/api/extension/auto-apply/authorize", {
+    method: "POST",
+    body: JSON.stringify({ attemptId, leaseToken }),
+  });
+}
+
+/**
+ * TRIP 3. What actually happened.
+ *
+ * The outcome and its evidence are decided by the CONTENT SCRIPT, which is the only context
+ * that can see the page. This forwards what it saw without embellishment - the server
+ * decides whether it counts, and it refuses a success claim that carries no proof.
+ */
+async function reportOutcome(payload: Record<string, unknown>): Promise<unknown> {
+  return authedFetch("/api/extension/auto-apply/outcome", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+
 /** The popup's view of the session - never the token. */
 async function sessionInfo(): Promise<SessionInfo> {
   const { data } = await supabase().auth.getSession();
@@ -92,7 +171,15 @@ async function fetchProfile(): Promise<CandidateProfile> {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const type = message?.type;
 
-  if (type !== "GET_SESSION" && type !== "SIGN_IN" && type !== "SIGN_OUT" && type !== "FETCH_PROFILE") {
+  if (
+    type !== "GET_SESSION" &&
+    type !== "SIGN_IN" &&
+    type !== "SIGN_OUT" &&
+    type !== "FETCH_PROFILE" &&
+    type !== "PREPARE_FILL" &&
+    type !== "AUTHORIZE_SUBMIT" &&
+    type !== "REPORT_OUTCOME"
+  ) {
     return false;
   }
 
@@ -110,6 +197,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         case "FETCH_PROFILE":
           sendResponse({ ok: true, profile: await fetchProfile() });
+          return;
+        case "PREPARE_FILL":
+          sendResponse({ ok: true, payload: await prepareFill(String(message.attemptId ?? "")) });
+          return;
+        case "AUTHORIZE_SUBMIT":
+          sendResponse({
+            ok: true,
+            result: await authorizeSubmit(String(message.attemptId ?? ""), String(message.leaseToken ?? "")),
+          });
+          return;
+        case "REPORT_OUTCOME":
+          sendResponse({ ok: true, result: await reportOutcome((message.payload ?? {}) as Record<string, unknown>) });
           return;
       }
     } catch (error) {
