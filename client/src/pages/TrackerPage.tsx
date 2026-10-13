@@ -28,7 +28,7 @@ import type { ResponseCategory } from "../../../shared/priorityScore";
  * interview happened - only a classified message can.
  */
 
-type TrackerStage =
+export type TrackerStage =
   | "applied"
   | "interview"
   | "offer"
@@ -106,7 +106,7 @@ const CATEGORY_ORDER: ResponseCategory[] = [
   "rejection",
 ];
 
-function stageOf(application: ApplicationSummary): TrackerStage {
+export function stageOf(application: ApplicationSummary): TrackerStage {
   const categories = application.responseCategories ?? [];
 
   for (const category of CATEGORY_ORDER) {
@@ -138,7 +138,7 @@ function stageOf(application: ApplicationSummary): TrackerStage {
 }
 
 /** The most recent thing that happened to this application. */
-function lastTouched(application: ApplicationSummary): string {
+export function lastTouched(application: ApplicationSummary): string {
   const stamps = application.attempts.map((attempt) => attempt.updatedAt);
   return stamps.length > 0 ? stamps.sort().slice(-1)[0] : application.createdAt;
 }
