@@ -130,10 +130,29 @@ describe("decideSubmissionGrant - the SECOND trip", () => {
   });
 
   it("refuses an attempt no longer awaiting review - already submitted elsewhere", () => {
-    for (const status of ["succeeded", "submitting", "cancelled", "failed"]) {
+    for (const status of ["succeeded", "submitting", "cancelled", "failed", "leased"]) {
       const outcome = decideSubmissionGrant(approvedContext({ attemptStatus: status }));
       expect(outcome.allowed, status).toBe(false);
     }
+  });
+
+  it("accepts the state approval ACTUALLY leaves behind: review_approved_at set, status pending", () => {
+    // attemptReview.ts approves by stamping review_approved_at and resetting the status to
+    // 'pending'. Requiring 'pending_review' at submission time would have refused every
+    // approved attempt - the flow would have looked wired and submitted nothing.
+    const outcome = decideSubmissionGrant(
+      approvedContext({ attemptStatus: "pending", reviewBeforeSubmit: true, candidateApproved: true }),
+    );
+    expect(outcome.allowed).toBe(true);
+  });
+
+  it("still refuses 'pending' when approval was NEVER given", () => {
+    // The guard above must not become a way round the review gate.
+    const outcome = decideSubmissionGrant(
+      approvedContext({ attemptStatus: "pending", reviewBeforeSubmit: true, candidateApproved: false }),
+    );
+    expect(outcome.allowed).toBe(false);
+    if (!outcome.allowed) expect(outcome.refusal).toBe("NOT_APPROVED");
   });
 
   it("allows submission from pending for a candidate who waived review", () => {

@@ -40,7 +40,15 @@ export interface ClaimContext {
   reviewBeforeSubmit: boolean;
   /** application_attempts.status, as a plain string so this module owns no enum. */
   attemptStatus: string;
-  /** Trip 2 only: the candidate pressed Approve on THIS attempt. */
+  /**
+   * Trip 2 only: the candidate pressed Approve on THIS attempt.
+   *
+   * IN PRACTICE THIS IS application_attempts.review_approved_at BEING NON-NULL, and the
+   * caller maps it. That matters because APPROVING AN ATTEMPT MOVES IT TO 'pending'
+   * (attemptReview.ts stamps review_approved_at and resets the status) rather than leaving
+   * it in 'pending_review' - so an implementation that required 'pending_review' at
+   * submission time would refuse every attempt that had actually been approved.
+   */
   candidateApproved?: boolean;
   /** Trip 2 only: the caller still holds the lease it was granted at fill time. */
   holdsLease?: boolean;
@@ -138,11 +146,15 @@ export function decideSubmissionGrant(context: ClaimContext): Decision {
     return { allowed: false, refusal: "NOT_APPROVED" };
   }
 
-  const submittable = context.reviewBeforeSubmit
-    ? context.attemptStatus === "pending_review"
-    : context.attemptStatus === "pending" || context.attemptStatus === "pending_review";
-
-  if (!submittable) {
+  // 'pending' and 'pending_review' are BOTH submittable when the gates pass:
+  //   * 'pending_review' - review is on and the candidate has not approved yet, which
+  //     the candidateApproved check above already refused.
+  //   * 'pending' - either review is off, or review was ON and the candidate approved,
+  //     which is exactly the state attemptReview.ts leaves behind (review_approved_at
+  //     stamped, status reset to 'pending').
+  // An earlier version of this function required 'pending_review' here, which would have
+  // made every approved attempt unsubmittable - the bug this comment exists to prevent.
+  if (context.attemptStatus !== "pending" && context.attemptStatus !== "pending_review") {
     return { allowed: false, refusal: "NOTHING_TO_DO" };
   }
 
