@@ -56,8 +56,11 @@ export const ENTITLEMENT_DIMENSIONS: readonly EntitlementDimensionSpec[] = [
   // The one allowance the product states per DESTINATION rather than per
   // candidate. Two entries, not one, because a single number cannot express
   // "30 for India, 80 for the US".
-  { id: "auto_apply_india_per_month", prdLabel: "Auto-apply, India jobs (per month)", kind: "count" },
-  { id: "auto_apply_us_per_month", prdLabel: "Auto-apply, US jobs (per month)", kind: "count" },
+  // THE WINDOW IN THE LABEL IS THE WINDOW THE QUOTA USES. These read the _per_week columns
+  // because that is what M7 enforces; labelling them "per month" while enforcing a weekly
+  // cap is how a candidate hits a wall the UI never showed them.
+  { id: "auto_apply_india_per_month", prdLabel: "Auto-apply, India jobs (per week)", kind: "count" },
+  { id: "auto_apply_us_per_month", prdLabel: "Auto-apply, US jobs (per week)", kind: "count" },
   { id: "premium_source_access", prdLabel: "Premium source access", kind: "capability" },
   { id: "ats_resume_variants", prdLabel: "ATS resume variants", kind: "count" },
   { id: "mailbox_connections", prdLabel: "Mailbox connections", kind: "count" },
@@ -98,6 +101,9 @@ interface UsageRow {
   consumed_applications_this_period: number;
   ats_resume_variants: number;
   connected_mailboxes: number;
+  /** Consumed attempts split by the vacancy's country. NEW - see the 20261014000000 migration. */
+  consumed_applications_india_this_period: number;
+  consumed_applications_us_this_period: number;
 }
 
 const USAGE_BY_DIMENSION: Record<string, keyof UsageRow> = {
@@ -107,6 +113,15 @@ const USAGE_BY_DIMENSION: Record<string, keyof UsageRow> = {
   // bar and the comparison disagree. The quota comparison is a separate question
   // and reads consumed_applications_this_period.
   verified_applications_per_month: "verified_applications_this_period",
+  // THE DESTINATION QUOTAS NOW HAVE A USAGE KEY, which is what the comment further down
+  // anticipated: candidate_entitlement_usage counts applications globally NO LONGER. It
+  // splits by vacancies.country as of the 20261014000000 migration.
+  //
+  // CONSUMED, not verified, because a quota counts every attempt except cancelled - the
+  // same predicate the quota gate uses. Showing verified beside a consumed limit would put
+  // a number and a limit that count different things side by side.
+  auto_apply_india_per_month: "consumed_applications_india_this_period",
+  auto_apply_us_per_month: "consumed_applications_us_this_period",
   ats_resume_variants: "ats_resume_variants",
   mailbox_connections: "connected_mailboxes",
 };
@@ -114,8 +129,10 @@ const USAGE_BY_DIMENSION: Record<string, keyof UsageRow> = {
 const LIMIT_BY_DIMENSION: Record<string, keyof PlanLimits> = {
   active_target_roles: "maxActiveTargetRoles",
   verified_applications_per_month: "maxVerifiedApplicationsPerMonth",
-  auto_apply_india_per_month: "maxAutoApplyIndiaPerMonth",
-  auto_apply_us_per_month: "maxAutoApplyUsPerMonth",
+  // THE WEEKLY FIELDS, because the WEEKLY columns are what M7 enforces. This read the
+  // monthly pair, so the allowance shown to a candidate disagreed with the one enforced.
+  auto_apply_india_per_month: "maxAutoApplyIndiaPerWeek",
+  auto_apply_us_per_month: "maxAutoApplyUsPerWeek",
   premium_source_access: "premiumSourceAccess",
   ats_resume_variants: "maxAtsResumeVariants",
   mailbox_connections: "maxMailboxConnections",
@@ -132,6 +149,8 @@ const ZERO_USAGE: UsageRow = {
   consumed_applications_this_period: 0,
   ats_resume_variants: 0,
   connected_mailboxes: 0,
+  consumed_applications_india_this_period: 0,
+  consumed_applications_us_this_period: 0,
 };
 
 async function loadUsage(client: SupabaseClient, candidateId: string): Promise<UsageRow> {
@@ -199,6 +218,10 @@ export async function evaluateEntitlements(
           dataExportsEnabled: row.data_exports_enabled as boolean | null,
           maxAutoApplyIndiaPerMonth: row.max_auto_apply_india_per_month as number | null,
           maxAutoApplyUsPerMonth: row.max_auto_apply_us_per_month as number | null,
+          // THE WEEKLY COLUMNS ARE THE ONES M7 ENFORCES. Both families exist; reading the
+          // monthly pair is what made the displayed allowance disagree with the enforced one.
+          maxAutoApplyIndiaPerWeek: row.max_auto_apply_india_per_week as number | null,
+          maxAutoApplyUsPerWeek: row.max_auto_apply_us_per_week as number | null,
         };
       }
     }

@@ -15,6 +15,12 @@ const USAGE = {
   consumed_applications_this_period: 5,
   ats_resume_variants: 6,
   connected_mailboxes: 1,
+  // DELIBERATELY SUMS TO LESS THAN consumed_applications_this_period (2 + 1 = 3 of 5),
+  // because that is the real shape: attempts against a NULL-country vacancy belong to
+  // neither destination. A fixture where the split summed exactly would let a rounding or
+  // double-count bug pass.
+  consumed_applications_india_this_period: 2,
+  consumed_applications_us_this_period: 1,
 };
 
 interface FakeOptions {
@@ -150,12 +156,17 @@ describe("evaluateEntitlements with an all-NULL plan", () => {
 });
 
 describe("destination auto-apply quotas", () => {
-  it("reports a configured allowance with NO measured usage, rather than a fabricated zero", async () => {
+  it("reports the WEEKLY allowance against the destination's MEASURED usage", async () => {
+    // This test asserted the opposite until the destination split existed: usage and
+    // remaining were null because candidate_entitlement_usage counted applications
+    // globally with no destination. It does now (20261014000000), so null would be the
+    // wrong answer in the other direction - withholding a number we do have.
     const summary = await evaluateEntitlements(
       fakeClient({
         subscription: LIVE_SUBSCRIPTION,
         plan: PLAN,
-        limits: { ...allNullLimits(), max_auto_apply_india_per_month: 100, max_auto_apply_us_per_month: 300 },
+        // THE WEEKLY COLUMNS. These are what M7 enforces, and what the dimension reads.
+        limits: { ...allNullLimits(), max_auto_apply_india_per_week: 100, max_auto_apply_us_per_week: 300 },
       }),
       "cand-1",
     );
@@ -163,13 +174,17 @@ describe("destination auto-apply quotas", () => {
     const india = find(summary, "auto_apply_india_per_month");
     expect(india.configured).toBe(true);
     expect(india.limit).toBe(100);
-    // Nothing counts applications per destination yet, so a usage of 0 would be
-    // an invented number. usage and remaining stay null, and allowed answers only
-    // whether the plan includes the allowance at all.
-    expect(india.usage).toBeNull();
-    expect(india.remaining).toBeNull();
+    expect(india.usage).toBe(2);
+    expect(india.remaining).toBe(98);
     expect(india.allowed).toBe(true);
-    expect(find(summary, "auto_apply_us_per_month").limit).toBe(300);
+    // The label must describe the window the number comes from, or a candidate is shown
+    // a weekly cap while believing it is monthly - the invisible wall.
+    expect(india.prdLabel).toMatch(/per week/i);
+
+    const us = find(summary, "auto_apply_us_per_month");
+    expect(us.limit).toBe(300);
+    expect(us.usage).toBe(1);
+    expect(us.remaining).toBe(299);
   });
 
   it("withholds the allowance when the plan grants none, which is the Free plan", async () => {
@@ -177,7 +192,7 @@ describe("destination auto-apply quotas", () => {
       fakeClient({
         subscription: LIVE_SUBSCRIPTION,
         plan: PLAN,
-        limits: { ...allNullLimits(), max_auto_apply_india_per_month: 0, max_auto_apply_us_per_month: 0 },
+        limits: { ...allNullLimits(), max_auto_apply_india_per_week: 0, max_auto_apply_us_per_week: 0 },
       }),
       "cand-1",
     );

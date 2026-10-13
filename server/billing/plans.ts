@@ -44,6 +44,9 @@ export interface PlanLimits {
   dataExportsEnabled: boolean | null;
   /** Auto-apply allowance per month for jobs whose destination is India. */
   maxAutoApplyIndiaPerMonth: number | null;
+  /** The WEEKLY columns, which are the ones M7 enforces. See the destination-split migration. */
+  maxAutoApplyIndiaPerWeek: number | null;
+  maxAutoApplyUsPerWeek: number | null;
   /** Auto-apply allowance per month for jobs whose destination is the US. */
   maxAutoApplyUsPerMonth: number | null;
 }
@@ -80,6 +83,8 @@ const EMPTY_LIMITS: PlanLimits = {
   dataExportsEnabled: null,
   maxAutoApplyIndiaPerMonth: null,
   maxAutoApplyUsPerMonth: null,
+  maxAutoApplyIndiaPerWeek: null,
+  maxAutoApplyUsPerWeek: null,
 };
 
 interface PlanRow {
@@ -104,6 +109,8 @@ interface LimitRow {
   data_exports_enabled: boolean | null;
   max_auto_apply_india_per_month: number | null;
   max_auto_apply_us_per_month: number | null;
+  max_auto_apply_india_per_week: number | null;
+  max_auto_apply_us_per_week: number | null;
 }
 
 interface PriceRow {
@@ -146,7 +153,9 @@ export async function listPlans(client: SupabaseClient): Promise<BillingPlan[]> 
       analyticsHistoryDays: row.analytics_history_days,
       dataExportsEnabled: row.data_exports_enabled,
       maxAutoApplyIndiaPerMonth: row.max_auto_apply_india_per_month,
+      maxAutoApplyIndiaPerWeek: row.max_auto_apply_india_per_week,
       maxAutoApplyUsPerMonth: row.max_auto_apply_us_per_month,
+      maxAutoApplyUsPerWeek: row.max_auto_apply_us_per_week,
     });
   }
 

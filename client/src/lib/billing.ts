@@ -26,6 +26,9 @@ export interface PlanLimits {
   analyticsHistoryDays: number | null;
   dataExportsEnabled: boolean | null;
   maxAutoApplyIndiaPerMonth: number | null;
+  /** The WEEKLY columns, which are the ones M7 enforces. See the destination-split migration. */
+  maxAutoApplyIndiaPerWeek: number | null;
+  maxAutoApplyUsPerWeek: number | null;
   maxAutoApplyUsPerMonth: number | null;
 }
 
