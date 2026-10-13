@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JobBeacon Auto-Apply",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fills job application forms from your JobBeacon profile. You review and submit.",
   "permissions": [
     "activeTab",

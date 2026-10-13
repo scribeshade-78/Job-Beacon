@@ -1,22 +1,26 @@
 # CLAUDE.md
 
-## Skills Configuration (founder-approved, permanent)
+## Project discipline (applies to every task)
 
-PRIMARY SKILLS — use in EVERY task, no exceptions:
-1. jobbeacon-development — core project discipline (inspect-first, no fabrication, stop-before-commit)
-2. ponytail — minimal diffs, YAGNI, lazy solutions, token efficiency
-3. verification-before-completion (superpowers) — run verification before any success claim
-4. systematic-debugging (superpowers) — root-cause first on any failure
-5. supabase + supabase-postgres-best-practices — RLS/migrations/grants correctness
+These are the working rules. They are stated directly rather than as a list of skills,
+because the skills that used to be named here no longer resolve in the current catalog —
+load whichever skill actually matches the task, and follow these rules regardless.
 
-OTHER SKILLS — apply ONLY when clearly relevant to the specific task; do not load irrelevant skills (token waste):
-- test-driven-development — new features
-- code-review — before commit gates
-- security-review — major commits, secrets handling
-- frontend-design — UI polish phases
-- simplify — cleanup passes
-- claude-md-management:revise-claude-md — context doc updates
+1. **Inspect first.** Read the real file, schema or production state before writing anything.
+   Never build on a remembered or assumed shape.
+2. **No fabrication.** If a number, endpoint or column cannot be verified, say so and stop.
+   Reporting an unknown as a fact is the worst available outcome.
+3. **Fail-first tests.** Write the test, watch it fail for the right reason, then implement.
+4. **Minimal diffs.** Smallest change that does the job; no speculative abstraction.
+5. **Verify before claiming success.** Run the real command and read the real output. Never
+   report a check as run when it was not.
+6. **Push only when the founder says so**, and never with a red suite. Release is gated on
+   `npm test` exiting 0.
 
-BANNED SKILLS — NEVER use these, they conflict with project rules (push only when founder explicitly says):
-- ship, land-and-deploy, commit-commands:commit-push-pr — auto-push/auto-PR behavior violates push discipline
-- freeze, guard — redundant with jobbeacon-development
+## Project-specific facts worth restating
+
+- **Deployment ships the working tree, not a commit.** Keep `git status` clean and be on the
+  intended commit before running `deploy/deploy.sh`.
+- **A local migration file that is not applied fails deploy preflight (Check A).** Apply it and
+  record it in `supabase_migrations.schema_migrations` in the same pass.
+- **Verify deploys against `/api/health`**, not the deploy output's tail.
