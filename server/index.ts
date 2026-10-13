@@ -109,6 +109,7 @@ import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { answerAgentChat, parseAgentChatRequest } from "./agent/chat.js";
 import { loadExtensionProfile } from "./extension/profile.js";
+import { authorizeSubmission } from "./applications/autoApplyClaim.js";
 import { executeAgentAction, parseAgentActionRequest } from "./agent/actions.js";
 import {
   AGENT_ACTION_RATE_LIMIT_MAX,
@@ -693,6 +694,7 @@ export function createApp(options: CreateAppOptions = {}) {
     message: { error: "Too many interview preparation requests. Please try again later." },
   });
 
+
   // AI Career Copilot. Chat is the most repeatable model call in the product — a
   // candidate types a follow-up every few seconds — and the whole transcript is
   // re-sent on every turn, so the cost of a request grows with its own
@@ -717,6 +719,20 @@ export function createApp(options: CreateAppOptions = {}) {
     legacyHeaders: false,
     keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
     message: { error: "Too many Copilot actions. Please try again later." },
+  });
+
+  // Auto-apply submission authorisation. THIS IS THE TIGHTEST LIMIT IN THE APP, because
+  // it is the only endpoint that authorises an irreversible act: once an employer receives
+  // a submission it cannot be recalled. A candidate authorises a handful of applications
+  // in a sitting, so thirty per fifteen minutes is generous for a human and useless for a
+  // loop. Keyed on the verified session, like every other limiter here.
+  const autoApplyAuthorizeRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (request: AuthenticatedRequest) => request.user!.id,
+    message: { error: "Too many submission requests. Please try again later." },
   });
 
   // Admin-triggered worker batches. These spend third-party quota and model
@@ -1335,6 +1351,63 @@ export function createApp(options: CreateAppOptions = {}) {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // POST /api/extension/auto-apply/authorize
+  //
+  // THE SECOND TRIP. The extension has already filled a form; the candidate has looked at
+  // it; this is the request that asks whether the submission may go ahead.
+  //
+  // THIS ROUTE ADDS NO ELIGIBILITY RULE OF ITS OWN, AND THAT IS THE REQUIREMENT. It
+  // authenticates, rate limits, shape-checks the body, and delegates. Every gate, the M7
+  // quota, the lease check, the review approval and the single-use consumption live in
+  // authorizeSubmission - so there is exactly one place that can decide an application may
+  // be sent, and a route that grew a check of its own would be a second answer.
+  //
+  // The candidate id comes from the verified token, never the body: the gatekeeper also
+  // verifies the attempt belongs to that candidate, so a guessed uuid cannot submit
+  // somebody else's application.
+  // ---------------------------------------------------------------------------
+  app.post(
+    "/api/extension/auto-apply/authorize",
+    requireAuth,
+    autoApplyAuthorizeRateLimit,
+    async (request: AuthenticatedRequest, response) => {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const attemptId = typeof body.attemptId === "string" ? body.attemptId : "";
+      const leaseToken = typeof body.leaseToken === "string" ? body.leaseToken : "";
+
+      // Shape only. A malformed uuid cannot be about an attempt; whether the attempt is
+      // submittable is the gatekeeper's question, not this one.
+      if (!UUID_PATTERN.test(attemptId) || !UUID_PATTERN.test(leaseToken)) {
+        response.status(400).json({ error: "attemptId and leaseToken must both be uuids." });
+        return;
+      }
+
+      try {
+        const result = await authorizeSubmission(resolveServiceClient(), {
+          candidateId: request.user!.id,
+          attemptId,
+          leaseToken,
+        });
+
+        // Per-candidate and per-moment; no shared cache may hold a submission decision.
+        response.set("Cache-Control", "no-store");
+
+        if (result.allowed) {
+          response.status(200).json(result);
+          return;
+        }
+
+        // 404 when the attempt is not this candidate's or does not exist - deliberately the
+        // same answer for both, so it cannot be used to probe. 409 for every other refusal.
+        response.status(result.refusal === "NOT_FOUND" ? 404 : 409).json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[auto-apply] authorize failed:", message);
+        response.status(500).json({ error: "Could not authorize this submission." });
+      }
+    },
+  );
   // AI Career Copilot.
   //
   // POST /api/agent/chat
