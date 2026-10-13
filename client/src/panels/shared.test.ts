@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { safeVacancyHref } from "./shared";
+import { appendAttemptId, safeVacancyHref } from "./shared";
 
 /**
  * Task F — these tests did not exist before.
@@ -70,5 +70,42 @@ describe("safeVacancyHref", () => {
     // becomes "#" - losing a link is acceptable, executing a scraped string is
     // not.
     expect(safeVacancyHref(" https://example.com/jobs/1")).toBe("#");
+  });
+});
+
+describe("appendAttemptId", () => {
+  const ID = "a869cef4-5dce-4700-bb62-12505bd22d7e";
+
+  it("appends the attempt id to a plain board URL", () => {
+    expect(appendAttemptId("https://boards.greenhouse.io/acme/jobs/123", ID)).toBe(
+      "https://boards.greenhouse.io/acme/jobs/123?jb_attempt_id=" + ID,
+    );
+  });
+
+  it("PRESERVES an existing query string and the fragment", () => {
+    const url = new URL(appendAttemptId("https://jobs.lever.co/acme/abc?utm_source=x#apply", ID));
+    expect(url.searchParams.get("utm_source")).toBe("x");
+    expect(url.searchParams.get("jb_attempt_id")).toBe(ID);
+    expect(url.hash).toBe("#apply");
+  });
+
+  it("leaves a REFUSED url refused rather than decorating it", () => {
+    expect(appendAttemptId("#", ID)).toBe("#");
+  });
+
+  it("does nothing without an attempt id", () => {
+    expect(appendAttemptId("https://example.com/j", undefined)).toBe("https://example.com/j");
+    expect(appendAttemptId("https://example.com/j", "")).toBe("https://example.com/j");
+  });
+
+  it("stays composable with safeVacancyHref - a dangerous URL never gets a parameter", () => {
+    expect(appendAttemptId(safeVacancyHref("javascript:alert(1)"), ID)).toBe("#");
+    expect(appendAttemptId(safeVacancyHref("https://x.test/j"), ID)).toContain("jb_attempt_id=" + ID);
+  });
+
+  it("encodes the id so it cannot break out of the query string", () => {
+    const out = appendAttemptId("https://example.com/j", "a&b=c d");
+    expect(out).not.toContain("a&b=c d");
+    expect(new URL(out).searchParams.get("jb_attempt_id")).toBe("a&b=c d");
   });
 });

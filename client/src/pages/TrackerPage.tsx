@@ -5,7 +5,7 @@ import { Spinner } from "../components/ui/spinner";
 import { ATTEMPT_STATUS_LABELS, listApplications, type ApplicationSummary } from "../lib/applications";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { AttemptReview } from "../panels/AttemptReview";
-import { safeVacancyHref } from "../panels/shared";
+import { appendAttemptId, safeVacancyHref } from "../panels/shared";
 import { cn } from "../lib/utils";
 import type { ResponseCategory } from "../../../shared/priorityScore";
 
@@ -484,7 +484,7 @@ export function TrackerPage() {
 
               {safeVacancyHref(selected.application.vacancyUrl) !== null ? (
                 <a
-                  href={safeVacancyHref(selected.application.vacancyUrl) ?? "#"}
+                  href={appendAttemptId(safeVacancyHref(selected.application.vacancyUrl) ?? "#", selected.application.attempts[0]?.id)}
                   target="_blank"
                   rel="noreferrer noopener"
                   className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-ios-blue"
