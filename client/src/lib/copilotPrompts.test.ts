@@ -13,7 +13,7 @@ describe("pageForPath", () => {
     expect(pageForPath("")).toBe("home");
     expect(pageForPath("/resumes")).toBe("resumes");
     expect(pageForPath("/opportunities")).toBe("opportunities");
-    expect(pageForPath("/applications")).toBe("applications");
+    expect(pageForPath("/tracker")).toBe("applications");
     expect(pageForPath("/responses")).toBe("responses");
   });
 

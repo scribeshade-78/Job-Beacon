@@ -71,7 +71,7 @@ describe("candidate navigation", () => {
       "Inbox",
       "Tasks",
       "Companies",
-      "Applications",
+      "Tracker",
       "Security",
       "Plans & Billing",
     ]) {
@@ -92,7 +92,7 @@ describe("candidate navigation", () => {
       ["Inbox", "#/responses"],
       ["Tasks", "#/action-required"],
       ["Companies", "#/companies"],
-      ["Applications", "#/applications"],
+      ["Tracker", "#/tracker"],
     ];
 
     for (const [label, href] of routes) {

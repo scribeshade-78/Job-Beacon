@@ -109,7 +109,7 @@ describe("protectedRouteFor", () => {
   });
 
   it("treats candidate routes as unprotected", () => {
-    for (const path of ["/", "/applications", "/account/employer-access", "/jobs/abc"]) {
+    for (const path of ["/", "/tracker", "/account/employer-access", "/jobs/abc"]) {
       expect(protectedRouteFor(path)).toBeNull();
     }
   });

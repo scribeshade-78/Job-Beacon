@@ -4,6 +4,7 @@ import { Input } from "../components/ui/input";
 import { Spinner } from "../components/ui/spinner";
 import { ATTEMPT_STATUS_LABELS, listApplications, type ApplicationSummary } from "../lib/applications";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { AttemptReview } from "../panels/AttemptReview";
 import { safeVacancyHref } from "../panels/shared";
 import { cn } from "../lib/utils";
 import type { ResponseCategory } from "../../../shared/priorityScore";
@@ -136,6 +137,10 @@ export function TrackerPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | TrackerStage>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Bumped after an approval so the list re-reads. The approve call changes the attempt's
+  // server-side status, and a tracker still showing "Awaiting your review" after the
+  // candidate approved it would be showing a state that no longer exists.
+  const [reloadToken, setReloadToken] = useState(0);
 
   const now = useMemo(() => Date.now(), []);
 
@@ -158,7 +163,7 @@ export function TrackerPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadToken]);
 
   const entries = useMemo(
     () =>
@@ -417,6 +422,17 @@ export function TrackerPage() {
                         ) : null}
                         {attempt.lastError !== null ? (
                           <p className="mt-1.5 text-xs text-status-blocked-fg">{attempt.lastError}</p>
+                        ) : null}
+
+                        {/* THE REVIEW GATE, MOVED HERE FROM THE RETIRED APPLICATIONS PAGE.
+                            This is the only path in the product to approve a pending_review
+                            attempt, so the Tracker has to carry it or those applications are
+                            stranded awaiting a review with no button to give. */}
+                        {attempt.status === "pending_review" ? (
+                          <AttemptReview
+                            attemptId={attempt.id}
+                            onApproved={() => setReloadToken((token) => token + 1)}
+                          />
                         ) : null}
                       </li>
                     ))}

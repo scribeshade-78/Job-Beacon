@@ -37,7 +37,10 @@ export function pageForPath(path: string): CopilotPage {
     return "opportunities";
   }
 
-  if (path.startsWith("/applications")) {
+  // The Tracker replaced the Applications page; the page id stays "applications" because
+  // the prompt it selects ("What applications are waiting on my approval?") is about the
+  // applications themselves, not about which route displays them.
+  if (path.startsWith("/tracker")) {
     return "applications";
   }
 

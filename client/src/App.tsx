@@ -12,7 +12,6 @@ import { ensureCandidateProfile } from "./lib/profile";
 import { getSupabaseBrowserClient } from "./lib/supabaseClient";
 import { ActionRequiredPage } from "./pages/ActionRequiredPage";
 import { AdminPage } from "./pages/AdminPage";
-import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { TrackerPage } from "./pages/TrackerPage";
 import { BillingPage } from "./pages/BillingPage";
 import { CompanyIntelligencePage } from "./pages/CompanyIntelligencePage";
@@ -128,9 +127,6 @@ export function SignedInRoutes({
             instead of re-parsing the hash. */}
         <Route path="/jobs/:jobId">
           {(params) => <JobDetailPage jobId={params.jobId} candidateId={candidateId} />}
-        </Route>
-        <Route path="/applications">
-          <ApplicationsPage ready={ready} />
         </Route>
         {/* A CANDIDATE ROUTE, beside the other candidate routes. It does NOT replace
             /moderator: that is a capability-gated queue moderators actually use, and the
