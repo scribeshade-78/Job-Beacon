@@ -19,7 +19,7 @@ import {
   Target,
   User,
   X,
-  type LucideIcon,
+  type LucideIcon, Activity,
 } from "lucide-react";
 import { APP_NAME } from "../../../shared/app";
 import { cn } from "../lib/utils";
@@ -39,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/target-roles", label: "Target Roles", Icon: Target },
   { href: "/opportunities", label: "Find Jobs", Icon: Briefcase },
   { href: "/applications", label: "Applications", Icon: Send },
+  { href: "/tracker", label: "Tracker", Icon: Activity },
   { href: "/responses", label: "Inbox", Icon: Inbox },
   { href: "/action-required", label: "Tasks", Icon: AlertCircle },
   { href: "/companies", label: "Companies", Icon: Building2 },
