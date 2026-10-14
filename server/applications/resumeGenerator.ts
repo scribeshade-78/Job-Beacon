@@ -266,7 +266,7 @@ export async function readResumeOptimizationLevel(
 }
 
 /** Bumped whenever either prompt below changes, so a stored artifact says which wording produced it. */
-export const RESUME_TAILORING_PROMPT_VERSION = "resume-tailoring-v1";
+export const RESUME_TAILORING_PROMPT_VERSION = "resume-tailoring-v2";
 
 export const DEFAULT_TAILORING_MODEL = "openai/gpt-4o-mini";
 
@@ -303,6 +303,24 @@ export const HONEST_SYSTEM_PROMPT = [
   '   "summary":  {"text": string, "factRefs": string[]},',
   '   "bullets":  [{"text": string, "factRefs": string[]}],',
   '   "skills":   [{"text": string, "factRefs": string[]}]}',
+  "",
+  "THE SUMMARY IS A CLAIM LIKE ANY OTHER, AND IT IS THE ONE MOST OFTEN LEFT UNCITED.",
+  "A summary reads like an overview, so it is tempting to write a strong one and cite",
+  "nothing. Do not. A summary that synthesises several facts must name ALL of them in",
+  "its factRefs. An uncited summary is not a partial success: the ENTIRE response is",
+  "rejected and thrown away, including the bullets and skills that were cited correctly.",
+  "",
+  "WORKED EXAMPLE. Given these three confirmed facts:",
+  "  [f-001] (experience) Rebuilt the nightly ingestion platform, cutting it from nine hours to seventy minutes",
+  "  [f-002] (skill) Apache Spark",
+  "  [f-003] (skill) Kafka",
+  "this summary is REJECTED, because its factRefs is empty:",
+  '  {"text": "Data engineer building high-throughput pipelines in Spark and Kafka.", "factRefs": []}',
+  "and this summary is ACCEPTED, with exactly the same words, because every part of it",
+  "traces to a named fact:",
+  '  {"text": "Data engineer building high-throughput pipelines in Spark and Kafka.", "factRefs": ["f-001", "f-002", "f-003"]}',
+  "The wording is not what makes the difference. The citations are.",
+  "",
   "Each factRefs array names the extractedFactIds that text was written from. Text",
   "you cannot cite must not be written: if you have nothing grounded to put in a",
   'section, return it as {"text": "", "factRefs": []} and it will be left out.',
@@ -729,6 +747,114 @@ function renderTailoringInput(
 }
 
 /**
+ * How many times a tailoring response is generated before an uncited claim is fatal.
+ *
+ * TWO, NOT MORE. The failure being retried is a FORMATTING OMISSION rather than a wrong answer:
+ * the model had the right confirmed facts in front of it and left factRefs empty, so a second
+ * sample is genuinely likely to differ. Re-asking after a second failure would be paying twice
+ * for the same instruction-following problem, and the honest outcome then is to report it.
+ */
+export const TAILORING_MAX_ATTEMPTS = 2;
+
+export interface GeneratedTailoring {
+  content: TailoredResumeContent;
+  citedFactCount: number;
+}
+
+/**
+ * Generate one tailoring response and put it through the honesty gate, retrying ONCE when the
+ * only objection is an uncited claim.
+ *
+ * WHY ONLY THAT FAILURE IS RETRIED. An uncited claim is a prompt-adherence slip. The others are
+ * not:
+ *
+ *   * FabricatedContentError cites a fact that does not exist, which is precisely what the gate
+ *     exists to catch. Retrying it is hoping a wrong answer becomes right, and eventually it
+ *     would succeed at turning a caught fabrication into a submitted one.
+ *   * A malformed response is not JSON and will not become JSON on the second ask.
+ *
+ * THE RETRY COSTS NOTHING. The caller reserves one AI credit per APPLICATION ATTEMPT rather than
+ * per model call (see the generate-preview route's reservationKey), so a second sample spends no
+ * additional credit.
+ *
+ * WHY THE TELEMETRY LIVES HERE. This failure is invisible from outside: the route answers with a
+ * generic 500, the credit is refunded, and the candidate is told nothing. Without the model's
+ * actual text there is no way to tell a model that ignored the citation instruction from one
+ * that wrote something the prompt never asked it to cite - which is the difference between a
+ * prompt bug and a gate bug, and it is exactly the ambiguity an end-to-end run was needed to
+ * surface.
+ *
+ * THE LOGGED TEXT IS CANDIDATE-DERIVED: the model paraphrases the candidate's confirmed facts,
+ * so it is personal data. It belongs in access-controlled logs and must not be shipped to a
+ * third-party aggregator that is not already trusted with the candidate's resume.
+ */
+async function generateVerifiedTailoring(
+  callModel: () => Promise<{ choices: Array<{ message?: { content?: string | null } | null }> }>,
+  confirmedIds: ReadonlySet<string>,
+  context: { candidateId: string; vacancyId: string; level: string; model: string },
+): Promise<GeneratedTailoring> {
+  let lastRawResponse = "";
+
+  for (let attempt = 1; attempt <= TAILORING_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const completion = await callModel();
+      // Captured BEFORE anything can reject it, so the catch below always logs the exact text
+      // that failed rather than a reconstruction of it.
+      const raw = completion.choices[0]?.message?.content ?? "";
+      lastRawResponse = raw;
+
+      if (raw.length === 0) {
+        throw new MalformedTailoredResumeError("empty response content");
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new MalformedTailoredResumeError("response content was not valid JSON");
+      }
+
+      if (!isValidTailoredContent(parsed)) {
+        throw new MalformedTailoredResumeError("response did not match the expected tailoring schema");
+      }
+
+      // THE HONESTY GATE. Two checks, in this order, over every claim in the result —
+      // headline, summary, bullets and skills alike. Shared verbatim with the cover letter
+      // generator; see verifyGroundedClaims.
+      const { citedFactCount } = verifyGroundedClaims(allClaims(parsed), confirmedIds);
+
+      return { content: parsed, citedFactCount };
+    } catch (error) {
+      if (!(error instanceof UncitedClaimError)) {
+        throw error;
+      }
+
+      const willRetry = attempt < TAILORING_MAX_ATTEMPTS;
+
+      console.error(
+        willRetry
+          ? "[resume] tailoring produced an uncited claim; retrying once"
+          : "[resume] tailoring produced an uncited claim on the retry too; giving up",
+        {
+          ...context,
+          attempt,
+          uncitedTexts: error.uncitedTexts,
+          rawResponse: lastRawResponse,
+        },
+      );
+
+      if (!willRetry) {
+        throw error;
+      }
+    }
+  }
+
+  // Unreachable in practice: the loop returns on success and throws on its final failure.
+  // Present so the compiler can see that this function always produces a value.
+  throw new MalformedTailoredResumeError("tailoring produced no verified content");
+}
+
+/**
  * Reads the confirmed facts, loads the posting, and — unless the preference is
  * "off" — asks the model for tailored content and validates it against the
  * candidate's confirmed fact ids.
@@ -774,40 +900,27 @@ export async function tailorResumeForVacancy(
     process.env.OPENROUTER_MODEL ??
     DEFAULT_TAILORING_MODEL;
 
-  const completion = await deps.openai.chat.completions.create({
-    model,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: renderTailoringInput(payload.facts, job) },
-    ],
-    response_format: { type: "json_object" },
-  });
+  // Rendered once and reused across attempts: a retry re-asks the SAME question rather than
+  // rebuilding the prompt, so the second sample differs only by the model's own randomness.
+  const userMessage = renderTailoringInput(payload.facts, job);
 
-  const content = completion.choices[0]?.message?.content;
-
-  if (!content) {
-    throw new MalformedTailoredResumeError("empty response content");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new MalformedTailoredResumeError("response content was not valid JSON");
-  }
-
-  if (!isValidTailoredContent(parsed)) {
-    throw new MalformedTailoredResumeError("response did not match the expected tailoring schema");
-  }
-
-  // THE HONESTY GATE. Two checks, in this order, over every claim in the
-  // result — headline, summary, bullets and skills alike. Shared verbatim with
-  // the cover letter generator; see verifyGroundedClaims.
-  const claims = allClaims(parsed);
-  const { citedFactCount } = verifyGroundedClaims(claims, confirmedIds);
+  const generated = await generateVerifiedTailoring(
+    () =>
+      deps.openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    confirmedIds,
+    { candidateId: input.candidateId, vacancyId: input.vacancyId, level, model },
+  );
 
   // A model that grounded nothing at all has, in effect, declined to write a
   // resume. That is not an error to paper over with an empty document.
+  const claims = allClaims(generated.content);
   if (claims.every((claim) => claim.text.trim().length === 0)) {
     throw new MalformedTailoredResumeError("every section came back empty, so there is nothing to submit");
   }
@@ -815,10 +928,10 @@ export async function tailorResumeForVacancy(
   return {
     kind: "generated",
     level,
-    content: parsed,
+    content: generated.content,
     modelVersion: model,
     promptVersion: RESUME_TAILORING_PROMPT_VERSION,
-    citedFactCount,
+    citedFactCount: generated.citedFactCount,
   };
 }
 

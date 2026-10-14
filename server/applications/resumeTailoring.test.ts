@@ -494,3 +494,142 @@ describe("tailorResumeForVacancy — malformed model output is rejected, not pat
     ).rejects.toBeInstanceOf(MalformedTailoredResumeError);
   });
 });
+
+/**
+ * A model stub that answers DIFFERENTLY on each call, so the retry path can be exercised.
+ * makeModel above deliberately returns the same body every time, which is what the refusal
+ * tests want and the opposite of what a retry test needs.
+ */
+function makeSequencedModel(responses: unknown[]) {
+  let call = 0;
+  const create = vi.fn(async (_body: ChatCall) => {
+    const response = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    return {
+      choices: [{ message: { content: typeof response === "string" ? response : JSON.stringify(response) } }],
+    };
+  });
+  return { openai: { chat: { completions: { create } } } as never, create };
+}
+
+describe("tailorResumeForVacancy — one retry when the only objection is an uncited claim", () => {
+  // The exact production failure this exists for: gpt-4o-mini wrote a strong summary and left
+  // factRefs empty. Four real calls to the live model produced this every single time.
+  const UNCITED = { ...VALID_RESPONSE, summary: { text: "Award-winning architect", factRefs: [] } };
+
+  it("RECOVERS when the second sample cites its summary", async () => {
+    const client = makeClient();
+    const model = makeSequencedModel([UNCITED, VALID_RESPONSE]);
+
+    await expect(
+      tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID }),
+    ).resolves.toMatchObject({ kind: "generated", citedFactCount: 2 });
+
+    expect(model.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-asks the SAME question rather than rebuilding it, so only randomness differs", async () => {
+    const client = makeClient();
+    const model = makeSequencedModel([UNCITED, VALID_RESPONSE]);
+
+    await tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID });
+
+    const bodyOf = (call: number) => (model.create.mock.calls[call] as unknown as [ChatCall])[0];
+    expect(bodyOf(1)).toEqual(bodyOf(0));
+  });
+
+  it("GIVES UP after the second uncited sample instead of rolling again", async () => {
+    const client = makeClient();
+    const model = makeSequencedModel([UNCITED, UNCITED]);
+
+    await expect(
+      tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID }),
+    ).rejects.toBeInstanceOf(UncitedClaimError);
+
+    expect(model.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a citation to a fact that does not exist", async () => {
+    // Retrying a fabrication is hoping a wrong answer becomes right, and it would eventually
+    // succeed at turning a caught fabrication into a submitted one.
+    const client = makeClient();
+    const model = makeSequencedModel([
+      { ...VALID_RESPONSE, bullets: [{ text: "Made things up", factRefs: ["ghost"] }] },
+      VALID_RESPONSE,
+    ]);
+
+    await expect(
+      tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID }),
+    ).rejects.toBeInstanceOf(FabricatedContentError);
+
+    expect(model.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry a malformed response, which will not become JSON on the second ask", async () => {
+    const client = makeClient();
+    const model = makeSequencedModel(["{ not json at all", VALID_RESPONSE]);
+
+    await expect(
+      tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID }),
+    ).rejects.toBeInstanceOf(MalformedTailoredResumeError);
+
+    expect(model.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs the RAW response on both attempts, because the failure is otherwise invisible", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const client = makeClient();
+      const model = makeSequencedModel([UNCITED, UNCITED]);
+
+      await expect(
+        tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID }),
+      ).rejects.toBeInstanceOf(UncitedClaimError);
+
+      const tailoringLogs = errorSpy.mock.calls.filter(
+        (call) => typeof call[0] === "string" && (call[0] as string).includes("[resume]"),
+      );
+      expect(tailoringLogs).toHaveLength(2);
+
+      // The second carries the text that actually failed, parsed back out of the raw response.
+      const details = tailoringLogs[1][1] as { rawResponse: string; uncitedTexts: string[] };
+      expect(details.uncitedTexts).toEqual(["Award-winning architect"]);
+      expect(JSON.parse(details.rawResponse).summary.text).toBe("Award-winning architect");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe("the honest prompt — summary citations are mandated, not implied", () => {
+  it("names the summary as the field most often left uncited", () => {
+    expect(HONEST_SYSTEM_PROMPT).toContain("THE SUMMARY IS A CLAIM LIKE ANY OTHER");
+    expect(HONEST_SYSTEM_PROMPT).toContain("MOST OFTEN LEFT UNCITED");
+  });
+
+  it("carries a worked example where the SAME words are rejected and then accepted", () => {
+    // The example is the whole point: it shows that the CITATION, not the wording, is what
+    // changes between a response the gate throws away and one it accepts.
+    expect(HONEST_SYSTEM_PROMPT).toContain(
+      '"Data engineer building high-throughput pipelines in Spark and Kafka.", "factRefs": []',
+    );
+    expect(HONEST_SYSTEM_PROMPT).toContain(
+      '"Data engineer building high-throughput pipelines in Spark and Kafka.", "factRefs": ["f-001", "f-002", "f-003"]',
+    );
+  });
+
+  it("warns that an uncited summary discards the whole response, not just the summary", () => {
+    expect(HONEST_SYSTEM_PROMPT).toContain("the ENTIRE response is");
+  });
+
+  it("left the aggressive prompt alone", () => {
+    // Only the honest level was failing; changing both would have edited a prompt that was
+    // never implicated and made the two versions harder to tell apart.
+    expect(AGGRESSIVE_SYSTEM_PROMPT).not.toContain("THE SUMMARY IS A CLAIM LIKE ANY OTHER");
+  });
+
+  it("bumps the recorded prompt version, so an artifact says which wording produced it", () => {
+    expect(RESUME_TAILORING_PROMPT_VERSION).toBe("resume-tailoring-v2");
+  });
+});
