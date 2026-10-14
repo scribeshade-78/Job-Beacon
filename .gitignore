@@ -11,3 +11,7 @@ Thumbs.db
 /docs/JobBeacon End-to-End Documentation.pdf
 chatgpt api key.txt
 
+
+# Reliability harness output (scripts/tailoring-reliability.ts). Results are local audit
+# evidence, not source: a run must not be able to dirty the tree before a deploy.
+scripts/out/
