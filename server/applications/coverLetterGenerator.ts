@@ -8,6 +8,7 @@ import {
   verifyGroundedClaims,
   type GroundedText,
   type ResumeFactEntry,
+  MODEL_MAX_OUTPUT_TOKENS,
 } from "./resumeGenerator.js";
 
 /**
@@ -239,6 +240,10 @@ export async function generateCoverLetter(
       { role: "user", content: renderCoverLetterInput(payload.facts, job) },
     ],
     response_format: { type: "json_object" },
+    // The same shared ceiling as the resume call. Leaving this one uncapped would not fail loudly:
+    // a refused cover-letter call is caught and reported as `failed`, so the preview would return
+    // 200 with a silently missing letter.
+    max_tokens: MODEL_MAX_OUTPUT_TOKENS,
   });
 
   const content = completion.choices[0]?.message?.content;

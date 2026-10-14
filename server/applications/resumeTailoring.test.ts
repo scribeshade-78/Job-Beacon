@@ -5,6 +5,7 @@ import {
   FabricatedContentError,
   HONEST_SYSTEM_PROMPT,
   MalformedTailoredResumeError,
+  MODEL_MAX_OUTPUT_TOKENS,
   MissingBaseResumeError,
   RESUME_TAILORING_PROMPT_VERSION,
   UncitedClaimError,
@@ -631,5 +632,37 @@ describe("the honest prompt — summary citations are mandated, not implied", ()
 
   it("bumps the recorded prompt version, so an artifact says which wording produced it", () => {
     expect(RESUME_TAILORING_PROMPT_VERSION).toBe("resume-tailoring-v2");
+  });
+});
+
+describe("the model call is bounded", () => {
+  it("caps the output tokens instead of reserving the model's 16k maximum", async () => {
+    // Without this the SDK asks for 16,384 output tokens on EVERY request, for a response that runs
+    // about 1,500. The provider reserves against the REQUEST rather than the result, so an account
+    // holding 15,703 credits refuses it outright - which is how a whole reliability run was blocked
+    // by a reservation for ten times the output it ever produced.
+    const client = makeClient();
+    const model = makeModel(VALID_RESPONSE);
+
+    await tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID });
+
+    const body = model.create.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(body.max_tokens).toBe(4096);
+    expect(MODEL_MAX_OUTPUT_TOKENS).toBe(4096);
+  });
+
+  it("keeps the cap on the RETRY too, so a second sample cannot reserve more than the first", async () => {
+    const client = makeClient();
+    const model = makeSequencedModel([
+      { ...VALID_RESPONSE, summary: { text: "Award-winning architect", factRefs: [] } },
+      VALID_RESPONSE,
+    ]);
+
+    await tailorResumeForVacancy(client as never, model, { candidateId: CANDIDATE_ID, vacancyId: VACANCY_ID });
+
+    expect(model.create).toHaveBeenCalledTimes(2);
+    for (const call of model.create.mock.calls) {
+      expect((call[0] as unknown as Record<string, unknown>).max_tokens).toBe(4096);
+    }
   });
 });

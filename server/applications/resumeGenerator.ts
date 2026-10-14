@@ -271,6 +271,35 @@ export const RESUME_TAILORING_PROMPT_VERSION = "resume-tailoring-v2";
 export const DEFAULT_TAILORING_MODEL = "openai/gpt-4o-mini";
 
 /**
+ * The output ceiling for BOTH OpenAI calls this pipeline makes: the tailored resume and the
+ * cover letter.
+ *
+ * WHY AN EXPLICIT CEILING AT ALL. Without one the SDK asks the provider for the model's maximum -
+ * 16,384 tokens for gpt-4o-mini - on every single request, whatever the response actually needs.
+ * That is two problems rather than one:
+ *
+ *   1. A RUNAWAY GENERATION IS UNBOUNDED. Nothing here truncates a response that decides to keep
+ *      writing, so the cost and the latency of one bad sample are whatever the model feels like.
+ *
+ *   2. THE PROVIDER RESERVES AGAINST THE REQUEST, NOT THE RESULT. OpenRouter refuses a request
+ *      whose max_tokens exceeds the account's remaining credit - "402 ... You requested up to
+ *      16384 tokens, but can only afford 15703" - even though the real response is about 1,500
+ *      tokens. A ceiling that is generous relative to the payload therefore buys availability,
+ *      not just tidiness. That is how this was found: an entire reliability run was blocked by a
+ *      reservation for ten times the output it ever produced.
+ *
+ * WHY 4096. The largest tailored response observed end to end is roughly 1,500 tokens, so this is
+ * over double the headroom needed and a quarter of the default. It is a CEILING and not a target:
+ * raising it costs nothing until a response needs the tokens, and dropping it below the real
+ * payload would truncate JSON and turn a good response into a MalformedTailoredResumeError.
+ *
+ * SHARED BY BOTH GENERATORS ON PURPOSE. Two separate ceilings holding the same number drift the
+ * moment somebody tunes one, and the failure would be silent - the resume capped while the cover
+ * letter quietly kept reserving 16k.
+ */
+export const MODEL_MAX_OUTPUT_TOKENS = 4096;
+
+/**
  * HONEST: reorder and reword, never restate a fact as something it is not.
  * The prohibition list is explicit and specific because "don't lie" is not an
  * instruction a model can act on; "do not add a technology the facts do not
@@ -913,6 +942,9 @@ export async function tailorResumeForVacancy(
           { role: "user", content: userMessage },
         ],
         response_format: { type: "json_object" },
+        // See MODEL_MAX_OUTPUT_TOKENS: without this the SDK reserves the model's 16k maximum for
+        // a response that runs about 1.5k.
+        max_tokens: MODEL_MAX_OUTPUT_TOKENS,
       }),
     confirmedIds,
     { candidateId: input.candidateId, vacancyId: input.vacancyId, level, model },

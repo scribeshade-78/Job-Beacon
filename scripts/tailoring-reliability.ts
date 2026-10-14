@@ -73,10 +73,24 @@ function classifyOutcome(status: number, retries: number, segment: string): Outc
   if (status === 200) {
     return retries > 0 ? "pass_retry" : "pass_first";
   }
+  // status -1 is the harness's own marker for "the request never completed" - a thrown fetch. There
+  // is no server log to match against in that case, so it is caught here rather than falling
+  // through to fail_other: a request that never arrived says nothing about the model either.
+  if (status === -1) {
+    return "fail_infra";
+  }
   if (/giving up/.test(segment)) {
     return "fail_uncited";
   }
-  if (/requires more credits|insufficient_quota|ECONNREFUSED|fetch failed|socket hang up|ETIMEDOUT|ENOTFOUND|rate.?limit/i.test(segment)) {
+  // BOTH OpenRouter credit refusals, which are worded differently and mean different things:
+  //   "requires more credits ... you requested up to 16384 tokens"  the account cannot afford the
+  //                                                                reservation for ONE request
+  //   "would exceed your available credits given your current       the account cannot afford the
+  //    in-flight requests"                                         CONCURRENT reservations
+  // The second one only appears because the resume and the cover letter run in parallel, so both
+  // reserve their max_tokens at the same moment and the account must afford the SUM. Matching only
+  // the first wording classified a genuine infrastructure failure as an unclassified model failure.
+  if (/requires more credits|would exceed your available credits|insufficient_quota|ECONNREFUSED|fetch failed|socket hang up|ETIMEDOUT|ENOTFOUND|rate.?limit|429/i.test(segment)) {
     return "fail_infra";
   }
   return "fail_other";

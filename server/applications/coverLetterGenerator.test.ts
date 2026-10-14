@@ -8,6 +8,7 @@ import {
   MAX_COVER_LETTER_PARAGRAPHS,
   MAX_PARAGRAPH_CHARS,
 } from "./coverLetterGenerator.js";
+import { MODEL_MAX_OUTPUT_TOKENS } from "./resumeGenerator.js";
 import {
   FabricatedContentError,
   NoConfirmedFactsError,
@@ -375,5 +376,21 @@ describe("generateCoverLetter — refusals that are not the honesty gate", () =>
     await expect(
       generateCoverLetter(client, { openai: { chat: { completions: { create } } } as never }, input),
     ).rejects.toThrow(/openrouter unreachable/);
+  });
+});
+
+describe("the cover letter model call is bounded", () => {
+  it("shares the resume output ceiling rather than reserving 16k of its own", async () => {
+    // It shares the constant deliberately: two ceilings holding the same number drift the moment
+    // somebody tunes one. And an UNCAPPED cover letter does not fail loudly - a refused call is
+    // caught and reported as "failed", so the preview returns 200 with a silently missing letter.
+    const client = makeClient();
+    const model = makeModel(VALID_RESPONSE);
+
+    await generateCoverLetter(client as never, model, input);
+
+    const body = model.create.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(body.max_tokens).toBe(MODEL_MAX_OUTPUT_TOKENS);
+    expect(MODEL_MAX_OUTPUT_TOKENS).toBe(4096);
   });
 });
