@@ -45,6 +45,26 @@ export interface AttemptPreview {
     originalFilename: string;
     tailored: boolean;
     optimizationLevel: ResumeOptimizationLevel;
+    /**
+     * THE TWO TEXTS THE WORD DIFF NEEDS - AND NEITHER IS SENT YET.
+     *
+     * Stated plainly rather than discovered later: POST /api/candidate/attempts/:id/
+     * generate-preview responds with a signed PDF URL and four fields of document metadata,
+     * and no text at all. The tailored text is produced inside resolveSubmissionResume, handed
+     * to the PDF renderer, and then DISCARDED; the base text is never extracted on this path
+     * either. So AttemptReview renders no "What changed" section today, and this pair being
+     * absent is the reason - not a rendering bug.
+     *
+     * Optional rather than required, because the server genuinely does not send them and a
+     * required field here would be a lie the compiler enforced on every test fixture.
+     *
+     * WHAT UNBLOCKS IT, as one change and not three: persist both texts when a tailored resume
+     * is generated (storeTailoredResume already holds the content in hand and throws it away),
+     * return them from generateAttemptPreview, and pass them through the route. That is a
+     * schema migration plus a write path, which is why it is not bundled into a client change.
+     */
+    baseText?: string;
+    tailoredText?: string;
   };
   coverLetter: CoverLetterPreview;
 }

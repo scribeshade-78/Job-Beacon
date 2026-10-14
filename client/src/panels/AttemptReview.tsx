@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
 import { approveReviewedAttempt, requestAttemptPreview, type AttemptPreview } from "../lib/attemptReview";
+import {
+  diffResumeWords,
+  ResumeDiffTooLargeError,
+  summarizeResumeDiff,
+  type ResumeDiffSegment,
+} from "../lib/resumeDiff";
 
 /**
  * The review action for one held attempt.
@@ -22,6 +28,51 @@ import { approveReviewedAttempt, requestAttemptPreview, type AttemptPreview } fr
  * prevent. Offering the button first and failing on click would be a worse version of the
  * same screen.
  */
+/**
+ * The colours for one diff run, and they are TOKEN CLASSES ONLY.
+ *
+ * --color-status-verified-fg and --color-status-blocked-fg are the TEXT-SAFE members of the
+ * status pair. client/src/styles.css documents that the literal hues measure ~2.2:1 to
+ * ~3.55:1 against white and cannot carry text under WCAG 2.2 AA, while the -fg variants were
+ * computed to clear 4.5:1. The diff is text on a light surface, so it takes the -fg pair.
+ *
+ * The tinted backgrounds are the LITERAL hues at low alpha, which is what that same comment
+ * says they are for: visual distinction on a decorative surface, where WCAG asks for
+ * difference rather than a contrast guarantee. A test in AttemptReview.test.tsx fails if any
+ * literal colour appears in this file at all.
+ */
+function diffSegmentClass(kind: ResumeDiffSegment["kind"]): string {
+  if (kind === "added") {
+    return "bg-status-verified/15 text-status-verified-fg";
+  }
+  if (kind === "removed") {
+    return "bg-status-blocked/15 text-status-blocked-fg line-through";
+  }
+  return "text-ios-text";
+}
+
+/**
+ * The headline above the diff.
+ *
+ * The counts are WORD counts taken from the diff's own runs, not segment counts (which would
+ * call "Led a team of six engineers" one change) and not character counts (which say nothing
+ * a reader can act on). The second sentence is the honest framing of what the optimizer is
+ * allowed to do: it changes how confirmed facts are described, never the facts.
+ */
+function formatDiffSummary(summary: { addedWords: number; removedWords: number }): string {
+  const parts: string[] = [];
+  if (summary.addedWords > 0) {
+    parts.push(summary.addedWords + " added");
+  }
+  if (summary.removedWords > 0) {
+    parts.push(summary.removedWords + " removed");
+  }
+
+  const lead = parts.length > 0 ? parts.join(", ") : "No wording changes";
+
+  return lead + ". Your facts are unchanged — only how they are described.";
+}
+
 export function AttemptReview({ attemptId, onApproved }: { attemptId: string; onApproved: () => void }) {
   const [preview, setPreview] = useState<AttemptPreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -60,6 +111,39 @@ export function AttemptReview({ attemptId, onApproved }: { attemptId: string; on
     onApproved();
   }
 
+  /**
+   * The word diff, derived from the preview rather than stored, so there is nothing to keep
+   * in sync. COMPUTED BEFORE THE EARLY RETURN BELOW because hooks cannot run conditionally.
+   *
+   * IT RETURNS NULL TODAY, AND THAT IS NOT A BUG. The preview endpoint sends a signed PDF URL
+   * and four fields of document metadata and no text at all - see the note on
+   * AttemptPreview.resume. When the server carries baseText and tailoredText this section
+   * appears; until then the panel is exactly what it was, which is more honest than a diff
+   * rendered from data we do not have.
+   */
+  const diff = useMemo(() => {
+    const baseText = preview?.resume.baseText;
+    const tailoredText = preview?.resume.tailoredText;
+
+    // A half-arrived pair is treated exactly like an absent one: there is no partial diff.
+    if (preview?.resume.tailored !== true || !baseText || !tailoredText) {
+      return null;
+    }
+
+    try {
+      const segments = diffResumeWords(baseText, tailoredText);
+      return { segments, summary: summarizeResumeDiff(segments) };
+    } catch (error) {
+      // THE DOCUMENT IS THE THING BEING APPROVED. A wording comparison that cannot be
+      // produced must not take the screen down with it - the candidate can still read the
+      // PDF and still approve. The engine's size bound is the only expected failure here.
+      if (error instanceof ResumeDiffTooLargeError) {
+        return null;
+      }
+      throw error;
+    }
+  }, [preview]);
+
   if (!preview) {
     return (
       <div className="mt-2">
@@ -84,6 +168,24 @@ export function AttemptReview({ attemptId, onApproved }: { attemptId: string; on
           ? "Rewritten for this role (" + preview.resume.optimizationLevel + "). This exact file is what gets submitted."
           : "Your uploaded resume, unchanged. This exact file is what gets submitted."}
       </p>
+
+      {/* WHAT CHANGED, ABOVE THE DOCUMENT. The diff is the digest and the PDF is the detail,
+          and someone deciding whether to approve wants the digest first. It is not a
+          substitute for the file: the file is what gets sent, and the frame below still shows
+          all of it. */}
+      {diff ? (
+        <div className="mt-3 rounded-control border border-ios-separator bg-ios-card p-3">
+          <p className="text-sm font-semibold">What changed</p>
+          <p className="mt-0.5 text-xs text-ios-text-secondary">{formatDiffSummary(diff.summary)}</p>
+          <p className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
+            {diff.segments.map((segment, index) => (
+              <span key={index} className={diffSegmentClass(segment.kind)}>
+                {segment.text}
+              </span>
+            ))}
+          </p>
+        </div>
+      ) : null}
 
       {/* The PDF itself, so approving is a decision about something the candidate has
           actually read. The link above the frame is the fallback for anything that will
