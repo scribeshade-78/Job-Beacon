@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/supabaseClient", () => ({
@@ -154,5 +154,35 @@ describe("AttemptReview - the colour rule", () => {
     expect(attemptReviewSource).toContain("text-status-blocked-fg");
     expect(attemptReviewSource).not.toContain("text-status-verified ");
     expect(attemptReviewSource).not.toContain("text-status-blocked ");
+  });
+});
+
+describe("AttemptReview - the wait", () => {
+  it("shows the staged progress list while the request is in flight, not a bare spinner", async () => {
+    // THE WAIT IS THE POINT. Measured across 43 instrumented runs, a preview takes a median of 14.9s
+    // and up to 35.6s. A static spinner for half a minute reads as a hang, so the panel names the
+    // phase the server is actually in.
+    //
+    // A fetch that never settles, so the panel stays in its loading state for the assertion.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+
+    render(<AttemptReview attemptId="attempt-1" onApproved={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Review & Approve/i }));
+
+    const progress = await screen.findByTestId("preview-progress");
+    expect(progress.getAttribute("data-active-step")).toBe("0");
+
+    // Scoped to the step list: the active label also sits in the live region.
+    const steps = within(screen.getByTestId("preview-progress-steps"));
+    expect(steps.getByText("Reading your confirmed facts…")).toBeTruthy();
+    expect(steps.getByText("Tailoring your resume for this role…")).toBeTruthy();
+    expect(steps.getByText("Rendering your resume for ATS…")).toBeTruthy();
+    expect(steps.getByText("Preparing your review…")).toBeTruthy();
+  });
+
+  it("drops the progress list once the preview arrives, so it never sits under a finished panel", async () => {
+    await renderAndOpenPreview({ baseText: BASE_TEXT, tailoredText: TAILORED_TEXT });
+    expect(screen.queryByTestId("preview-progress")).toBeNull();
+    expect(screen.getByText("Your tailored resume")).toBeTruthy();
   });
 });

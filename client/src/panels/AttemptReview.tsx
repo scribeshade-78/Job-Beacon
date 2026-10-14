@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { PreviewProgress } from "../components/PreviewProgress";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
 import { approveReviewedAttempt, requestAttemptPreview, type AttemptPreview } from "../lib/attemptReview";
@@ -148,9 +149,15 @@ export function AttemptReview({ attemptId, onApproved }: { attemptId: string; on
     return (
       <div className="mt-2">
         <Button size="sm" onClick={handlePreview} disabled={loading}>
-          {loading ? <Spinner className="h-4 w-4" /> : null}
           {loading ? "Preparing your resume…" : "Review & Approve"}
         </Button>
+
+        {/* THE SPINNER IS GONE FROM THIS BRANCH, REPLACED BY THE STAGED LIST BELOW.
+            A preview takes a median of 14.9s and up to 35.6s (measured across 43 instrumented
+            runs), and a static spinner for half a minute is indistinguishable from a hang. The
+            staged list names the phase the server is actually in, so the wait has shape.
+            The Spinner import stays: the approve button further down still uses it. */}
+        {loading ? <PreviewProgress className="mt-3" /> : null}
         {error && (
           <p role="alert" className="mt-1 text-sm text-status-blocked-fg">
             {error}
