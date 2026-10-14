@@ -63,8 +63,8 @@ export interface AttemptPreview {
      * return them from generateAttemptPreview, and pass them through the route. That is a
      * schema migration plus a write path, which is why it is not bundled into a client change.
      */
-    baseText?: string;
-    tailoredText?: string;
+    baseText?: string | null;
+    tailoredText?: string | null;
   };
   coverLetter: CoverLetterPreview;
 }

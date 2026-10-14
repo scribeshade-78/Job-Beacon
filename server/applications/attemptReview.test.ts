@@ -8,6 +8,7 @@ import {
   AttemptNotPreviewedError,
   DEFAULT_REVIEW_BEFORE_SUBMIT,
   generateAttemptPreview,
+  loadResumeDocumentText,
   initialAttemptStatusFor,
   loadOwnedAttempt,
   readReviewBeforeSubmit,
@@ -57,6 +58,8 @@ interface MakeClientOptions {
   planCandidateId?: string;
   /** The attempt the plan lookup should find; null simulates a dangling plan id. */
   planRow?: TableResult;
+  /** The recorded word-diff pair on the resume_documents row, if any. */
+  documentText?: { base: string; tailored: string } | null;
 }
 
 function makeClient(options: MakeClientOptions = {}) {
@@ -90,6 +93,10 @@ function makeClient(options: MakeClientOptions = {}) {
         original_filename: "resume-staff-data-engineer.pdf",
         mime_type: "application/pdf",
         optimization_level: "honest",
+        // Phase 6. Absent by default, which is the state of every document generated before
+        // 20261014120000 and therefore the state most previews are actually in.
+        base_text: options.documentText?.base ?? null,
+        tailored_text: options.documentText?.tailored ?? null,
       },
       error: null,
     },
@@ -394,7 +401,83 @@ describe("loadOwnedAttempt — the authorization boundary", () => {
   });
 });
 
+describe("loadResumeDocumentText", () => {
+  const clientWith = (result: TableResult) => ({ from: vi.fn(() => makeQueryBuilder(result)) }) as never;
+
+  it("returns the pair when both sides were recorded", async () => {
+    const text = await loadResumeDocumentText(
+      clientWith({ data: { base_text: "Led a team of four engineers", tailored_text: "Led a team of six" }, error: null }),
+      "doc-1",
+    );
+
+    expect(text).toEqual({ base: "Led a team of four engineers", tailored: "Led a team of six" });
+  });
+
+  it("returns null for a document generated before the columns existed", async () => {
+    // This is the state of every tailored resume made before 20261014120000, so it is the
+    // answer the review screen gets most often. It must be a normal null, not an error.
+    expect(await loadResumeDocumentText(clientWith({ data: { base_text: null, tailored_text: null }, error: null }), "doc-1")).toBeNull();
+  });
+
+  it("returns null on a HALF pair rather than letting a caller invent the other side", async () => {
+    expect(await loadResumeDocumentText(clientWith({ data: { base_text: "a", tailored_text: null }, error: null }), "doc-1")).toBeNull();
+    expect(await loadResumeDocumentText(clientWith({ data: { base_text: null, tailored_text: "b" }, error: null }), "doc-1")).toBeNull();
+  });
+
+  it("returns null when a side is blank, so the diff is omitted rather than misleading", async () => {
+    // A blank base would render the whole document as added.
+    expect(await loadResumeDocumentText(clientWith({ data: { base_text: "   ", tailored_text: "b" }, error: null }), "doc-1")).toBeNull();
+  });
+
+  it("returns null when the row is missing", async () => {
+    expect(await loadResumeDocumentText(clientWith({ data: null, error: null }), "doc-1")).toBeNull();
+  });
+
+  it("resolves to null on a query error instead of failing the preview, and says so", async () => {
+    // The preview exists to show the candidate the file and offer Approve. Neither depends on a
+    // wording comparison, so a read failure must not take the screen down - but it must be
+    // visible, or "the diff stopped appearing" is indistinguishable from a bug.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const client = clientWith({ data: null, error: { message: "db down" } });
+      expect(await loadResumeDocumentText(client, "doc-1")).toBeNull();
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe("generateAttemptPreview", () => {
+  it("carries the recorded text pair through for the review screen to diff", async () => {
+    const { client } = makeClient({ documentText: { base: "Led four engineers", tailored: "Led six engineers" } });
+    const model = makeModel();
+
+    const preview = await generateAttemptPreview(
+      client,
+      { createOpenAIClient: model.factory, launchBrowser: fakeBrowser() },
+      { candidateId: "cand-1", applicationAttemptId: "attempt-1" },
+    );
+
+    expect(preview.resumeText).toEqual({ base: "Led four engineers", tailored: "Led six engineers" });
+  });
+
+  it("reports NO text for a document that has none, which is every document older than the columns", async () => {
+    const { client } = makeClient();
+    const model = makeModel();
+
+    const preview = await generateAttemptPreview(
+      client,
+      { createOpenAIClient: model.factory, launchBrowser: fakeBrowser() },
+      { candidateId: "cand-1", applicationAttemptId: "attempt-1" },
+    );
+
+    expect(preview.resumeText).toBeNull();
+    // And the preview is still complete: the file, its URL and the letter are all still here.
+    expect(preview.previewUrl).toContain("token=signed");
+  });
+
   it("prepares the resume and returns a signed URL for it", async () => {
     const { client, signedPaths, uploads } = makeClient();
     const model = makeModel();

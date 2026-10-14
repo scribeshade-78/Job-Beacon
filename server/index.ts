@@ -1764,6 +1764,17 @@ export function createApp(options: CreateAppOptions = {}) {
             originalFilename: preview.resume.originalFilename,
             tailored: preview.resume.tailored,
             optimizationLevel: preview.resume.optimizationLevel,
+            /**
+             * The word-diff pair for the review screen, sent as null when it was never
+             * recorded. That is the honest value for any document generated before
+             * 20261014120000, and for one whose base text could not be read: the client
+             * renders no diff rather than a diff of a document nobody was shown.
+             *
+             * NULL RATHER THAN OMITTED, so the shape does not change between responses and a
+             * client cannot mistake an absent key for a field that does not exist yet.
+             */
+            baseText: preview.resumeText?.base ?? null,
+            tailoredText: preview.resumeText?.tailored ?? null,
           },
           /**
            * The letter the candidate is about to approve, or the reason there

@@ -362,6 +362,18 @@ export type CoverLetterOutcome =
     }
   | { kind: "failed"; reason: string };
 
+/**
+ * The two texts the review screen diffs, both present or the pair is absent.
+ *
+ * Modelled as a pair rather than two nullable strings for the same reason the database
+ * constrains them that way (20261014120000_resume_document_text.sql): a diff needs both sides,
+ * and a caller handed one of them would have to invent the other.
+ */
+export interface AttemptPreviewResumeText {
+  base: string;
+  tailored: string;
+}
+
 export interface AttemptPreview {
   applicationAttemptId: string;
   status: string;
@@ -373,6 +385,61 @@ export interface AttemptPreview {
   resumePrepared: boolean;
   /** The letter this attempt will send alongside the resume, or why there isn't one. */
   coverLetter: CoverLetterOutcome;
+  /**
+   * The recorded word-diff pair for the document this attempt will submit.
+   *
+   * NULL IS THE COMMON ANSWER FOR ANY DOCUMENT THAT PREDATES 20261014120000, and it is also
+   * the answer whenever the base text could not be read at generation time. Neither is a
+   * failure to report: the first is a fact about when the file was made, the second was a
+   * deliberate trade that kept the submission moving. The review screen shows the document and
+   * no diff, which is strictly more honest than a diff of a document nobody was shown.
+   */
+  resumeText: AttemptPreviewResumeText | null;
+}
+
+/**
+ * The recorded text pair for one document, or null.
+ *
+ * BOTH SIDES OR NONE, enforced here as well as by the table's constraint. A reader that
+ * received a half pair could only render half a diff.
+ *
+ * A QUERY FAILURE RESOLVES TO NULL RATHER THAN THROWING, because this is display data: the
+ * preview's job is to show the candidate the file they are approving and offer the approve
+ * button, and neither of those depends on a wording comparison. It is logged rather than
+ * swallowed, so "the diff stopped appearing" is diagnosable rather than mysterious.
+ */
+export async function loadResumeDocumentText(
+  client: SupabaseClient,
+  documentId: string,
+): Promise<AttemptPreviewResumeText | null> {
+  const { data, error } = await client
+    .from("resume_documents")
+    .select("base_text, tailored_text")
+    .eq("id", documentId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[review] resume text not loaded", { documentId, message: error.message });
+    return null;
+  }
+
+  const row = data as { base_text: string | null; tailored_text: string | null } | null;
+
+  if (row === null) {
+    return null;
+  }
+
+  const base = row.base_text;
+  const tailored = row.tailored_text;
+
+  if (typeof base !== "string" || typeof tailored !== "string") {
+    return null;
+  }
+  if (base.trim().length === 0 || tailored.trim().length === 0) {
+    return null;
+  }
+
+  return { base, tailored };
 }
 
 /**
@@ -439,6 +506,10 @@ export async function generateAttemptPreview(
     ),
   ]);
 
+  // Read once, used by both return paths below. Failing to read it leaves the diff out and
+  // changes nothing else about the preview.
+  const resumeText = await loadResumeDocumentText(client, resume.documentId);
+
   // Persist the letter and its provenance together, as one write. The database
   // enforces that pairing (application_attempts_cover_letter_provenance_check),
   // so a future caller cannot store one without the other.
@@ -476,6 +547,7 @@ export async function generateAttemptPreview(
         previewUrl: await createResumePreviewUrl(client, resume.storagePath),
         previewUrlExpiresInSeconds: PREVIEW_URL_TTL_SECONDS,
         resumePrepared: !alreadyPrepared,
+        resumeText,
         coverLetter: { kind: "failed", reason: `generated but could not be stored: ${letterError.message}` },
       };
     }
@@ -490,6 +562,7 @@ export async function generateAttemptPreview(
     previewUrl,
     previewUrlExpiresInSeconds: PREVIEW_URL_TTL_SECONDS,
     resumePrepared: !alreadyPrepared,
+    resumeText,
     coverLetter,
   };
 }

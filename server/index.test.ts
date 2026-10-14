@@ -3087,6 +3087,10 @@ describe("POST /api/candidate/attempts/:id/generate-preview", () => {
     previewUrl: "https://storage.test/cand-1/tailored.pdf?token=signed",
     previewUrlExpiresInSeconds: 300,
     resumePrepared: true,
+    resumeText: {
+      base: "Led a team of four engineers",
+      tailored: "Led a team of six engineers",
+    },
     coverLetter: {
       kind: "generated" as const,
       text: "I am a Senior Data Engineer.\n\nMost of that work has been in Apache Spark.",
@@ -3178,6 +3182,10 @@ describe("POST /api/candidate/attempts/:id/generate-preview", () => {
           originalFilename: "resume-staff-data-engineer.pdf",
           tailored: true,
           optimizationLevel: "honest",
+          // Phase 6. The pair the review screen diffs, passed through exactly as the
+          // prepare step recorded it.
+          baseText: "Led a team of four engineers",
+          tailoredText: "Led a team of six engineers",
         },
         coverLetter: {
           status: "generated",
@@ -3188,6 +3196,27 @@ describe("POST /api/candidate/attempts/:id/generate-preview", () => {
           generatedAt: "2026-09-18T22:00:00.000Z",
         },
       });
+    });
+  });
+
+  it("sends the text pair as null when none was recorded, rather than omitting it", async () => {
+    // Every document generated before 20261014120000 is in this state, as is any document whose
+    // base text could not be read. The keys must still be present and explicitly null, so a
+    // client cannot read an absent key as "this response predates the field".
+    mockPreview.mockResolvedValueOnce({ ...previewResult, resumeText: null });
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(previewPath(testBaseUrl), {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as { resume: Record<string, unknown> };
+
+      expect(body.resume).toHaveProperty("baseText", null);
+      expect(body.resume).toHaveProperty("tailoredText", null);
     });
   });
 
