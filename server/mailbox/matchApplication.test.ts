@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ATS_RELAY_DOMAINS,
+  isAtsRelay,
   jaccard,
   normalizeText,
   registrableDomain,
@@ -206,6 +208,117 @@ describe("scoreApplicationMatch", () => {
     expect(result.kind).toBe("auto");
     if (result.kind === "auto") {
       expect(result.attemptId).toBe("match");
+    }
+  });
+});
+
+describe("registrableDomain — the public suffix list", () => {
+  it("does NOT collapse a two-label public suffix to the suffix itself", () => {
+    // THE BUG THIS REPLACED. Taking the last two labels unconditionally made every .co.uk host
+    // registrable-domain to "co.uk", so an unrelated UK agency matched the employer's domain
+    // outright. That is a fabricated signal worth 0.5, and it was enough to auto-link a stranger's
+    // email at 1.00 confidence.
+    expect(registrableDomain("talentagency.co.uk")).toBe("talentagency.co.uk");
+    expect(registrableDomain("northwind.co.uk")).toBe("northwind.co.uk");
+    expect(registrableDomain("jobs.northwind.co.uk")).toBe("northwind.co.uk");
+  });
+
+  it("handles the other common multi-label suffixes", () => {
+    expect(registrableDomain("acme.com.au")).toBe("acme.com.au");
+    expect(registrableDomain("acme.co.jp")).toBe("acme.co.jp");
+    expect(registrableDomain("acme.co.in")).toBe("acme.co.in");
+  });
+
+  it("returns NULL for a bare public suffix, which is the fail-closed direction", () => {
+    // A null registrable domain cannot equal anything, so a host that is only a suffix can never
+    // manufacture a sender_domain_match.
+    expect(registrableDomain("co.uk")).toBeNull();
+    expect(registrableDomain("com")).toBeNull();
+  });
+});
+
+describe("isAtsRelay", () => {
+  it("recognises a vendor and its tenant and regional subdomains", () => {
+    expect(isAtsRelay("no-reply@greenhouse.io")).toBe(true);
+    expect(isAtsRelay("Acme Talent <jobs@eu.greenhouse.io>")).toBe(true);
+    expect(isAtsRelay("no-reply@acme.myworkdayjobs.com")).toBe(true);
+  });
+
+  it("does not recognise an ordinary domain, or one that merely ends in a vendor's name", () => {
+    expect(isAtsRelay("recruiting@acme.com")).toBe(false);
+    expect(isAtsRelay("jobs@notgreenhouse.io")).toBe(false);
+    expect(isAtsRelay(null)).toBe(false);
+    expect(isAtsRelay("no-at-sign")).toBe(false);
+  });
+
+  it("keeps the vendor set curated, because an entry here manufactures evidence", () => {
+    // A wrong entry promotes an exact company name from 0.35 to 0.65, so this is a reviewed list
+    // rather than a heuristic. The assertion is a canary: it fails when somebody adds one.
+    expect(ATS_RELAY_DOMAINS.size).toBe(28);
+    expect(ATS_RELAY_DOMAINS.has("greenhouse.io")).toBe(true);
+    expect(ATS_RELAY_DOMAINS.has("gmail.com")).toBe(false);
+  });
+});
+
+describe("scoreApplicationMatch — ATS relay senders", () => {
+  it("clears the review floor on an exact company name from a vendor, WITHOUT auto-linking", () => {
+    // THE COMMONEST MAIL IN THE SYSTEM. A rejection relayed by the ATS that sent it: the sender is
+    // the vendor, never the employer, so the domain never matches and the name alone used to score
+    // 0.35 - below the floor, so the email was discarded entirely.
+    const result = scoreApplicationMatch(
+      input({ sender: "Acme via Greenhouse <no-reply@greenhouse.io>", company: "Acme Corp" }),
+      [app()],
+    );
+
+    expect(result.kind).toBe("review");
+    if (result.kind === "review") {
+      expect(result.candidates[0]!.confidence).toBeCloseTo(0.65);
+      expect(result.candidates[0]!.reasons).toEqual(["relay_company_exact"]);
+    }
+  });
+
+  it("does NOT stack the relay weight on the ordinary exact-name weight", () => {
+    // 0.65 + 0.35 would be 1.00 from a vendor domain and a company name alone - a confident wrong
+    // link to whichever of the employer's applications happened to come first.
+    const result = scoreApplicationMatch(input({ sender: "no-reply@greenhouse.io", company: "Acme Corp" }), [app()]);
+
+    expect(result.kind).toBe("review");
+    if (result.kind === "review") {
+      expect(result.candidates[0]!.confidence).toBeLessThan(0.85);
+      expect(result.candidates[0]!.reasons).not.toContain("company_name_exact");
+    }
+  });
+
+  it("still reaches auto when the relayed mail ALSO names the role or the job id", () => {
+    // Independent evidence, so crossing the auto line is right rather than lucky.
+    const result = scoreApplicationMatch(
+      input({ sender: "no-reply@greenhouse.io", company: "Acme Corp", role: "Senior Backend Engineer" }),
+      [app()],
+    );
+
+    expect(result.kind).toBe("auto");
+    if (result.kind === "auto") {
+      expect(result.confidence).toBeCloseTo(0.95);
+    }
+  });
+
+  it("auto-links a relayed mail that carries the ATS job id", () => {
+    const result = scoreApplicationMatch(
+      input({ sender: "no-reply@greenhouse.io", company: "Acme Corp", jobId: "GH-4021" }),
+      [app()],
+    );
+
+    expect(result.kind).toBe("auto");
+  });
+
+  it("leaves an ordinary employer domain on the old arithmetic", () => {
+    // The relay path must not have quietly become the default.
+    const result = scoreApplicationMatch(input({ sender: "recruiting@acme.com", company: "Acme Corp" }), [app()]);
+
+    expect(result.kind).toBe("auto");
+    if (result.kind === "auto") {
+      expect(result.confidence).toBeCloseTo(0.85);
+      expect(result.reasons).toEqual(["sender_domain_match", "company_name_exact"]);
     }
   });
 });

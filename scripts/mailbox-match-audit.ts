@@ -21,6 +21,8 @@
  */
 
 import {
+  ATS_RELAY_DOMAINS,
+  isAtsRelay,
   MATCH_AMBIGUITY_MARGIN,
   MATCH_AUTO_THRESHOLD,
   MATCH_REVIEW_THRESHOLD,
@@ -106,15 +108,13 @@ const CASES: MailCase[] = [
     desiredAttemptId: "attempt-anthropic",
   },
   {
-    label: "C. GENERIC REJECTION via an ATS relay, naming the company",
+    label: "C. GENERIC REJECTION via an ATS relay, naming the company (fixed by relay-aware scoring)",
     from: "Stripe via Greenhouse <no-reply@greenhouse.io>",
     subject: "Update on your application to Stripe",
     extraction: { company: "Stripe", role: null, jobId: null },
+    // WAS: none. The relay sender earns relay_company_exact (0.65) instead of company_name_exact
+    // (0.35), which clears the floor without reaching auto - a human decides.
     desired: "review",
-    finding:
-      "company_name_exact is worth 0.35, below the 0.60 review floor, and an ATS relay means the " +
-      "sender domain never matches the employer. A rejection that names the company is silently " +
-      "unmatched - and a rejection is the most common mail this engine will ever see.",
   },
   {
     label: "D. Ambiguous: role only, from the employer's own recruiting domain",
@@ -128,12 +128,21 @@ const CASES: MailCase[] = [
     from: "Talent Agency <jobs@talentagency.co.uk>",
     subject: "Opportunity: Data Engineer",
     extraction: { company: "Northwind Analytics", role: "Data Engineer", jobId: null },
+    // WAS: auto at 1.00, on the back of a forged sender_domain_match. With the public-suffix fix
+    // the domain signal is gone, and what remains (an exact company name AND an exact role, both
+    // genuinely present in the email) is 0.65 - a review, which is the correct human-in-the-loop
+    // answer. Note this is NOT "none": the name and role really are in the message.
+    desired: "review",
+  },
+  {
+    label: "E2. Unrelated UK agency naming ONLY the company — the discriminating case",
+    from: "Talent Agency <jobs@talentagency.co.uk>",
+    subject: "Regarding your application",
+    extraction: { company: "Northwind Analytics", role: null, jobId: null },
+    // WAS: auto at 0.85 — forged sender_domain_match (0.50, every .co.uk collapsing to "co.uk")
+    // plus the exact company name (0.35). That is the false positive in its purest form, and this
+    // is the case that proves it is CLOSED rather than merely diluted.
     desired: "none",
-    finding:
-      "registrableDomain is the last two labels, so EVERY .co.uk host registrable-domains to " +
-      "'co.uk'. An unrelated UK agency therefore earns sender_domain_match, and with company and " +
-      "role exact that reaches 1.00 - a false AUTO at maximum confidence on a wrong application. " +
-      "The source comment acknowledges foo.co.uk; this is what that costs.",
   },
 ];
 
@@ -184,6 +193,20 @@ const companyWeight = (senderPlusCompany + companyPlusRole - senderPlusRole) / 2
 const roleWeight = (senderPlusRole + companyPlusRole - senderPlusCompany) / 2;
 const jobIdWeight = confidenceFor({ sender: null, company: null, role: null, jobId: "gh-7712345" }, stripe) ?? 0;
 
+console.log("=== ATS RELAY DETECTION ===");
+console.log("A relay sender changes what an exact company name is worth, so the set is curated and");
+console.log("matched on the registrable domain: " + ATS_RELAY_DOMAINS.size + " vendors, tenant subdomains included.");
+console.log("");
+for (const sender of [
+  "Stripe Recruiting <no-reply@stripe.com>",
+  "Stripe via Greenhouse <no-reply@greenhouse.io>",
+  "Acme Talent <jobs@eu.greenhouse.io>",
+  "Talent Agency <jobs@talentagency.co.uk>",
+]) {
+  console.log("  " + (isAtsRelay(sender) ? "RELAY    " : "not relay") + " " + sender);
+}
+console.log("");
+
 console.log("=== THE WEIGHTS, SOLVED FROM OBSERVABLE PAIRS ===");
 console.log("The engine hides any score below the review floor, so the weights cannot be read directly.");
 console.log("Three paired probes give three equations; the individual weights fall out of them.");
@@ -202,6 +225,8 @@ for (const [reason, weight] of weightRows) {
   const clears = weight >= MATCH_REVIEW_THRESHOLD;
   console.log("  " + reason.padEnd(22) + " = " + weight.toFixed(2) + "   " + (clears ? "clears the review floor alone" : "BELOW the " + MATCH_REVIEW_THRESHOLD + " review floor"));
 }
+console.log("");
+console.log("  relay_company_exact    = 0.65   clears the review floor, stops short of auto (see below)");
 console.log("");
 console.log("  THE STRUCTURAL POINT: every signal except an exact job id is worth less than the review");
 console.log("  floor on its own. One correct signal is never enough - only combinations link anything.");

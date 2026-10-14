@@ -11,7 +11,23 @@
  * No fuzzy-match library exists in this repo (or is warranted) — the
  * high-value signals (exact ATS job id, sender domain) are string equality
  * after normalisation; token Jaccard covers the softer company/role match.
+ *
+ * TWO THINGS THIS MODULE USED TO GET WRONG, both found by running it over realistic mail
+ * (scripts/mailbox-match-audit.ts) rather than by reading it:
+ *
+ *   1. registrableDomain was "the last two labels", so EVERY .co.uk host collapsed to "co.uk"
+ *      and an unrelated UK agency matched the employer's domain outright. A false
+ *      sender_domain_match is worth 0.5, which was enough to carry an unrelated email to
+ *      confidence 1.00 and AUTO-LINK it to the wrong application. It now uses a real public
+ *      suffix list.
+ *
+ *   2. A rejection relayed through an ATS comes from the VENDOR, not the employer, so its
+ *      sender never matches and an exact company name is only 0.35 - below the 0.60 review
+ *      floor. The commonest mail in the system was silently dropped. Relay senders now make an
+ *      exact company name worth much more, so those emails reach a human instead of vanishing.
  */
+
+import { getDomain } from "tldts";
 
 export const MATCH_AUTO_THRESHOLD = 0.85;
 export const MATCH_REVIEW_THRESHOLD = 0.6;
@@ -25,6 +41,13 @@ export const MATCH_REASONS = [
   "company_name_fuzzy",
   "role_title_exact",
   "role_title_fuzzy",
+  /**
+   * An exact company name in mail sent from a KNOWN ATS VENDOR rather than from the employer.
+   * A distinct reason because it is a distinct piece of evidence: the name is exact, and the
+   * sender corroborates that this is an application-system notification rather than a stranger
+   * who happens to know the company's name.
+   */
+  "relay_company_exact",
 ] as const;
 
 export type MatchReason = (typeof MATCH_REASONS)[number];
@@ -132,16 +155,98 @@ export function senderDomain(sender: string | null | undefined): string | null {
   return host || null;
 }
 
-/** Last two labels — deliberately naive (`ponytail:` wrong on `foo.co.uk`; add a public-suffix list only if that matters). */
+/**
+ * The registrable domain ("eTLD+1") of a host, or null when there is not one.
+ *
+ * THE PUBLIC SUFFIX LIST IS THE POINT, NOT A DETAIL. The previous implementation took the last
+ * two labels unconditionally, which is correct only when the last label is itself a registry.
+ * On a two-label suffix like .co.uk it returned "co.uk" for EVERY such host, so
+ * `jobs@talentagency.co.uk` registrable-domained to the same thing as the employer's
+ * `northwind.co.uk` and domainsMatch() said yes. That is not a near miss: it is a fabricated
+ * signal worth 0.5, enough to auto-link an unrelated email at 1.00 confidence.
+ *
+ * tldts carries the real list, so "co.uk", "com.au", "co.jp" and the ~9,000 others collapse
+ * correctly, and a bare public suffix returns NULL — which domainsMatch() treats as "cannot
+ * match", the fail-closed direction. `tldts` was already present in node_modules as a phantom
+ * transitive dependency and is now declared; a hand-rolled list was rejected because it is
+ * incomplete by construction and the failure mode is a silent false match.
+ */
 export function registrableDomain(host: string | null | undefined): string | null {
   if (!host) {
     return null;
   }
-  const labels = host.toLowerCase().split(".").filter(Boolean);
-  if (labels.length < 2) {
-    return null;
+  // allowPrivateDomains stays false: this only ever compares employer domains, and a private
+  // suffix (github.io and friends) is never one.
+  return getDomain(host.toLowerCase(), { allowPrivateDomains: false });
+}
+
+/**
+ * KNOWN ATS VENDOR DOMAINS — the senders that relay an employer's mail.
+ *
+ * Deliberately a STRICT HAND-CURATED SET rather than a heuristic. A wrong entry here promotes an
+ * exact company name from 0.35 to 0.65, so a stranger's domain that looked vendor-ish would be a
+ * way to manufacture evidence. Every entry below is a vendor whose mail a candidate's inbox
+ * genuinely receives; adding one is a reviewed change, not a guess.
+ *
+ * THIS LIST IS INCOMPLETE ON PURPOSE. A vendor that is missing falls back to the old behaviour -
+ * a review-floor miss - which is a missing link rather than a wrong one. That is the direction to
+ * fail in.
+ */
+export const ATS_RELAY_DOMAINS: ReadonlySet<string> = new Set([
+  "greenhouse.io",
+  "lever.co",
+  "myworkdayjobs.com",
+  "myworkdaysite.com",
+  "workday.com",
+  "ashbyhq.com",
+  "icims.com",
+  "smartrecruiters.com",
+  "successfactors.com",
+  "workable.com",
+  "bamboohr.com",
+  "recruitee.com",
+  "jobvite.com",
+  "paylocity.com",
+  "brassring.com",
+  "avature.net",
+  "breezy.hr",
+  "careerplug.com",
+  "dayforcehcm.com",
+  "oraclecloud.com",
+  "jazzhr.com",
+  "teamtailor.com",
+  "rippling.com",
+  "hireology.com",
+  "phenom.com",
+  "taleo.net",
+  "join.com",
+  "indeed.com",
+]);
+
+/**
+ * What an exact company name is worth when the mail arrived from an ATS vendor.
+ *
+ * 0.65 CLEARS THE 0.60 REVIEW FLOOR AND STOPS SHORT OF THE 0.85 AUTO THRESHOLD, which is the
+ * whole design. A relay sender's domain says nothing about WHICH application this is - the vendor
+ * serves thousands of employers - so the name alone should put the email in front of a human, not
+ * bind it automatically. Adding a role or a job id can still carry it over the auto line, and
+ * that is right: those are independent pieces of evidence.
+ */
+export const RELAY_COMPANY_EXACT_WEIGHT = 0.65;
+
+/**
+ * Whether this sender is an ATS vendor relaying an employer's mail.
+ *
+ * Matched on the REGISTRABLE domain, so a tenant or regional subdomain is recognised as the same
+ * vendor: `eu.greenhouse.io` and `acme.myworkdayjobs.com` both resolve to their vendor.
+ */
+export function isAtsRelay(sender: string | null | undefined): boolean {
+  const host = senderDomain(sender);
+  if (host === null) {
+    return false;
   }
-  return labels.slice(-2).join(".");
+  const registrable = registrableDomain(host);
+  return registrable !== null && ATS_RELAY_DOMAINS.has(registrable);
 }
 
 function domainsMatch(a: string | null, b: string | null): boolean {
@@ -169,8 +274,24 @@ function scoreOne(input: MatchInput, app: CandidateApplication): ScoredApplicati
   const company = stripCompanySuffix(normalizeText(input.company));
   const appCompany = stripCompanySuffix(normalizeText(app.companyName));
   if (company && appCompany && company === appCompany) {
-    confidence += 0.35;
-    reasons.push("company_name_exact");
+    // THE NAME IS WORTH MORE WHEN A VENDOR VOUCHES FOR WHAT KIND OF MAIL THIS IS.
+    //
+    // It is not worth more because the vendor knows the employer - it does not, it serves
+    // thousands. It is worth more because a vendor sender and an exact company name together
+    // establish something neither does alone: this is an application-system notification about
+    // THIS employer. Without it a relayed rejection scores 0.35 and is discarded, which is how
+    // the commonest mail in the system was being thrown away.
+    //
+    // NOT ADDITIVE with company_name_exact: the relay grants 0.65 INSTEAD of 0.35. Stacking them
+    // would reach 1.00 on a company name and a vendor domain alone, which is exactly the
+    // confident-wrong-link this module was just fixed for.
+    if (from !== null && isAtsRelay(input.sender)) {
+      confidence += RELAY_COMPANY_EXACT_WEIGHT;
+      reasons.push("relay_company_exact");
+    } else {
+      confidence += 0.35;
+      reasons.push("company_name_exact");
+    }
   } else if (company && appCompany && jaccard(new Set(company.split(" ")), new Set(appCompany.split(" "))) >= 0.6) {
     confidence += 0.2;
     reasons.push("company_name_fuzzy");
