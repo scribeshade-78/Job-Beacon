@@ -21,6 +21,23 @@
  */
 import type { CandidateProfile, FillReport } from "./lib/types.js";
 import { classifySubmissionEvidence, readAttemptId, type EvidenceInput } from "./lib/loop.js";
+import { detectSite } from "./lib/sites.js";
+import { isOverlayNode, mountOverlay, shouldMountOverlay, type OverlayHandle } from "./lib/overlay.js";
+
+/**
+ * THE MASTER GATE.
+ *
+ * Resolved ONCE, from the hostname, and every entry point below consults it before doing
+ * anything at all. Reading it once is only sound because detectSite matches hostnames and
+ * nothing else: a hostname cannot change without a full navigation, so a value resolved at
+ * document_idle cannot go stale under an SPA route change the way a path-based check would.
+ *
+ * undefined MEANS "NOT A SITE WE KNOW", AND THAT MEANS NOTHING HAPPENS HERE - no fill, no
+ * overlay, no lease request, no network call at all. This is the same stance readAttemptId
+ * takes with a missing id: the common case is a page that is not ours, and guessing is how
+ * the wrong form gets filled.
+ */
+const SITE = detectSite(location.href);
 
 /**
  * The resume the server has authorised for this fill, if any.
@@ -100,6 +117,13 @@ const FORBIDDEN_TYPES = new Set(["password", "hidden", "file", "submit", "button
 
 function isFillable(element: Element): element is HTMLInputElement | HTMLTextAreaElement {
   if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
+    return false;
+  }
+  // SELF-EXCLUSION, and it is checked here rather than relied on from the container. The
+  // shadow root already hides the shell's DOM from this document-level query, but the
+  // data-jobbeacon-filled marker is written by this path, so the thing that writes it is
+  // where the guard belongs. A guard that lives in the container is one refactor from gone.
+  if (isOverlayNode(element)) {
     return false;
   }
   if (element instanceof HTMLInputElement && FORBIDDEN_TYPES.has(element.type)) {
@@ -314,6 +338,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "FILL_FORM") {
     return false;
   }
+  // THE MASTER GATE, on the popup's path too. An unrecognised host is refused outright
+  // rather than attempted generically and reported afterwards as "No matching field on this
+  // page" - a clear refusal the candidate can act on beats a silent near-miss on a form we
+  // do not understand.
+  if (SITE === undefined) {
+    sendResponse({ ok: false, error: "JobBeacon does not fill forms on this site yet." });
+    return true;
+  }
   try {
     sendResponse({
       ok: true,
@@ -342,6 +374,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 let armedAttemptId: string | null = null;
 let armedLeaseToken: string | null = null;
 let outcomeReported = false;
+
+/** The in-page shell, once mounted. Null until the gate passes, and again once dismissed. */
+let overlay: OverlayHandle | null = null;
 
 /**
  * Urls a portal redirects to when it has accepted an application. Conservative on purpose:
@@ -449,6 +484,18 @@ async function watchForOutcome(deadlineMs: number): Promise<void> {
       error: classification.error ?? null,
     },
   });
+
+  // The shell says what was SEEN, matching the classifier rather than rounding it up. The
+  // middle case is the one that matters: needs_verification is an honest unknown, and
+  // showing it as success is exactly the mistake this whole file is written to avoid.
+  overlay?.setStatus(
+    classification.outcome === "succeeded"
+      ? "The portal confirmed this application."
+      : classification.outcome === "failed"
+        ? "The submission failed. Check the page before retrying."
+        : "We could not confirm this went through. Check the site or your email.",
+    classification.outcome === "succeeded" ? "ok" : classification.outcome === "failed" ? "error" : "idle",
+  );
 }
 
 /**
@@ -458,9 +505,22 @@ async function watchForOutcome(deadlineMs: number): Promise<void> {
  * fill, no prompt and no network call - which is also why this cannot fill the wrong form.
  */
 async function armFromUrl(): Promise<void> {
+  // THE MASTER GATE COMES FIRST. On a host we do not know, nothing below runs - no overlay,
+  // no lease request, no network traffic. This is the whole point of the gate.
+  if (SITE === undefined) {
+    return;
+  }
+
   const attemptId = readAttemptId(location.href);
   if (attemptId === undefined) {
     return;
+  }
+
+  // The shell appears as soon as BOTH halves are satisfied, before the server is asked
+  // anything. The candidate opened this page to review an application; showing them a blank
+  // page while a lease is negotiated is the wrong thing to show.
+  if (shouldMountOverlay(location.href)) {
+    overlay = mountOverlay(SITE);
   }
 
   try {
@@ -470,6 +530,7 @@ async function armFromUrl(): Promise<void> {
     if (!response?.ok || !payload?.allowed || typeof payload.leaseToken !== "string") {
       // A refusal is not an error: the attempt may already be sent, or the plan may be
       // out of allowance. Nothing is filled, and the candidate is not interrupted.
+      overlay?.setStatus("This application is not ready to fill. Nothing was changed.", "idle");
       return;
     }
 
@@ -477,10 +538,19 @@ async function armFromUrl(): Promise<void> {
     armedLeaseToken = payload.leaseToken;
 
     if (payload.fill?.profile) {
-      fillForm({ profile: payload.fill.profile });
+      const report = fillForm({ profile: payload.fill.profile });
+      overlay?.setStatus(
+        report.filled.length > 0
+          ? "Filled " + report.filled.join(", ") + ". Review every answer, then submit."
+          : "Nothing was filled on this page. Complete it yourself, then submit.",
+        report.filled.length > 0 ? "ok" : "error",
+      );
+    } else {
+      overlay?.setStatus("Nothing to fill. Review the form, then submit.", "idle");
     }
   } catch {
     // The worker can be asleep, or the session expired. Either way, fill nothing.
+    overlay?.setStatus("Could not reach JobBeacon. Nothing was changed.", "error");
   }
 }
 
@@ -494,6 +564,13 @@ document.addEventListener(
     }
     const target = event.target as Element | null;
     if (target === null) {
+      return;
+    }
+    // SELF-EXCLUSION. A click inside the shadow root is RETARGETED to the host, so without
+    // this the shell's own close button arrives here looking like page content. The host is
+    // a div and would fail isSubmitControl anyway, but relying on that is relying on an
+    // accident of markup rather than on a rule.
+    if (isOverlayNode(target)) {
       return;
     }
     // A click can land on a span inside the button.

@@ -155,6 +155,12 @@ export const SITE_PROFILES: readonly SiteProfile[] = [
     // Real Workday postings live on a tenant subdomain of myworkdayjobs.com
     // (acme.wd1.myworkdayjobs.com), so the subdomain rule is what makes this
     // match in practice.
-    urlPatterns: ["myworkdayjobs.com", "myworkdaysite.com", "workday.com"],
+    //
+    // myworkdaysite.com IS DELIBERATELY ABSENT. It is a genuine Workday domain and Tsenta
+    // carries it, but extension/public/manifest.json does not declare it, so the content
+    // script never runs there and a profile for it would be unreachable. The alternative
+    // was a new host permission for coverage nobody asked for, and
+    // verify-build.mjs now fails the build on exactly this mismatch.
+    urlPatterns: ["myworkdayjobs.com", "workday.com"],
   },
 ];

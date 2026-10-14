@@ -94,4 +94,24 @@ if (!builtBackground.includes(expectedHost)) {
 
 process.stdout.write("Production pointing asserted: " + expectedHost + "\n");
 
+/*
+ * THE PACKAGE IS VERIFIED BEFORE IT IS CALLED BUILT.
+ *
+ * verify-build.mjs existed but NOTHING RAN IT - not an npm script, not CI - so it could not
+ * have caught anything and "Extension built" was the last word regardless. Running it here
+ * is what turns it from a document into a gate: a registry entry the manifest cannot reach,
+ * or a design token that has drifted from the app's own, now fails the build.
+ *
+ * --import=tsx because the script reads .ts sources, and tsx is already how this repo runs
+ * TypeScript under node (see the server scripts in package.json).
+ */
+process.stdout.write("\nVerifying the packaged extension...\n");
+const verifyScript = fileURLToPath(new URL("./verify-build.mjs", import.meta.url));
+const verified = spawnSync(process.execPath, ["--import=tsx", verifyScript], { stdio: "inherit" });
+
+if (verified.status !== 0) {
+  process.stderr.write("\nRefusing to ship: verify-build.mjs rejected the package.\n");
+  process.exit(verified.status ?? 1);
+}
+
 process.stdout.write("\nExtension built into dist/extension\n");
