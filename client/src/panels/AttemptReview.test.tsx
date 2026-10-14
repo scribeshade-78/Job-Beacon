@@ -104,6 +104,31 @@ describe("AttemptReview - the word diff", () => {
     expect(screen.getByText("What changed")).toBeTruthy();
   });
 
+  it("frames the removals ABOVE the runs, before a candidate can misread a sea of red", async () => {
+    // Measured on a real two-page resume: 269 removed words against 45 added. Without this note
+    // the panel reads as "we deleted your experience", which is alarming and false - the tailored
+    // resume is a condensed document, not a lossy one.
+    await renderAndOpenPreview({ baseText: BASE_TEXT, tailoredText: TAILORED_TEXT });
+
+    // Queried by TEXT rather than by role: the cover-letter branch renders its own role="note"
+    // ("No cover letter for this application"), so getByRole("note") is ambiguous on this screen.
+    const note = screen.getByText(/highly condensed/);
+    expect(note.getAttribute("role")).toBe("note");
+    expect(note.textContent).toBe(
+      "Your tailored resume is a highly condensed, ATS-optimized version of your profile. " +
+        "Red text indicates information trimmed for maximum impact.",
+    );
+
+    // ORDER IS THE WHOLE POINT: read before the runs, not after them.
+    const runs = screen.getByText("Led a team of");
+    expect(note.compareDocumentPosition(runs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("shows no framing note when there is no diff to frame", async () => {
+    await renderAndOpenPreview({});
+    expect(screen.queryByText(/highly condensed/)).toBeNull();
+  });
+
   it("says nothing about wording when the diff was too large to produce", async () => {
     // Two long, wholly unrelated strings defeat the shared-affix trimming, which is exactly
     // what the engine's cell bound exists for. The panel must degnrade to "no diff", not throw.
