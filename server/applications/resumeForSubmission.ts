@@ -11,7 +11,8 @@ import {
   type BaseResumeDocument,
   type ResumeOptimizationLevel,
 } from "./resumeGenerator.js";
-import { storeTailoredResume, type RenderPdfDeps } from "./resumeDocument.js";
+import { RESUME_BUCKET, storeTailoredResume, type RenderPdfDeps } from "./resumeDocument.js";
+import { extractResumeText } from "../resumes/textExtraction.js";
 import type { SubmissionResume } from "./adapters/types.js";
 
 /**
@@ -36,6 +37,65 @@ export interface ResumeForSubmissionDeps extends RenderPdfDeps {
    * the paths that actually call a model. Injectable for tests.
    */
   createOpenAIClient?: () => Pick<OpenAI, "chat">;
+  /**
+   * Resume text extraction, injectable so the base-text read can be exercised without a real
+   * PDF. Same shape and the same reasoning as AtsCheckDeps.extractText: the real extractor is
+   * the right default and a caller should have to say so explicitly to get anything else.
+   */
+  extractText?: (data: Uint8Array, mimeType: string) => Promise<string>;
+}
+
+/**
+ * The plain text of the candidate's base resume, or null.
+ *
+ * BEST EFFORT, DELIBERATELY, AND THIS IS THE WHOLE DESIGN OF IT. Its only consumer is the
+ * review screen's word diff. The tailored resume itself is generated from confirmed
+ * extracted_facts and does not read the base document at all, so nothing about the
+ * application depends on this call succeeding. Every failure - no base document, a storage
+ * error, a format the extractor refuses - resolves to null and the submission proceeds
+ * unchanged.
+ *
+ * BLOCKING A SUBMISSION BECAUSE A DIFF COULD NOT BE COMPUTED WOULD BE TRADING THE THING THAT
+ * MATTERS FOR THE THING THAT DOES NOT. That is why the catch is here rather than at the call
+ * site, and why it returns a value instead of throwing.
+ */
+async function readBaseResumeText(
+  client: SupabaseClient,
+  deps: ResumeForSubmissionDeps,
+  candidateId: string,
+): Promise<string | null> {
+  const extract =
+    deps.extractText ?? ((data: Uint8Array, mimeType: string) => extractResumeText(Buffer.from(data), mimeType));
+
+  try {
+    const base = await loadBaseResumeDocument(client, candidateId);
+
+    const { data: file, error } = await client.storage.from(RESUME_BUCKET).download(base.storagePath);
+
+    // NO LOG ON THIS BRANCH. "This document has no recorded text" is a normal, queryable
+    // state - base_text IS NULL, and "how many tailored documents lack one" is a SQL query -
+    // rather than an incident. Logging it would make a routine absence look like a fault in
+    // every run that exercises it, including every test.
+    if (error || !file) {
+      return null;
+    }
+
+    const text = await extract(new Uint8Array(await file.arrayBuffer()), base.mimeType);
+
+    // An empty extraction is treated as no extraction: a blank base side would render the
+    // whole document as added, which is a diff that misleads rather than one that is missing.
+    return text.trim().length > 0 ? text : null;
+  } catch (error) {
+    // THIS ONE IS LOGGED, because it is the unexpected case: the extractor threw, or the
+    // storage client did. The benign "there is no text to record" outcomes return above
+    // without a word; this is the one that would otherwise be indistinguishable from a bug,
+    // and the candidate is the only person who would notice.
+    console.error("[resume] base text not recorded: extraction failed", {
+      candidateId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 export interface ResolveSubmissionResumeInput {
@@ -141,6 +201,11 @@ async function resolveSubmissionResumeUnchecked(
   const vacancyTitle = (vacancy as { raw_title: string } | null)?.raw_title ?? "";
 
   const payload = result.content;
+
+  // Read BEFORE the store, because the store records the pair atomically. A null here means
+  // both columns stay NULL and the review screen shows the document without a diff.
+  const baseText = await readBaseResumeText(client, deps, input.candidateId);
+
   const document = await storeTailoredResume(
     client,
     deps,
@@ -149,6 +214,7 @@ async function resolveSubmissionResumeUnchecked(
       vacancyId: input.vacancyId,
       vacancyTitle,
       content: payload,
+      baseText: baseText ?? undefined,
       // The contact header needs the confirmed facts, which the tailoring step
       // already read. Re-reading them here would be a second source of truth
       // for the same values.

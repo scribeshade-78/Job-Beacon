@@ -7,6 +7,7 @@ import {
   storeTailoredResume,
   TailoredResumeRenderError,
   TailoredResumeStorageError,
+  tailoredResumePlainText,
 } from "./resumeDocument.js";
 import type { ResumeFactEntry, TailoredResumeContent } from "./resumeGenerator.js";
 
@@ -205,6 +206,112 @@ function makeClient(options: {
     from,
   };
 }
+
+describe("tailoredResumePlainText", () => {
+  const renderInput = { content, facts, vacancyTitle: "[MOCK] Data Engineer" };
+
+  it("carries every claim the PDF carries, so the diff describes the document on screen", () => {
+    // THE COUPLING TEST. The plain text and the HTML are two renderings of one document, and
+    // the review screen diffs the first while the candidate reads the second. If a claim
+    // reaches the PDF and not the text, the diff is of a document nobody was shown.
+    const html = renderTailoredResumeHtml(renderInput);
+    const text = tailoredResumePlainText(renderInput);
+
+    for (const claim of [content.headline, content.summary, ...content.bullets, ...content.skills]) {
+      expect(html).toContain(claim.text);
+      expect(text).toContain(claim.text);
+    }
+  });
+
+  it("INCLUDES the fact-derived contact header, or every diff would report the name as removed", () => {
+    // The header is not part of TailoredResumeContent - it is assembled from confirmed facts at
+    // render time - so omitting it here would show the candidate's own name, email, phone and
+    // location as deletions on every single application.
+    const text = tailoredResumePlainText(renderInput);
+
+    for (const value of ["Sravani Kolapalli", "s@example.com", "+1 555 0100", "Hyderabad"]) {
+      expect(text).toContain(value);
+    }
+  });
+
+  it("keeps the document's order: header, headline, summary, experience, skills", () => {
+    const text = tailoredResumePlainText(renderInput);
+    const order = ["Sravani Kolapalli", "Senior Data Engineer", "SUMMARY", "EXPERIENCE", "SKILLS"];
+    const positions = order.map((needle) => text.indexOf(needle));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    // Already sorted means every needle appears after the one before it.
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("omits a section the content does not have, rather than emitting an empty heading", () => {
+    const sparse: TailoredResumeContent = {
+      headline: { text: "", factRefs: [] },
+      summary: { text: "", factRefs: [] },
+      bullets: [],
+      skills: [],
+    };
+
+    const text = tailoredResumePlainText({ content: sparse, facts: [], vacancyTitle: "x" });
+
+    expect(text).toBe("Candidate");
+    expect(text).not.toContain("SUMMARY");
+    expect(text).not.toContain("EXPERIENCE");
+  });
+});
+
+describe("storeTailoredResume — the recorded text pair", () => {
+  const storeInput = {
+    candidateId: "cand-1",
+    vacancyId: "vac-1",
+    vacancyTitle: "[MOCK] Data Engineer",
+    content,
+    facts,
+    optimizationLevel: "honest" as const,
+  };
+
+  const insertedPayload = (insert: ReturnType<typeof vi.fn>) => insert.mock.calls[0][0] as Record<string, unknown>;
+
+  it("records BOTH texts when the base text was read", async () => {
+    const { client, insert } = makeClient({});
+
+    await storeTailoredResume(client, { launchBrowser: fakePdfBrowser().launch }, {
+      ...storeInput,
+      baseText: "Led a team of four engineers",
+    });
+
+    const payload = insertedPayload(insert);
+    expect(payload.base_text).toBe("Led a team of four engineers");
+    expect(payload.tailored_text).toContain("Senior Data Engineer");
+  });
+
+  it("records NEITHER when there is no base text, because a half pair cannot be rendered", async () => {
+    // The database enforces this too (resume_documents_text_pair_check), so a regression here
+    // would surface as a failed INSERT in production rather than as a blank diff.
+    const { client, insert } = makeClient({});
+
+    await storeTailoredResume(client, { launchBrowser: fakePdfBrowser().launch }, { ...storeInput });
+
+    const payload = insertedPayload(insert);
+    expect(payload.base_text).toBeNull();
+    expect(payload.tailored_text).toBeNull();
+  });
+
+  it("treats a BLANK base text as absent rather than recording an empty side", async () => {
+    // An empty base side would render the entire document as added, which misleads rather than
+    // omits. Better to show no diff at all.
+    const { client, insert } = makeClient({});
+
+    await storeTailoredResume(client, { launchBrowser: fakePdfBrowser().launch }, {
+      ...storeInput,
+      baseText: "   \n  ",
+    });
+
+    const payload = insertedPayload(insert);
+    expect(payload.base_text).toBeNull();
+    expect(payload.tailored_text).toBeNull();
+  });
+});
 
 describe("storeTailoredResume", () => {
   /**

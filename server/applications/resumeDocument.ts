@@ -142,6 +142,83 @@ function textOf(claim: GroundedText): string {
 }
 
 /**
+ * The parts of a tailored resume, read ONCE so the PDF and the plain text cannot disagree
+ * about what the document says.
+ *
+ * Extracted because tailoredResumePlainText mirrors renderTailoredResumeHtml, and two copies
+ * of "which fact is the contact line, which claims are bullets" is exactly the kind of drift
+ * that would show a candidate a diff of a document they are not looking at.
+ */
+interface TailoredResumeShape {
+  fullName: string | null;
+  contact: string[];
+  headline: string;
+  summary: string;
+  bullets: string[];
+  skills: string[];
+}
+
+function tailoredResumeShape(content: TailoredResumeContent, facts: ResumeFactEntry[]): TailoredResumeShape {
+  const fullName = factValue(facts, "full_name");
+  const contact = [factValue(facts, "email"), factValue(facts, "phone"), factValue(facts, "location")].filter(
+    (value): value is string => value !== null,
+  );
+
+  return {
+    fullName,
+    contact,
+    headline: textOf(content.headline),
+    summary: textOf(content.summary),
+    bullets: content.bullets.map(textOf).filter((text) => text.length > 0),
+    skills: content.skills.map(textOf).filter((text) => text.length > 0),
+  };
+}
+
+/**
+ * The tailored resume as plain text, IN THE SAME ORDER AND WITH THE SAME CONTENT as
+ * renderTailoredResumeHtml puts into the PDF.
+ *
+ * WHY IT EXISTS. The review screen diffs this against the candidate's uploaded resume, so it
+ * has to describe the document the candidate is actually approving. A text built from a
+ * different subset of the content would produce a diff of a document nobody was shown.
+ *
+ * THE HEADINGS ARE UPPERCASE BECAUSE THE PDF SHOWS THEM UPPERCASE: the template's h2 rule
+ * applies text-transform, so a reader sees "SUMMARY" and the extracted text of the rendered
+ * file would say the same. Matching that costs nothing and keeps the two sides comparable.
+ *
+ * THE CONTACT HEADER IS INCLUDED, and that detail matters. It is not part of
+ * TailoredResumeContent - it is assembled from confirmed facts at render time - so omitting it
+ * here would report the candidate's name, email and phone as REMOVED on every single
+ * application, which would be a diff that lies.
+ *
+ * IT IS NOT A TRUTHFUL REPLACEMENT FOR THE PDF. It is the same content in a comparable shape;
+ * the file remains the thing that is submitted, and the review screen still shows it.
+ */
+export function tailoredResumePlainText(input: TailoredResumeHtmlInput): string {
+  const shape = tailoredResumeShape(input.content, input.facts);
+
+  const lines: string[] = [shape.fullName ?? "Candidate"];
+
+  if (shape.contact.length > 0) {
+    lines.push(shape.contact.join(" • "));
+  }
+  if (shape.headline.length > 0) {
+    lines.push(shape.headline);
+  }
+  if (shape.summary.length > 0) {
+    lines.push("SUMMARY", shape.summary);
+  }
+  if (shape.bullets.length > 0) {
+    lines.push("EXPERIENCE", ...shape.bullets);
+  }
+  if (shape.skills.length > 0) {
+    lines.push("SKILLS", shape.skills.join(" • "));
+  }
+
+  return lines.join("\n");
+}
+
+/**
  * Renders the resume to a single self-contained HTML string. No external
  * stylesheet, font, or image is referenced: Playwright renders this with no
  * network access, so a remote resource would either hang the render or silently
@@ -150,15 +227,9 @@ function textOf(claim: GroundedText): string {
 export function renderTailoredResumeHtml(input: TailoredResumeHtmlInput): string {
   const { content, facts, vacancyTitle } = input;
 
-  const fullName = factValue(facts, "full_name");
-  const contact = [factValue(facts, "email"), factValue(facts, "phone"), factValue(facts, "location")].filter(
-    (value): value is string => value !== null,
-  );
-
-  const headline = textOf(content.headline);
-  const summary = textOf(content.summary);
-  const bullets = content.bullets.map(textOf).filter((text) => text.length > 0);
-  const skills = content.skills.map(textOf).filter((text) => text.length > 0);
+  // The same shape the plain-text rendering uses, so the two cannot disagree about what this
+  // document contains. See tailoredResumeShape.
+  const { fullName, contact, headline, summary, bullets, skills } = tailoredResumeShape(content, facts);
 
   const sections: string[] = [];
 
@@ -313,6 +384,20 @@ export interface StoreTailoredResumeInput {
   modelVersion?: string;
   /** SHA-256 of the confirmed facts the content was built from — a different thing from the document hash, see below. */
   factsSha256?: string;
+  /**
+   * Plain text of the resume this content was tailored FROM, so the review screen can diff it
+   * against the tailored text.
+   *
+   * OPTIONAL AND BEST-EFFORT. It is read from the candidate's base document by the caller,
+   * and every way that read can fail - no base document, a storage error, a format the
+   * extractor cannot handle - resolves to absent rather than to an exception. A word diff is a
+   * nice-to-have; the tailored resume is generated from confirmed facts and does not depend on
+   * this at all, so a failure here must never block a submission.
+   *
+   * Absent means BOTH columns stay NULL. A half-recorded pair is unrenderable and the
+   * database refuses it (resume_documents_text_pair_check).
+   */
+  baseText?: string;
 }
 
 /**
@@ -358,6 +443,26 @@ export async function storeTailoredResume(
   // "this file was checked and failed" is more useful than an absent record.
   const atsChecks = await runAtsFormatChecks(bytes, TAILORED_RESUME_MIME_TYPE, deps.atsCheckDeps ?? {});
 
+  // THE TEXT PAIR, OR NEITHER HALF OF IT. recorded from the same content that was just
+  // rendered, so the text describes the file rather than a second reading of the model output.
+  //
+  // Both columns move together: a tailored text with no base to compare against is not a
+  // smaller record, it is an unrenderable one, and resume_documents_text_pair_check refuses it
+  // outright. The empty-string case is folded into "absent" deliberately - a blank side would
+  // render a diff of the entire document as added.
+  const baseText = input.baseText !== undefined && input.baseText.trim().length > 0 ? input.baseText : null;
+  const textPair =
+    baseText === null
+      ? { base_text: null, tailored_text: null }
+      : {
+          base_text: baseText,
+          tailored_text: tailoredResumePlainText({
+            content: input.content,
+            facts: input.facts,
+            vacancyTitle: input.vacancyTitle,
+          }),
+        };
+
   const originalFilename = resumeFilenameFor(input.vacancyTitle);
   const storagePath = `${input.candidateId}/${randomUUID()}-${originalFilename}`;
 
@@ -391,6 +496,10 @@ export async function storeTailoredResume(
       model_version: input.modelVersion ?? null,
       ats_checks: atsChecks,
       ats_checked_at: new Date().toISOString(),
+      // See 20261014120000_resume_document_text.sql. NULL is the honest record for a document
+      // whose base text could not be read, and the review screen simply shows no diff for it.
+      base_text: textPair.base_text,
+      tailored_text: textPair.tailored_text,
     })
     .select("id, storage_path, original_filename, mime_type, optimization_level")
     .single();

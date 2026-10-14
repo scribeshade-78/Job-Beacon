@@ -30,7 +30,11 @@ const TAILORED_RESPONSE = {
   skills: [{ text: "Apache Spark", factRefs: ["fact-2"] }],
 };
 
-function makeClient(level: string | null, extra: Partial<Record<string, TableResult>> = {}) {
+function makeClient(
+  level: string | null,
+  extra: Partial<Record<string, TableResult>> = {},
+  options: { download?: { data: unknown; error: unknown } } = {},
+) {
   const defaults: Record<string, TableResult> = {
     candidate_profiles: { data: { resume_optimization_level: level }, error: null },
     extracted_facts: { data: CONFIRMED_FACTS, error: null },
@@ -69,10 +73,18 @@ function makeClient(level: string | null, extra: Partial<Record<string, TableRes
     return builder;
   });
 
+  const downloads: string[] = [];
   const storageFrom = vi.fn((bucket: string) => ({
     upload: async (path: string) => {
       uploads.push({ bucket, path });
       return { data: { path }, error: null };
+    },
+    download: async (path: string) => {
+      downloads.push(path);
+      // DEFAULT: no object. The base-text read treats that as "no text recorded" and proceeds
+      // silently, which is what every test that does not care about the diff should get - and
+      // it is also the honest default, because that is what an older document looks like.
+      return options.download ?? { data: null, error: { message: "Object not found" } };
     },
   }));
 
@@ -91,8 +103,12 @@ function makeClient(level: string | null, extra: Partial<Record<string, TableRes
     }),
   };
   const baseDocumentResult = results.resume_documents ?? { data: null, error: null };
+  const inserts: Array<Record<string, unknown>> = [];
   const resumeDocumentsProxy = {
-    insert: () => insertBuilder,
+    insert: (payload: Record<string, unknown>) => {
+      inserts.push(payload);
+      return insertBuilder;
+    },
     // Only the insert path is exercised for a tailored row, but the base-resume
     // read goes through here too when the level is off.
     select: () => makeQueryBuilder(baseDocumentResult),
@@ -107,6 +123,8 @@ function makeClient(level: string | null, extra: Partial<Record<string, TableRes
     client: { from: fromWithInsert, storage: { from: storageFrom } } as never,
     updates,
     uploads,
+    downloads,
+    inserts,
   };
 }
 
@@ -180,6 +198,73 @@ describe("resolveSubmissionResume — off", () => {
 
     expect(uploads).toHaveLength(0);
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe("resolveSubmissionResume — recording the base text for the review diff", () => {
+  const baseBytes = { arrayBuffer: async () => new TextEncoder().encode("Led a team of four engineers").buffer };
+
+  it("records the base text alongside the tailored text when the base file can be read", async () => {
+    const { client, inserts, downloads } = makeClient("honest", {}, { download: { data: baseBytes, error: null } });
+    const model = makeModel(TAILORED_RESPONSE);
+
+    const resume = await resolveSubmissionResume(
+      client,
+      {
+        launchBrowser: fakeBrowser(),
+        createOpenAIClient: model.factory,
+        extractText: async () => "Led a team of four engineers",
+      },
+      input,
+    );
+
+    expect(resume.tailored).toBe(true);
+    // The base document is what gets downloaded, not the tailored one.
+    expect(downloads).toEqual(["cand-1/base.pdf"]);
+    expect(inserts[0].base_text).toBe("Led a team of four engineers");
+    expect(String(inserts[0].tailored_text)).toContain("Senior Data Engineer");
+  });
+
+  it("proceeds with NO recorded text when the base file cannot be downloaded", async () => {
+    // BEST-EFFORT BY DESIGN. The tailored resume is generated from confirmed facts and never
+    // reads the base document, so a diff that cannot be computed must never block a submission.
+    const { client, inserts } = makeClient("honest", {}, { download: { data: null, error: { message: "Object not found" } } });
+    const model = makeModel(TAILORED_RESPONSE);
+
+    await expect(
+      resolveSubmissionResume(client, { launchBrowser: fakeBrowser(), createOpenAIClient: model.factory }, input),
+    ).resolves.toMatchObject({ tailored: true, documentId: "doc-tailored" });
+
+    expect(inserts[0].base_text).toBeNull();
+    expect(inserts[0].tailored_text).toBeNull();
+  });
+
+  it("proceeds when the extractor throws, and logs it once", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const { client, inserts } = makeClient("honest", {}, { download: { data: { arrayBuffer: async () => new ArrayBuffer(8) }, error: null } });
+      const model = makeModel(TAILORED_RESPONSE);
+
+      await expect(
+        resolveSubmissionResume(
+          client,
+          {
+            launchBrowser: fakeBrowser(),
+            createOpenAIClient: model.factory,
+            extractText: async () => {
+              throw new Error("this PDF could not be parsed");
+            },
+          },
+          input,
+        ),
+      ).resolves.toMatchObject({ tailored: true });
+
+      expect(inserts[0].tailored_text).toBeNull();
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
