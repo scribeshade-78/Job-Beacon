@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { reconcileFitAnalyses } from "./opportunities/reconcile.js";
 import { runFollowUpSweep } from "./mailbox/antiGhosting.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
@@ -15,10 +16,12 @@ import {
   CALENDAR_SYNC_TASK_NAME,
   DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
   DEFAULT_FIT_INTERVAL_MS,
+  DEFAULT_FIT_RECONCILE_INTERVAL_MS,
   DEFAULT_RANKING_REFRESH_INTERVAL_MS,
   DEFAULT_INGESTION_DRAIN_INTERVAL_MS,
   DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS,
   DEFAULT_KEYLESS_INGESTION_INTERVAL_MS,
+  FIT_RECONCILE_TASK_NAME,
   FIT_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
@@ -31,6 +34,10 @@ import {
 } from "./schedulerTasks.js";
 
 vi.mock("./opportunities/runner.js", () => ({ runFitAnalysisBatch: vi.fn() }));
+// The back-fill. Its own logic - which pairs are stale, the truncation flag - is
+// covered by server/opportunities/reconcile.test.ts; here only registration,
+// cadence, ordering and what the scheduler hands it.
+vi.mock("./opportunities/reconcile.js", () => ({ reconcileFitAnalyses: vi.fn() }));
 vi.mock("./mailbox/poll.js", () => ({ runMailboxPollingBatch: vi.fn() }));
 vi.mock("./mailbox/classifyBatch.js", () => ({ runMessageClassificationBatch: vi.fn() }));
 vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() }));
@@ -81,6 +88,7 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
 // deadline delays whatever follows it, and mail classification is what the candidate
 // actually notices.
 const ALWAYS_ON = [
+  FIT_RECONCILE_TASK_NAME,
   FIT_TASK_NAME,
   RANKING_REFRESH_TASK_NAME,
   ANTI_GHOSTING_TASK_NAME,
@@ -122,11 +130,15 @@ function taskByName(name: string, env: Record<string, string | undefined> = {}) 
 
 beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockReset();
+  vi.mocked(reconcileFitAnalyses).mockReset();
   vi.mocked(drainIntakeRefreshJobs).mockReset();
   vi.mocked(enqueueIngestionBatch).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
   vi.mocked(runScheduledRankingRefresh).mockReset();
   vi.mocked(runFitAnalysisBatch).mockResolvedValue({ ...fitResult });
+  vi.mocked(reconcileFitAnalyses).mockResolvedValue({
+    candidates: 0, vacancies: 0, scanned: 0, enqueued: 0, skipped: 0, truncated: false,
+  });
   vi.mocked(runFollowUpSweep).mockResolvedValue({ ...sweepResult });
 });
 
@@ -163,7 +175,8 @@ describe("buildScheduledTasks", () => {
     // Without Google credentials the Google-dependent tasks are absent, and the
     // two that need no Google access are still there.
     expect(tasks.map((task) => task.name)).toEqual(ALWAYS_ON);
-    expect(tasks.map((task) => task.intervalMs).slice(0, 3)).toEqual([
+    expect(tasks.map((task) => task.intervalMs).slice(0, 4)).toEqual([
+      DEFAULT_FIT_RECONCILE_INTERVAL_MS,
       DEFAULT_FIT_INTERVAL_MS,
       DEFAULT_RANKING_REFRESH_INTERVAL_MS,
       DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
@@ -242,17 +255,26 @@ describe("buildScheduledTasks", () => {
   it("lets each cadence be retuned without editing code", () => {
     const tasks = buildScheduledTasks(client, openai, {
       SCHEDULER_FIT_INTERVAL_MS: "60000",
+      SCHEDULER_FIT_RECONCILE_INTERVAL_MS: "300000",
       SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "90000",
       SCHEDULER_ANTI_GHOSTING_INTERVAL_MS: "43200000",
     });
 
-    expect(tasks.map((task) => task.intervalMs).slice(0, 3)).toEqual([60_000, 90_000, 43_200_000]);
+    // BY NAME, not by position. Inserting a task shifts every index below it, and a
+    // positional assertion then fails for a reason unrelated to what it is testing.
+    const intervalOf = (name: string) => tasks.find((task) => task.name === name)?.intervalMs;
+
+    expect(intervalOf(FIT_TASK_NAME)).toBe(60_000);
+    expect(intervalOf(FIT_RECONCILE_TASK_NAME)).toBe(300_000);
+    expect(intervalOf(RANKING_REFRESH_TASK_NAME)).toBe(90_000);
+    expect(intervalOf(ANTI_GHOSTING_TASK_NAME)).toBe(43_200_000);
   });
 
   it("ignores an unparseable or negative interval rather than disabling the task", () => {
+    // Named rather than positional: the reconcile task now sits ahead of this one.
     const tasks = buildScheduledTasks(client, openai, { SCHEDULER_FIT_INTERVAL_MS: "-5" });
 
-    expect(tasks[0]?.intervalMs).toBe(DEFAULT_FIT_INTERVAL_MS);
+    expect(tasks.find((task) => task.name === FIT_TASK_NAME)?.intervalMs).toBe(DEFAULT_FIT_INTERVAL_MS);
   });
 
   it("drops a disabled task and keeps the rest", () => {
@@ -454,6 +476,51 @@ describe("the fit-analysis task", () => {
     vi.mocked(runFitAnalysisBatch).mockResolvedValue({ ...fitResult, stoppedOnDeadline: true });
 
     expect(await taskByName(FIT_TASK_NAME, {}).run()).toMatchObject({ stoppedOnDeadline: true });
+  });
+});
+
+describe("the fit-reconcile task", () => {
+  it("is scheduled, on a slower cadence than the drain", () => {
+    // THE CAP LEFT A TAIL. Since 20261016090000 the triggers queue only the newest 200
+    // eligible vacancies per candidate action, so the remainder has to come from somewhere
+    // or those vacancies never get a score. reconcileFitAnalyses is enqueue-only and
+    // DB-only, so it is cheap enough to run on a schedule and cannot itself spend tokens.
+    expect(DEFAULT_FIT_RECONCILE_INTERVAL_MS).toBeGreaterThanOrEqual(DEFAULT_FIT_INTERVAL_MS);
+    expect(taskByName(FIT_RECONCILE_TASK_NAME, {}).intervalMs).toBe(DEFAULT_FIT_RECONCILE_INTERVAL_MS);
+    expect(
+      taskByName(FIT_RECONCILE_TASK_NAME, { SCHEDULER_FIT_RECONCILE_INTERVAL_MS: "60000" }).intervalMs,
+    ).toBe(60_000);
+  });
+
+  it("runs BEFORE the fit drain, so a tick collects what it just queued", () => {
+    // The poll-before-classify ordering used everywhere else in this array. A reconcile
+    // placed after the drain would wait a whole interval for its own work to be collected.
+    const names = buildScheduledTasks(client, openai, {}).map((task) => task.name);
+
+    expect(names.indexOf(FIT_RECONCILE_TASK_NAME)).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf(FIT_RECONCILE_TASK_NAME)).toBeLessThan(names.indexOf(FIT_TASK_NAME));
+  });
+
+  it("passes the documented limit through, and leaves it unset by default", async () => {
+    await taskByName(FIT_RECONCILE_TASK_NAME, { FIT_RECONCILE_LIMIT: "7" }).run();
+
+    expect(vi.mocked(reconcileFitAnalyses)).toHaveBeenCalledWith(client, { limit: 7 });
+
+    await taskByName(FIT_RECONCILE_TASK_NAME, {}).run();
+
+    expect(vi.mocked(reconcileFitAnalyses)).toHaveBeenCalledWith(client, { limit: undefined });
+  });
+
+  it("reports the enqueue counts and whether the pass was truncated", async () => {
+    // truncated is the operator's signal that the tail is not yet filled and the pass
+    // needs to run again, so it must survive into the scheduler's log.
+    vi.mocked(reconcileFitAnalyses).mockResolvedValue({
+      candidates: 2, vacancies: 743, scanned: 1486, enqueued: 500, skipped: 986, truncated: true,
+    });
+
+    expect(await taskByName(FIT_RECONCILE_TASK_NAME, {}).run()).toEqual({
+      candidates: 2, vacancies: 743, scanned: 1486, enqueued: 500, skipped: 986, truncated: true,
+    });
   });
 });
 

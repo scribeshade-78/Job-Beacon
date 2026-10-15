@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { reconcileFitAnalyses } from "./opportunities/reconcile.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import {
@@ -61,6 +62,21 @@ import type { ScheduledTask } from "./schedulerLoop.js";
 export const DEFAULT_FIT_INTERVAL_MS = 5 * 60_000;
 
 /**
+ * How often the fit BACK-FILL runs.
+ *
+ * Slower than the five-minute drain on purpose. The pass is a full
+ * (candidates x eligible vacancies) scan whose only output is a queue that the drain then
+ * works through, so running it as often as the drain would re-scan the same matrix to
+ * re-enqueue pairs that are already pending. Thirty minutes keeps the tail moving without
+ * turning the scan into a poller.
+ *
+ * SINCE THE FAN-OUT CAP (20261016090000) THIS CADENCE IS LOAD-BEARING. The triggers queue
+ * only the newest 200 eligible vacancies per candidate action, so this pass is the only
+ * thing that ever scores the rest.
+ */
+export const DEFAULT_FIT_RECONCILE_INTERVAL_MS = 30 * 60_000;
+
+/**
  * The brief allows 12 or 24 hours; 24 is the default because the detector's own
  * window is 7 days. A sweep every 12 hours would re-ask a question whose answer
  * cannot have changed for at least a day, and the "already drafted" exclusion
@@ -70,6 +86,7 @@ export const DEFAULT_FIT_INTERVAL_MS = 5 * 60_000;
 export const DEFAULT_ANTI_GHOSTING_INTERVAL_MS = 24 * 60 * 60_000;
 
 export const FIT_TASK_NAME = "fit-analysis";
+export const FIT_RECONCILE_TASK_NAME = "fit-reconcile";
 export const RANKING_REFRESH_TASK_NAME = "ranking-refresh";
 export const ANTI_GHOSTING_TASK_NAME = "anti-ghosting";
 export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
@@ -322,6 +339,40 @@ export function buildScheduledTasks(
   const capability = readMailboxCapability(env);
 
   const tasks: ScheduledTask[] = [
+    /**
+     * THE FIT BACK-FILL. Since the fan-out cap this is load-bearing rather than
+     * housekeeping: the DB triggers queue only the NEWEST 200 eligible vacancies per
+     * candidate action, so without this task every older vacancy stays unscored for good.
+     * It also remains the standing "re-score everything after a scoring-policy bump" tool,
+     * because it re-arms rows whose priority_score_version has fallen behind.
+     *
+     * ENQUEUE-ONLY, which is what makes it safe to schedule: reconcileFitAnalyses touches
+     * the database and never the model. It queues; the drain below spends. analyzeFit's
+     * AI-skip guard means a pair whose JD snapshot, facts and prompt version are unchanged
+     * is re-scored WITHOUT inference, so a version-bump pass costs no tokens and only
+     * genuinely missing analyses pay for a call.
+     *
+     * PLACED FIRST, BEFORE THE DRAIN, for the same reason keyless-ingestion-enqueue sits
+     * before ingestion-drain: a tick that reconciles should also collect what it just
+     * queued, rather than leaving it a full interval.
+     */
+    {
+      name: FIT_RECONCILE_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_FIT_RECONCILE_INTERVAL_MS",
+        DEFAULT_FIT_RECONCILE_INTERVAL_MS,
+        env,
+      ),
+      run: async () => {
+        // FIT_RECONCILE_LIMIT is the knob npm run worker:fit -- --reconcile already
+        // documents; reused rather than shadowed by a second name.
+        const result = await reconcileFitAnalyses(client, {
+          limit: env.FIT_RECONCILE_LIMIT ? Number.parseInt(env.FIT_RECONCILE_LIMIT, 10) : undefined,
+        });
+
+        return { ...result };
+      },
+    },
     {
       name: FIT_TASK_NAME,
       intervalMs: readEnvInt("SCHEDULER_FIT_INTERVAL_MS", DEFAULT_FIT_INTERVAL_MS, env),
