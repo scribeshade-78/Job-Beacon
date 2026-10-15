@@ -100,3 +100,60 @@ describe("greenhouseAdapter", () => {
     expect(() => greenhouseAdapter.validateConfig({ companyName: "Acme Corp", companyDomain: "acme.com" })).not.toThrow();
   });
 });
+
+/**
+ * Phase 8 — payload hardening, the same class Adzuna and USAJOBS just went through.
+ *
+ * This adapter's target rows are ENABLED with live board tokens, so every shape below is
+ * reachable from the ingestion drain.
+ */
+describe("Greenhouse payload hardening", () => {
+  const payloadError = /Greenhouse returned a payload/;
+  const config = { companyName: "Acme Corp" };
+
+  function page(jobs: unknown[]) {
+    return (async () => ({ ok: true, status: 200, json: async () => ({ jobs }) })) as unknown as typeof fetch;
+  }
+
+  it("throws a payload error, not a TypeError, when the body is null or jobs is missing", async () => {
+    await expect(greenhouseAdapter.discover("acme", config, fixtureFetch(200, null))).rejects.toThrow(payloadError);
+    await expect(greenhouseAdapter.discover("acme", config, fixtureFetch(200, {}))).rejects.toThrow(payloadError);
+    await expect(
+      greenhouseAdapter.discover("acme", config, fixtureFetch(200, { jobs: "nope" })),
+    ).rejects.toThrow(payloadError);
+  });
+
+  it("throws a payload error when the body is not JSON at all", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON");
+      },
+    }) as unknown as typeof fetch;
+
+    await expect(greenhouseAdapter.discover("acme", config, fetchImpl)).rejects.toThrow(payloadError);
+  });
+
+  it("skips a row without an id, title or URL, and never maps a missing id to the string 'undefined'", async () => {
+    // THE TRAP THIS ADAPTER HAD. String(undefined) is the literal text undefined: a
+    // non-null, entirely plausible source_vacancy_id. Because vacancies is unique on
+    // (source_code, source_vacancy_id), every malformed row would have collapsed onto ONE
+    // vacancy — silent corruption rather than a failed insert.
+    const rows = await greenhouseAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: 1, title: "Analyst", absolute_url: "https://x/1" },
+        { title: "No id", absolute_url: "https://x/2" },
+        { id: 3, absolute_url: "https://x/3" },
+        { id: 4, title: "No url" },
+        { id: "", title: "Blank id", absolute_url: "https://x/5" },
+        {},
+        null,
+      ]),
+    );
+
+    expect(rows.map((row) => row.sourceVacancyId)).toEqual(["1"]);
+  });
+});

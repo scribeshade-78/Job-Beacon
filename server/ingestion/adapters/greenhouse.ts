@@ -25,8 +25,71 @@ interface GreenhouseJob {
   location?: { name?: string };
 }
 
-interface GreenhouseJobsResponse {
-  jobs: GreenhouseJob[];
+export class GreenhousePayloadError extends Error {
+  constructor(detail: string) {
+    super(`Greenhouse returned a payload this adapter cannot read: ${detail}`);
+    this.name = "GreenhousePayloadError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Non-empty and trimmed, or null. */
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/**
+ * Maps ONE Greenhouse job, or returns null when it cannot be identified or linked.
+ *
+ * THE ID IS THE DANGEROUS FIELD. String(undefined) is the literal text "undefined" — a
+ * non-null, entirely plausible source_vacancy_id. vacancies is unique on
+ * (source_code, source_vacancy_id), so every malformed row would collapse onto a single
+ * vacancy: silent corruption rather than a failed insert. The id is validated as a number
+ * or a non-empty string BEFORE String() is applied.
+ */
+export function mapGreenhouseJob(
+  job: unknown,
+  config: GreenhouseTargetConfig,
+): DiscoveredVacancy | null {
+  const record = asRecord(job);
+
+  const rawId = record.id;
+  const sourceVacancyId =
+    typeof rawId === "number" || typeof rawId === "string" ? String(rawId).trim() : "";
+  const authoritativeUrl = asString(record.absolute_url);
+  const rawTitle = asString(record.title);
+
+  if (!sourceVacancyId || !authoritativeUrl || !rawTitle) {
+    return null;
+  }
+
+  const typed = record as unknown as GreenhouseJob;
+
+  return {
+    sourceVacancyId,
+    authoritativeUrl,
+    rawTitle,
+    companyName: config.companyName,
+    companyDomain: config.companyDomain ?? null,
+    country: null,
+    region: null,
+    city: null,
+    remoteType: inferRemoteType(typed.location?.name),
+    currency: null,
+    salaryMin: null,
+    salaryMax: null,
+    salaryInterval: null,
+    salarySource: null,
+    // The jobs-list endpoint only returns updated_at, not a first-published date (that
+    // field exists only on the single-job GET /jobs/{id} endpoint, which this adapter does
+    // not call — one extra request per job is not justified). Used as an approximation of
+    // publishedAt, not the true first-published date.
+    publishedAt: asString(typed.updated_at),
+    raw: typed,
+  };
 }
 
 function inferRemoteType(locationName: string | undefined): DiscoveredVacancy["remoteType"] {
@@ -61,31 +124,26 @@ const greenhouseAdapter: DiscoveryAdapter<GreenhouseTargetConfig> = {
       throw new Error(`Greenhouse discovery failed for board "${boardToken}": HTTP ${response.status}`);
     }
 
-    const body = (await response.json()) as GreenhouseJobsResponse;
+    // A MALFORMED BODY IS NAMED, NOT A STACK TRACE. `body.jobs.map(...)` used to run
+    // unguarded, so a null body or a renamed field threw a TypeError that the ingestion
+    // worker stored verbatim as the source's health error.
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new GreenhousePayloadError("the response body was not JSON");
+    }
 
-    return body.jobs.map((job) => ({
-      sourceVacancyId: String(job.id),
-      authoritativeUrl: job.absolute_url,
-      rawTitle: job.title,
-      companyName: config.companyName,
-      companyDomain: config.companyDomain ?? null,
-      country: null,
-      region: null,
-      city: null,
-      remoteType: inferRemoteType(job.location?.name),
-      currency: null,
-      salaryMin: null,
-      salaryMax: null,
-      salaryInterval: null,
-      salarySource: null,
-      // The jobs-list endpoint only returns updated_at, not a first-published
-      // date (that field exists only on the single-job GET /jobs/{id}
-      // endpoint, which this adapter doesn't call — one extra request per
-      // job isn't justified for R2 foundation scope). Used here as an
-      // approximation of publishedAt, not the true first-published date.
-      publishedAt: job.updated_at ?? null,
-      raw: job,
-    }));
+    const jobs = asRecord(payload).jobs;
+
+    if (!Array.isArray(jobs)) {
+      throw new GreenhousePayloadError("the response had no jobs array");
+    }
+
+    // UNMAPPABLE ROWS ARE SKIPPED, NOT REPAIRED — see mapGreenhouseJob.
+    return jobs
+      .map((job) => mapGreenhouseJob(job, config))
+      .filter((vacancy): vacancy is DiscoveredVacancy => vacancy !== null);
   },
 
   validateConfig(config: GreenhouseTargetConfig): void {
