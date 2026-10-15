@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runFollowUpSweep } from "./mailbox/antiGhosting.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
-import { runScheduledDiscovery, runScheduledRankingRefresh } from "./opportunities/scheduledRefresh.js";
+import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
+import {
+  KEYLESS_SCHEDULED_SOURCE_CODES,
+  runScheduledDiscovery,
+  runScheduledRankingRefresh,
+} from "./opportunities/scheduledRefresh.js";
 import {
   ANTI_GHOSTING_TASK_NAME,
   buildScheduledTasks,
@@ -15,10 +20,12 @@ import {
   DEFAULT_RANKING_REFRESH_INTERVAL_MS,
   DEFAULT_INGESTION_DRAIN_INTERVAL_MS,
   DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS,
+  DEFAULT_KEYLESS_INGESTION_INTERVAL_MS,
   DISCOVERY_TASK_NAME,
   FIT_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
+  KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
@@ -33,7 +40,10 @@ vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() })
 vi.mock("./calendar/sync.js", () => ({ runCalendarSyncBatch: vi.fn() }));
 // The ingestion drain reaches the network through its own client. Nothing in this file
 // exercises a real fetch, so the runner is mocked rather than handed the {} client.
-vi.mock("./ingestion/runner.js", () => ({ drainIngestionJobs: vi.fn() }));
+vi.mock("./ingestion/runner.js", () => ({
+  drainIngestionJobs: vi.fn(),
+  enqueueIngestionBatch: vi.fn(),
+}));
 
 // The candidate-scoped refresh queue. Its own coordination - the lease, the fit
 // re-home, the failure isolation - is covered by server/intake/refreshQueue.test.ts;
@@ -69,13 +79,16 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
 };
 
 // ORDER IS THE CONTRACT, not a set: the scheduler runs due tasks in this order within a
-// tick, and several tests below assert on positions. ingestion-drain sits before the
-// mailbox block deliberately — a drain that overruns its deadline delays whatever follows
-// it, and mail classification is what the candidate actually notices.
+// tick, and several tests below assert on positions. keyless-ingestion-enqueue sits
+// immediately before ingestion-drain so work queued this tick is processed this tick;
+// the drain then sits before the mailbox block deliberately — a drain that overruns its
+// deadline delays whatever follows it, and mail classification is what the candidate
+// actually notices.
 const ALWAYS_ON = [
   FIT_TASK_NAME,
   RANKING_REFRESH_TASK_NAME,
   ANTI_GHOSTING_TASK_NAME,
+  KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
@@ -115,6 +128,7 @@ function taskByName(name: string, env: Record<string, string | undefined> = {}) 
 beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockReset();
   vi.mocked(drainIntakeRefreshJobs).mockReset();
+  vi.mocked(enqueueIngestionBatch).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
   vi.mocked(runScheduledRankingRefresh).mockReset();
   vi.mocked(runScheduledDiscovery).mockReset();
@@ -129,6 +143,10 @@ describe("cadence defaults", () => {
 
   it("sweeps for ghosting once a day", () => {
     expect(DEFAULT_ANTI_GHOSTING_INTERVAL_MS).toBe(86_400_000);
+  });
+
+  it("pulls the keyless sources conservatively, four times a day", () => {
+    expect(DEFAULT_KEYLESS_INGESTION_INTERVAL_MS).toBe(21_600_000);
   });
 });
 
@@ -166,6 +184,28 @@ describe("buildScheduledTasks", () => {
 
     expect(task.intervalMs).toBe(30_000);
     expect(taskByName(INGESTION_DRAIN_TASK_NAME).intervalMs).toBe(DEFAULT_INGESTION_DRAIN_INTERVAL_MS);
+  });
+
+  it("enqueues the keyless pull BEFORE the drain, so one tick fetches and processes", () => {
+    // The poll-before-classify pattern. An enqueue that ran after the drain would wait a
+    // whole interval for its own work to be collected.
+    const names = buildScheduledTasks(client, openai, {}).map((task) => task.name);
+
+    expect(names.indexOf(KEYLESS_INGESTION_ENQUEUE_TASK_NAME)).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf(KEYLESS_INGESTION_ENQUEUE_TASK_NAME)).toBeLessThan(
+      names.indexOf(INGESTION_DRAIN_TASK_NAME),
+    );
+  });
+
+  it("retunes the keyless pull cadence without editing code", () => {
+    const task = taskByName(KEYLESS_INGESTION_ENQUEUE_TASK_NAME, {
+      SCHEDULER_KEYLESS_INGESTION_INTERVAL_MS: "300000",
+    });
+
+    expect(task.intervalMs).toBe(300_000);
+    expect(taskByName(KEYLESS_INGESTION_ENQUEUE_TASK_NAME).intervalMs).toBe(
+      DEFAULT_KEYLESS_INGESTION_INTERVAL_MS,
+    );
   });
 
   it("drains candidate refresh requests and hands the fit batch the model client", async () => {
@@ -315,6 +355,50 @@ describe("buildScheduledTasks", () => {
         failures: 0,
       });
     });
+  });
+});
+
+/**
+ * Step 6 — the SCHEDULED keyless pull.
+ *
+ * The scheduler ONLY ENQUEUES. Processing stays with ingestion-drain, so a single
+ * 392-second board cannot overrun the task that decides what to fetch, and there is
+ * exactly one claimant for the queue.
+ */
+describe("the keyless scheduled pull", () => {
+  const emptyEnqueue = { targets: [], enqueued: 0, skippedRecent: 0, skippedQueued: 0 };
+
+  it("enqueues only the named keyless sources, and drains none of them itself", async () => {
+    vi.mocked(enqueueIngestionBatch).mockResolvedValue({ ...emptyEnqueue, enqueued: 2 });
+
+    const summary = await taskByName(KEYLESS_INGESTION_ENQUEUE_TASK_NAME, {}).run();
+
+    expect(summary).toEqual({ ...emptyEnqueue, enqueued: 2 });
+    expect(vi.mocked(enqueueIngestionBatch)).toHaveBeenCalledWith(client, {
+      sourceCodes: KEYLESS_SCHEDULED_SOURCE_CODES,
+    });
+  });
+
+  it("never names a quota-bearing source, so Jooble cannot be queued unattended", async () => {
+    // The unattended path is the one nobody is watching: a source accidentally included
+    // here would spend its allowance every tick, indefinitely.
+    vi.mocked(enqueueIngestionBatch).mockResolvedValue({ ...emptyEnqueue });
+
+    await taskByName(KEYLESS_INGESTION_ENQUEUE_TASK_NAME, {}).run();
+
+    const options = vi.mocked(enqueueIngestionBatch).mock.calls[0]![1];
+    expect(options?.sourceCodes).toEqual(KEYLESS_SCHEDULED_SOURCE_CODES);
+    expect(options?.sourceCodes).not.toContain("jooble");
+    expect(options?.sourceCodes).not.toContain("adzuna");
+    expect(options?.sourceCodes).not.toContain("serpapi");
+  });
+
+  it("never drains, so the shared ingestion drain is the only claimant", async () => {
+    vi.mocked(enqueueIngestionBatch).mockResolvedValue({ ...emptyEnqueue });
+
+    await taskByName(KEYLESS_INGESTION_ENQUEUE_TASK_NAME, {}).run();
+
+    expect(vi.mocked(drainIngestionJobs)).not.toHaveBeenCalled();
   });
 });
 

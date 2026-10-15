@@ -1,9 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
-import { drainIngestionJobs } from "./ingestion/runner.js";
+import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import {
+  KEYLESS_SCHEDULED_SOURCE_CODES,
   readScheduledRefreshBudget,
   runScheduledDiscovery,
   runScheduledRankingRefresh,
@@ -79,6 +80,7 @@ export const MAILBOX_MATCH_TASK_NAME = "mailbox-match";
 export const CALENDAR_SYNC_TASK_NAME = "calendar-sync";
 export const INGESTION_DRAIN_TASK_NAME = "ingestion-drain";
 export const INTAKE_REFRESH_DRAIN_TASK_NAME = "intake-refresh-drain";
+export const KEYLESS_INGESTION_ENQUEUE_TASK_NAME = "keyless-ingestion-enqueue";
 
 /**
  * How often queued discovery work is drained.
@@ -110,6 +112,17 @@ export const DEFAULT_INGESTION_DRAIN_DEADLINE_MS = 4 * 60_000;
  * and the next tick simply waits for it.
  */
 export const DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS = 60_000;
+
+/**
+ * How often the unattended path tops up the ingestion queue with the keyless public
+ * sources.
+ *
+ * CONSERVATIVE ON PURPOSE, matching the discovery task's four-runs-a-day cadence. This
+ * task only ENQUEUES - the network cost is paid by the ingestion drain, whose per-target
+ * cooldown is the real guard - but the cadence decides how often each of those public
+ * APIs is swept, and they are somebody else's free infrastructure.
+ */
+export const DEFAULT_KEYLESS_INGESTION_INTERVAL_MS = 6 * 60 * 60_000;
 
 /**
  * Mail polling every five minutes, matching POLL_INTERVAL_MS inside poll.ts:
@@ -396,11 +409,38 @@ export function buildScheduledTasks(
     },
 
     /**
+     * Step 6 - the SCHEDULED keyless pull. It QUEUES and returns; the drain below
+     * processes. Placed immediately before that drain so a target enqueued this tick is
+     * fetched in this tick, the same poll-before-classify ordering the mailbox block uses.
+     *
+     * WHY IT DOES NOT DRAIN. One job is one board, and a real Stripe board took 392s
+     * (measured, scripts/discovery-live.ts). A task that both decided what to fetch and
+     * fetched it would let one slow board overrun the tick that is supposed to keep the
+     * queue full - and it would put a second claimant on the same queue.
+     *
+     * THE SOURCE LIST IS THE QUOTA GUARD. Only the keyless public APIs are named, and the
+     * filter is fail-safe: an empty allow-list enqueues nothing rather than everything, so
+     * a miscomputed list cannot put Jooble's lifetime 500-request allowance on a path
+     * nobody is watching. A keyless source with no enabled vacancy_sources row is simply
+     * not polled - there is no target to poll.
+     */
+    {
+      name: KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_KEYLESS_INGESTION_INTERVAL_MS",
+        DEFAULT_KEYLESS_INGESTION_INTERVAL_MS,
+        env,
+      ),
+      run: async () =>
+        ({ ...(await enqueueIngestionBatch(client, { sourceCodes: KEYLESS_SCHEDULED_SOURCE_CODES })) }),
+    },
+
+    /**
      * Ingestion drain. Placed before the mailbox block rather than after, because every
      * task in this array shares the tick: a drain that overruns its deadline delays
      * everything behind it, and mailbox classification is what the candidate notices.
      *
-     * It QUEUES NOTHING. Whatever the button enqueued, or a future scheduled-pull task
+     * It QUEUES NOTHING. Whatever the button enqueued, or the keyless pull above
      * enqueues, is what gets drained - so this task can be enabled, disabled or reordered
      * without changing what the feed contains.
      */
