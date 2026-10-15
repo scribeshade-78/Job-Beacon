@@ -1,12 +1,108 @@
 # JobBeacon — Current Repository State
 
-Snapshot as of the MP-RC1 mini-phase (2026-08-24), verified directly against the repository (not carried from any prior document). Supersedes any earlier "35 tables" figure stated in this session — that was a manual-count error; the actual, `wc -l`-verified count is **38**.
+Snapshot as of the MP-RC1 mini-phase (2026-08-24), verified directly against the repository (not carried from any prior document). **It predates Phase 7** and is materially out of date in its counts and screen inventory; the sections below are historical, and the `## Phase 7` section that follows the Stack section is the current state.
 
 ## Stack (verified)
 
 React (Vite) frontend, Express API, Supabase (Postgres + Auth + Storage), no ORM currently in use for query building (raw `@supabase/supabase-js` calls throughout), additive SQL migrations under `supabase/migrations/`. Client-side routing added in MP-UI2 via `wouter` (hash-based location — the Express static server has no SPA fallback route for browser-history mode, and touching `server/` was out of scope for that phase). `client/src/App.tsx` now only owns auth/session/profile state and the router; the 10 panels live as standalone components under `client/src/panels/`, rendered inside page components under `client/src/pages/` and a shared `AppShell` (sidebar + topbar).
 
-## Express API routes (5 total — `server/index.ts`)
+## Phase 7 — the async ingestion engine (current)
+
+> **This section is the current state. Everything below it is a pre-Phase-7 snapshot**
+> (last verified 2026-08-24 at MP-RC1) and is materially out of date — it states 5 Express
+> routes and 38 tables, while the live repository has **74 route handlers** in
+> `server/index.ts` and **68 public tables** (both re-verified for this section). Treat the
+> older lists as historical until a full re-snapshot replaces them.
+
+### Two queues, two scopes
+
+| Queue | Scope | Filled by | Drained by |
+|---|---|---|---|
+| `ingestion_jobs` | TARGET — one row names a `vacancy_sources` board or feed | `keyless-ingestion-enqueue` (scheduler) and `POST /api/opportunities/refresh` (manual) | `ingestion-drain` (scheduler) |
+| `intake_refresh_jobs` | CANDIDATE — "find me jobs matching MY keywords, in MY markets" | `POST /api/intake/discover` → **202** | `intake-refresh-drain` (scheduler) |
+| `fit_analysis_jobs` | (candidate, vacancy) pair | `scoreVacancy` on the VERIFIED transition, plus the fit-enqueue triggers | `fit-analysis` (scheduler) |
+| `company_registry_lookup_jobs` | company | the registry worker | the registry drain |
+
+They are separate because a target poll and a personal search are different jobs: one queue
+holding both would share a lease and a retry budget between a scheduled board sweep and a
+candidate's question.
+
+### Global vs per-candidate
+
+- `keyless-ingestion-enqueue` queues `KEYLESS_SCHEDULED_SOURCE_CODES` (remotive, arbeitnow,
+  themuse) into the **shared corpus** once, on a 6h cadence; `ingestion-drain` (2m) fetches them.
+  A keyless source is fetched once, for everybody.
+- **`runScheduledDiscovery` and the `discovery` scheduler task were retired.** Fetching the
+  same keyless sources again for every authorized candidate was the same requests repeated.
+  Nothing candidate-specific was left for it to own: fit jobs are enqueued automatically on a
+  vacancy's transition into VERIFIED (`scoreVacancy` → `enqueueFitJobsForVacancy`), and
+  ranking has its own task.
+- The retired path was gated on `automation_authorizations`; the shared pull is deliberately
+  **not**. That gate governs acting ON A CANDIDATE'S BEHALF, not filling a corpus from public
+  keyless APIs.
+
+### The adapter split, and the bridge between it
+
+- `server/intake/adapters/` — the on-demand fan-out (`IntakeAdapter.fetchLiveJobs(query)`),
+  driven by a candidate's context.
+- `server/ingestion/adapters/` — the scheduled workers (`DiscoveryAdapter.discover(targetKey,
+  config)`), driven by `ingestion_jobs`.
+- `server/ingestion/adapters/keyless.ts` bridges the two for remotive/arbeitnow/themuse: it
+  wraps the already-verified intake fetch so the normalization cannot drift, and marks each
+  adapter **`completesSweep: false`**.
+- **`completesSweep`** is the safety-critical flag on the `DiscoveryAdapter` contract. Absent
+  means true (Greenhouse/Lever: the board IS the target, so unseen rows are genuinely gone).
+  `false` makes `worker.ts` **skip `markUnseenVacanciesExpired`**. The Muse serves twenty
+  items per page; without this, the first scheduled run would have expired most of its live
+  corpus.
+- **Source filter** — `enqueueIngestionBatch({ sourceCodes })`: omitted means every enabled
+  target, an **explicitly empty list means none**. The empty case is deliberately fail-safe
+  because the parameter is a quota guard; Jooble's free plan is a LIFETIME 500-request budget,
+  which is why the unattended path is keyless-only.
+
+### The candidate-facing flow
+
+1. `POST /api/intake/discover` validates the source and calls `enqueueIntakeRefresh`, answering
+   **202** with `{status: "queued", enqueued, alreadyRunning, jobId}`. A partial unique index
+   allows one active refresh per candidate, so a double-tap returns `alreadyRunning: true`
+   rather than a 500 or a second fan-out.
+2. `intake-refresh-drain` claims via `claim_intake_refresh_job()`, reads the candidate's
+   **current** profile (never a copy taken at press time), runs `runIntakeAcrossSources`, scores
+   the vacancies it created, and stores the full summary on the row.
+3. `GET /api/intake/discover` returns the candidate's latest row — `status`, `running`,
+   `result` (only once done) and `lastError` — scoped to the verified session, never to a
+   client-supplied id.
+4. The client (`client/src/lib/ingestion.ts`) watches for roughly twelve seconds (an immediate
+   read plus four polls at 3s) and then **hands off**. The panel's persistent indicator polls
+   the monitor every 5s, survives navigating away and back, and stops after six consecutive read
+   failures so an expired session cannot leave a spinner turning forever.
+
+### Admin visibility
+
+`server/admin/queues.ts` reads four queues for the ops console — `ingestion_jobs`,
+`fit_analysis_jobs`, `company_registry_lookup_jobs` and `intake_refresh_jobs` — with
+per-status counts, the oldest-pending age, and the ten most recent dead letters re-armable in
+place. `intake_refresh_jobs` was added in Phase 7: without it a dead-lettered candidate
+refresh was invisible and unrecoverable from the console.
+
+### Scheduler task list at the end of Phase 7
+
+Always on, in execution order: `fit-analysis`, `ranking-refresh`, `anti-ghosting`,
+`keyless-ingestion-enqueue`, `ingestion-drain`, `mailbox-classify`, `mailbox-match`,
+`intake-refresh-drain`. `mailbox-poll` and `calendar-sync` join only when Google credentials
+are present. `keyless-ingestion-enqueue` sits immediately before `ingestion-drain` so work
+queued in a tick is fetched in that same tick.
+
+### Deliberately NOT done
+
+- **The Muse is ported but disabled.** Its `source_policies.policy_version` is
+  `themuse-tou-review-pending` with `last_legal_review_at = NULL`. The adapter is registered;
+  the `vacancy_sources` row stays `enabled = false` until the terms review exists. Enabling it
+  is one `UPDATE`.
+- **The Copilot drawer's wider palette.** Phase 7 unified its FOCUS language onto `ios-blue`;
+  its `blue-*`/`slate-*` surfaces remain a separate rebrand.
+
+## Express API routes (pre-Phase-7 snapshot; the live count is 74 handlers in `server/index.ts`)
 
 | Method | Path | Auth |
 |---|---|---|
@@ -21,9 +117,9 @@ Everything else (applications, resumes, mailbox, automation authorization, exclu
 
 ## Client screens (10 routed pages + shell, MP-UI2)
 
-Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resumes `/resumes`, Target Roles `/target-roles`, Opportunities `/opportunities`, Applications `/applications`, Responses `/responses`, Action Required `/action-required`, Company Intelligence `/companies`, Security `/security`. Same 10 panels as MP-UI1 (ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel) plus MP-R1's new `TargetRolesPanel` now render inside these pages — Responses hosts Mailbox+Messages, Company Intelligence hosts Companies+SalaryBenchmarks, Overview hosts a real AutomationPanel plus an unchanged ActionRequiredPanel widget alongside honest (non-fabricated) empty-state stats and a recent-applications placeholder. Opportunities remains an honest empty-state page — no panel exists for it yet. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
+Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resumes `/resumes`, Target Roles `/target-roles`, Opportunities `/opportunities`, Applications `/applications`, Responses `/responses`, Action Required `/action-required`, Company Intelligence `/companies`, Security `/security`. Same 10 panels as MP-UI1 (ApplicationsPanel, ActionRequiredPanel, MailboxPanel, MessagesPanel, ResumesPanel, ExclusionsPanel, AutomationPanel, SecurityPanel, CompaniesPanel, SalaryBenchmarksPanel) plus MP-R1's new `TargetRolesPanel` now render inside these pages — Responses hosts Mailbox+Messages, Company Intelligence hosts Companies+SalaryBenchmarks, Overview hosts a real AutomationPanel plus an unchanged ActionRequiredPanel widget alongside honest (non-fabricated) empty-state stats and a recent-applications placeholder. Opportunities is a real feed now — see the Phase 7 section. Plus three pre-signed-in states: loading, email-confirmation-pending, and the auth (log in / sign up) card — re-skinned to the iOS design language in MP-UI1.
 
-**No Opportunities/job-browse screen exists anywhere in the client** (an honest empty-state page instead of being entirely absent from navigation). Resume fact-confirmation UI shipped in MP-F2, role suggestion/selection UI shipped in MP-R1 (see below).
+**Phase 7 changed this: a real Opportunities feed exists** (`client/src/pages/OpportunitiesPage.tsx` → `OpportunitiesPanel`), with server-side ranked paging, trust badges, bulk apply and the async refresh monitor. Resume fact-confirmation UI shipped in MP-F2, role suggestion/selection UI shipped in MP-R1 (see below).
 
 ## PRD journey steps — backend and UI status
 
@@ -37,9 +133,13 @@ Routes (hash-based, e.g. `/#/resumes`): Overview `/`, Profile `/profile`, Resume
 | Evidence / action-required views | Action-required: read surface exists (ActionRequiredPanel, unresolved events only). Evidence: RLS-readable, **no viewer exists** | Partial |
 | Application planning (`planApplication`) / worker (`runOneApplicationAttempt`) / batch entrypoint (MP-W1) / adapter capability model (MP-A1) / rate limiting (MP-RC1) | Built and unit-tested; `npm run worker:applications` plans every authorized-candidate x verified-vacancy pair and drains attempts in one pass. **All 8 of PRD §16.1's gates now have real evaluation logic** (no more mirrors/placeholders) — `application_support` asks the resolved adapter's `validateSupport()`, `rate_and_abuse_controls` independently enforces a 25/24h velocity cap against `application_attempts` | **No UI trigger, no route, no cron schedule wired up** — the entrypoint exists and is manually runnable, but nothing invokes it automatically yet, and every real candidate is still gated ineligible on `application_support` specifically: the check is real now, but zero adapters are registered as supported |
 
-## Database tables (38, from migrations)
+## Database tables (pre-Phase-7 list of 38; the live count is 68)
 
-`action_required_events`, `application_attempts`, `application_evidence`, `application_plans`, `automation_authorizations`, `candidate_action_items`, `candidate_exclusions`, `candidate_profiles`, `candidate_selected_roles`, `companies`, `company_legal_entities`, `company_profiles`, `company_registry_lookup_jobs`, `company_registry_records`, `extracted_facts`, `fact_confirmations`, `ingestion_jobs`, `interviews`, `mailbox_connections`, `messages`, `moderation_cases`, `moderation_decisions`, `response_classifications`, `resume_documents`, `salary_benchmarks`, `source_health_events`, `source_policies`, `user_roles`, `vacancies`, `vacancy_appeals`, `vacancy_evidence`, `vacancy_fingerprints`, `vacancy_flags`, `vacancy_reports`, `vacancy_source_records`, `vacancy_sources`, `vacancy_trust_scores`, `vacancy_versions`.
+> The list below is the pre-Phase-7 subset and is **not complete**. Phase 7 added
+> `intake_refresh_jobs` (the candidate-scoped refresh queue). Re-verify against
+> `information_schema.tables` before depending on it.
+
+`action_required_events`, `application_attempts`, `application_evidence`, `application_plans`, `automation_authorizations`, `candidate_action_items`, `candidate_exclusions`, `candidate_profiles`, `candidate_selected_roles`, `companies`, `company_legal_entities`, `company_profiles`, `company_registry_lookup_jobs`, `company_registry_records`, `extracted_facts`, `fact_confirmations`, `ingestion_jobs`, `intake_refresh_jobs`, `interviews`, `mailbox_connections`, `messages`, `moderation_cases`, `moderation_decisions`, `response_classifications`, `resume_documents`, `salary_benchmarks`, `source_health_events`, `source_policies`, `user_roles`, `vacancies`, `vacancy_appeals`, `vacancy_evidence`, `vacancy_fingerprints`, `vacancy_flags`, `vacancy_reports`, `vacancy_source_records`, `vacancy_sources`, `vacancy_trust_scores`, `vacancy_versions`.
 
 ## The core gap
 

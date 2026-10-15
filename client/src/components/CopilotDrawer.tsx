@@ -83,7 +83,7 @@ function SuggestionPill({
       className={cn(
         "rounded-full border border-blue-200 bg-white px-3.5 py-1.5 text-xs font-medium text-blue-700",
         "transition-colors hover:border-blue-600 hover:bg-blue-600 hover:text-white",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue",
         "disabled:cursor-not-allowed disabled:opacity-50",
       )}
     >
@@ -117,7 +117,7 @@ function PrerequisitePill({
       <Link
         href={prerequisite.href}
         onClick={onNavigate}
-        className="mt-2 inline-block text-xs font-semibold text-blue-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+        className="mt-2 inline-block text-xs font-semibold text-blue-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
       >
         {prerequisite.linkLabel}
       </Link>
@@ -387,7 +387,7 @@ export function CopilotDrawer() {
               "fixed right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full",
               "bottom-[calc(1.5rem+env(safe-area-inset-bottom))]",
               "bg-blue-600 text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue focus-visible:ring-offset-2",
             )}
           >
             <MessageCircle className="h-6 w-6" aria-hidden="true" />
@@ -419,7 +419,7 @@ export function CopilotDrawer() {
                 aria-pressed={showHistory}
                 aria-label="History"
                 title="History"
-                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
               >
                 <History className="h-4 w-4" aria-hidden="true" />
                 <span className="hidden sm:inline">History</span>
@@ -430,7 +430,7 @@ export function CopilotDrawer() {
                 onClick={beginNewChat}
                 aria-label="New Chat"
                 title="New Chat"
-                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                className="flex h-9 items-center gap-1.5 rounded-control px-2 text-xs font-medium text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
               >
                 <Plus className="h-4 w-4" aria-hidden="true" />
                 <span className="hidden sm:inline">New Chat</span>
@@ -439,7 +439,7 @@ export function CopilotDrawer() {
               <SheetClose
                 aria-label="Close"
                 title="Close"
-                className="flex h-9 w-9 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                className="flex h-9 w-9 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
               >
                 <X className="h-5 w-5" aria-hidden="true" />
               </SheetClose>
@@ -589,7 +589,7 @@ export function CopilotDrawer() {
             }}
             className="border-t border-blue-100 bg-white px-4 py-3"
           >
-            <div className="rounded-2xl border border-blue-200 bg-white px-3 py-2 transition-colors focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-200">
+            <div className="rounded-2xl border border-blue-200 bg-white px-3 py-2 transition-colors focus-within:border-ios-blue focus-within:ring-2 focus-within:ring-ios-blue/25">
               <label htmlFor="copilot-input" className="sr-only">
                 Message the Career Copilot
               </label>
@@ -618,7 +618,7 @@ export function CopilotDrawer() {
                   id="copilot-model"
                   value={model}
                   onChange={(event) => setModel(event.target.value as AgentModelId)}
-                  className="h-7 rounded-full border border-blue-200 bg-white px-2 text-xs font-medium text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                  className="h-7 rounded-full border border-blue-200 bg-white px-2 text-xs font-medium text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-ios-blue"
                 >
                   {AGENT_MODEL_OPTIONS.map((option) => (
                     <option key={option.id} value={option.id}>
