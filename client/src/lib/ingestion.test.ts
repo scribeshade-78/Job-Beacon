@@ -2,20 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BACKGROUND_MONITOR_INTERVAL_MS,
   describeDiscoveryResult,
-  describeRefreshResult,
   discoverLiveJobs,
   readIntakeRefreshStatus,
-  refreshOpportunities,
   type DiscoverySourceSummary,
-  type IngestionRefreshResult,
   type LiveDiscoveryResult,
 } from "./ingestion";
 
 /**
- * Task A1. refreshOpportunities (above) drains the server's ingestion_jobs
- * queue and is kept for the scheduled-worker path; discoverLiveJobs is what the
- * "Fetch latest jobs" button now calls, because nothing in this repository ever
- * fills that queue.
+ * Task A1. discoverLiveJobs is the ONLY job-fetch entry point the browser has: it queues
+ * an intake refresh and watches it. The old client for POST /api/opportunities/refresh
+ * (which drained an ingestion queue nothing filled) has been removed.
  */
 const REMOTIVE_SOURCE: DiscoverySourceSummary = {
   sourceCode: "remotive",
@@ -76,16 +72,6 @@ function discoveryResult(over: Partial<LiveDiscoveryResult> = {}): LiveDiscovery
 
 const DISCOVERY_RESULT: LiveDiscoveryResult = discoveryResult();
 
-function result(overrides: Partial<IngestionRefreshResult> = {}): IngestionRefreshResult {
-  return {
-    targets: [],
-    vacanciesFetched: 0,
-    failed: 0,
-    skippedRecent: 0,
-    skippedQueued: 0,
-    ...overrides,
-  };
-}
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -97,83 +83,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 const token = async () => "token-123";
 
-describe("refreshOpportunities", () => {
-  it("posts with the caller's bearer token and returns the batch summary", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(200, result({ vacanciesFetched: 75 })),
-    );
 
-    const outcome = await refreshOpportunities({ fetchImpl: fetchImpl as never, getAccessToken: token });
-
-    expect(fetchImpl).toHaveBeenCalledWith("/api/opportunities/refresh", {
-      method: "POST",
-      headers: { Authorization: "Bearer token-123" },
-    });
-    expect(outcome).toEqual({ kind: "success", result: result({ vacanciesFetched: 75 }) });
-  });
-
-  it("does not call the endpoint when there is no session", async () => {
-    const fetchImpl = vi.fn();
-
-    const outcome = await refreshOpportunities({ fetchImpl: fetchImpl as never, getAccessToken: async () => null });
-
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(outcome.kind).toBe("error");
-  });
-
-  it("maps 401 to a re-authenticate message rather than a generic failure", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: "Unauthorized" }));
-
-    const outcome = await refreshOpportunities({ fetchImpl: fetchImpl as never, getAccessToken: token });
-
-    expect(outcome).toEqual({ kind: "error", message: "Your session has expired. Please sign in again." });
-  });
-
-  it("explains the rate limit rather than reporting a generic error", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(429, { error: "Too many" }));
-
-    const outcome = await refreshOpportunities({ fetchImpl: fetchImpl as never, getAccessToken: token });
-
-    expect(outcome.kind).toBe("error");
-    if (outcome.kind === "error") {
-      expect(outcome.message).toMatch(/refreshed recently/i);
-    }
-  });
-
-  it("returns an error result instead of throwing when the network fails", async () => {
-    const fetchImpl = vi.fn().mockRejectedValue(new Error("offline"));
-
-    const outcome = await refreshOpportunities({ fetchImpl: fetchImpl as never, getAccessToken: token });
-
-    expect(outcome).toEqual({ kind: "error", message: "Network error contacting the server." });
-  });
-});
-
-describe("describeRefreshResult", () => {
-  it("reports the fetched count", () => {
-    expect(describeRefreshResult(result({ vacanciesFetched: 75 }))).toBe("Fetched 75 jobs.");
-  });
-
-  it("uses the singular for one job", () => {
-    expect(describeRefreshResult(result({ vacanciesFetched: 1 }))).toBe("Fetched 1 job.");
-  });
-
-  it("says nothing new when every target was inside the cooldown", () => {
-    expect(describeRefreshResult(result({ skippedRecent: 2 }))).toMatch(/already up to date/i);
-  });
-
-  it("reports a total failure as an error, not as an empty refresh", () => {
-    expect(describeRefreshResult(result({ failed: 2 }))).toBe(
-      "Could not fetch jobs from any source. Please try again later.",
-    );
-  });
-
-  it("acknowledges a partial failure without hiding the successes", () => {
-    expect(describeRefreshResult(result({ vacanciesFetched: 50, failed: 1 }))).toBe(
-      "Fetched 50 jobs. Some sources could not be reached.",
-    );
-  });
-});
 
 describe("discoverLiveJobs", () => {
   const noSleep = async () => {};

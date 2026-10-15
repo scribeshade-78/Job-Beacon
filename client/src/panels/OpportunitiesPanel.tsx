@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { reportDiscoverySurfaces } from "../lib/usage";
 import { Link, useLocation } from "wouter";
-import { RefreshCw } from "lucide-react";
+import { Inbox, RefreshCw, Search, Sparkles } from "lucide-react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,8 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { StatusBadge } from "../components/ui/status-badge";
+import { Spinner } from "../components/ui/spinner";
+import { EmptyState } from "../components/ui/empty-state";
 import {
   FitSection,
   TrustNoticeBanner,
@@ -95,6 +97,64 @@ interface RefreshNotice {
  * forever.
  */
 const MAX_MONITOR_FAILURES = 6;
+
+type PanelNoticeTone = "info" | "progress" | "error";
+
+/**
+ * ONE inline-notice treatment for the whole panel.
+ *
+ * The panel had grown seven near-identical hand-rolled notices — the list error, the
+ * preferences warning, the background indicator, the discovery result, the ranking
+ * status, the role prompt and the capability limitation — each with its own radius,
+ * padding and border colour. They are one component now, so an eighth state cannot
+ * invent an eighth look, and the radius stays on the design system's --radius-control
+ * rather than the off-system 4px `rounded` several of them had drifted to.
+ *
+ * role="alert" is reserved for failures, which must interrupt; every other tone is a
+ * polite status. The tinted surfaces keep body text on the AA-contrast pair (black /
+ * --color-ios-text-secondary) instead of the decorative status colours, which are not
+ * legible enough to carry text on their own (see the note in styles.css).
+ */
+function PanelNotice({
+  tone = "info",
+  label,
+  children,
+  className,
+  id,
+}: {
+  tone?: PanelNoticeTone;
+  /**
+   * A short uppercase lead-in naming WHICH stream this notice belongs to. The panel has
+   * two independent background jobs — a job search that adds postings, and a ranking
+   * pass that reorders them — and an unlabelled banner left the candidate to guess which
+   * one was talking. Omit it for notices that are not about a stream (an error, a
+   * capability limit).
+   */
+  label?: string;
+  children: ReactNode;
+  className?: string;
+  id?: string;
+}) {
+  const surface =
+    tone === "error"
+      ? "border-status-blocked/30 bg-status-blocked/5 text-status-blocked-fg"
+      : tone === "progress"
+        ? "border-ios-blue/25 bg-ios-blue/5 text-ios-text"
+        : "border-ios-separator bg-ios-bg text-ios-text-secondary";
+
+  return (
+    <div
+      id={id}
+      role={tone === "error" ? "alert" : "status"}
+      className={`jb-notice-in mb-3 rounded-control border px-3.5 py-3 text-sm ${surface} ${className ?? ""}`}
+    >
+      {label && (
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide">{label}</p>
+      )}
+      <div className="flex items-start gap-2.5">{children}</div>
+    </div>
+  );
+}
 
 interface OpportunitiesPanelProps {
   /**
@@ -877,15 +937,34 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   ).length;
   const verifiedCount = visibleOpportunities.length - unverifiedCount - partiallyVerifiedCount;
 
+  /**
+   * ONE header for both the loading and loaded states, so the candidate never sees the
+   * title shift or the button move when the first page resolves.
+   */
+  const panelHeader = (
+    <CardHeader>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <CardTitle id="opportunities-title">Find Jobs</CardTitle>
+          <CardDescription className="mt-1">
+            Public postings, ranked for you. “Fetch latest jobs” checks the public sources for new
+            listings; your ranking updates on its own.
+          </CardDescription>
+        </div>
+        {refreshButton}
+      </div>
+    </CardHeader>
+  );
+
   if (loading) {
     return (
       <Card>
-        <CardHeader className="flex-row items-start justify-between gap-4">
-          <CardTitle id="opportunities-title">Find Jobs</CardTitle>
-          {refreshButton}
-        </CardHeader>
+        {panelHeader}
         <CardContent aria-labelledby="opportunities-title">
-          <p className="text-sm text-ios-text-secondary animate-pulse">Loading opportunities…</p>
+          <div className="flex items-center justify-center gap-2.5 py-12 text-sm text-ios-text-secondary">
+            <Spinner className="h-5 w-5" />
+            <span>Loading your matches…</span>
+          </div>
         </CardContent>
       </Card>
     );
@@ -893,22 +972,21 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-start justify-between gap-4">
-        <CardTitle id="opportunities-title">Find Jobs</CardTitle>
-        {refreshButton}
-      </CardHeader>
+      {panelHeader}
       <CardContent aria-labelledby="opportunities-title">
         {error && (
-          <p role="alert" className="text-sm text-status-blocked-fg mb-4">
-            {error}{" "}
-            <button
-              type="button"
-              onClick={() => setReloadToken((value) => value + 1)}
-              className="font-medium text-ios-blue hover:underline"
-            >
-              Retry
-            </button>
-          </p>
+          <PanelNotice tone="error">
+            <span>
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => setReloadToken((value) => value + 1)}
+                className="font-medium text-ios-blue hover:underline"
+              >
+                Retry
+              </button>
+            </span>
+          </PanelNotice>
         )}
 
         {/* Shown separately from the list error because the two have different
@@ -916,34 +994,25 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             the filters did — and in the second case the list is still shown,
             unfiltered, which the candidate needs to know before trusting it. */}
         {preferencesError && (
-          <p role="alert" className="text-sm text-status-blocked-fg mb-4">
-            {preferencesError} Your filters started empty.
-          </p>
+          <PanelNotice tone="error">
+            <span>{preferencesError} Your filters started empty.</span>
+          </PanelNotice>
         )}
 
         {refreshRunning && (
-          <p
-            role="status"
-            aria-live="polite"
-            className="mb-4 flex items-center gap-2 rounded border border-ios-separator bg-ios-separator/50 px-3 py-2 text-sm text-ios-text-secondary"
-          >
-            <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-            Refreshing jobs in the background. New jobs will appear here as soon as it finishes.
-          </p>
+          <PanelNotice tone="progress" label="Job search">
+            <Spinner aria-hidden="true" role="presentation" className="mt-0.5 h-4 w-4 shrink-0 text-ios-blue" />
+            <span>
+              <span className="font-medium text-black">Refreshing jobs in the background.</span> New
+              jobs will appear here as soon as it finishes — you can keep browsing.
+            </span>
+          </PanelNotice>
         )}
 
         {refreshNotice && (
-          <p
-            role={refreshNotice.tone === "error" ? "alert" : "status"}
-            aria-live="polite"
-            className={`mb-4 rounded px-3 py-2 text-sm ${
-              refreshNotice.tone === "error"
-                ? "bg-red-50 border border-red-200 text-status-blocked-fg"
-                : "bg-ios-separator/50 text-ios-text-secondary"
-            }`}
-          >
-            {refreshNotice.text}
-          </p>
+          <PanelNotice tone={refreshNotice.tone === "error" ? "error" : "info"} label="Job search">
+            <span>{refreshNotice.text}</span>
+          </PanelNotice>
         )}
 
         {/* Filter bar: below the header, above the results. The 10 declared
@@ -984,28 +1053,42 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             condition rather than something that just went wrong. The failed-read
             case is the one that needs interrupting, and it carries its own retry. */}
         {bulkApplyButton.notice && (
-          <p
+          <PanelNotice
             id="bulk-apply-notice"
-            role={capability.kind === "error" ? "alert" : "status"}
-            className="mb-4 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
+            tone={capability.kind === "error" ? "error" : "info"}
+            className="text-xs"
           >
-            {bulkApplyButton.notice}{" "}
-            {capability.kind === "error" && (
-              <button
-                type="button"
-                onClick={() => void loadCapability()}
-                className="font-medium text-ios-blue hover:underline"
-              >
-                Retry
-              </button>
-            )}
-          </p>
+            <span>
+              {bulkApplyButton.notice}{" "}
+              {capability.kind === "error" && (
+                <button
+                  type="button"
+                  onClick={() => void loadCapability()}
+                  className="font-medium text-ios-blue hover:underline"
+                >
+                  Retry
+                </button>
+              )}
+            </span>
+          </PanelNotice>
         )}
 
-        {opportunities?.length === 0 && activeFilterCount === 0 && (
-          <p className="text-sm text-ios-text-secondary">
-            No opportunities yet. Use “Fetch latest jobs” to pull the newest listings.
-          </p>
+        {/* A filter re-query can empty the loaded page for a moment. Reporting that as
+            "no jobs" would be a lie in flight, so the empty states below are held back
+            while a query is running and this says what is actually happening. */}
+        {querying && visibleOpportunities.length === 0 && (
+          <PanelNotice tone="info" className="text-xs">
+            <Spinner aria-hidden="true" role="presentation" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ios-blue" />
+            <span>Updating your results…</span>
+          </PanelNotice>
+        )}
+
+        {!querying && opportunities?.length === 0 && activeFilterCount === 0 && (
+          <EmptyState
+            icon={Inbox}
+            title="No opportunities yet"
+            description="Use “Fetch latest jobs” to pull the newest listings from public sources."
+          />
         )}
 
         {/* Distinct from the state above on purpose: "there are none" and
@@ -1013,62 +1096,75 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             second one must not read as an empty dataset. Since Task I this is
             the SERVER reporting no matches — the filter is a clause in SQL, not
             a pass over rows that happen to be loaded. */}
-        {opportunities?.length === 0 && activeFilterCount > 0 && (
-          <p className="text-sm text-ios-text-secondary">No opportunities match these filters.</p>
+        {!querying && opportunities?.length === 0 && activeFilterCount > 0 && (
+          <EmptyState
+            icon={Search}
+            title="No opportunities match these filters"
+            description="Try widening a filter, or clear them to see everything."
+          />
         )}
 
         {/* The role filter can empty a non-empty page. That is a different fact
             from "no jobs" and from "your filters match none", and it is the one
             the candidate can act on by editing their target roles. */}
-        {(opportunities?.length ?? 0) > 0 && visibleOpportunities.length === 0 && (searchPreferences?.targetRoles.length ?? 0) > 0 && (
-          <p className="text-sm text-ios-text-secondary">
-            No jobs match your target roles.{" "}
-            <Link href="/target-roles" className="text-ios-blue hover:underline">
-              Update your target roles
-            </Link>{" "}
-            to widen the feed.
-          </p>
+        {!querying && (opportunities?.length ?? 0) > 0 && visibleOpportunities.length === 0 && (searchPreferences?.targetRoles.length ?? 0) > 0 && (
+          <div>
+            <EmptyState
+              icon={Sparkles}
+              title="No jobs match your target roles"
+              description="Target roles decide which postings count as relevant to you."
+            />
+            <p className="text-center text-sm">
+              <Link href="/target-roles" className="text-ios-blue hover:underline">
+                Update your target roles
+              </Link>{" "}
+              to widen the feed.
+            </p>
+          </div>
         )}
 
         {hiddenByPreferences.length > 0 && (
-          <p role="status" className="text-xs text-ios-text-secondary mb-3">
-            Some loaded jobs were set aside by your search preferences: {hiddenByPreferences.join("; ")}.
-          </p>
+          <PanelNotice tone="info" className="text-xs">
+            <span>
+              Some loaded jobs were set aside by your search preferences: {hiddenByPreferences.join("; ")}.
+            </span>
+          </PanelNotice>
         )}
 
         {ranking != null && ranking.state !== "current" && ranking.state !== "no_target_roles" && (
-          <p
-            role="status"
-            className="mb-3 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
-          >
-            {feedRefresh.kind === "running" || feedRefresh.kind === "stalled"
-              ? feedRefresh.text
-              : ranking.state === "unavailable"
-                ? "Preference ranking is unavailable right now — showing priority order."
-                : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}
-            {feedRefresh.kind === "failed" && <> {feedRefresh.text}</>}
-            {lastCheckedAt !== null && <> Last checked {formatCheckedAt(lastCheckedAt)}.</>}{" "}
-            {/* Retry invokes the REAL refresh path, not a reload of the same stale view. */}
-            <button
-              type="button"
-              onClick={() => startRankingRefresh(true)}
-              className="font-medium text-ios-blue hover:underline"
-            >
-              Retry
-            </button>
-          </p>
+          <PanelNotice tone="info" label="Ranking" className="text-xs">
+            {(feedRefresh.kind === "running" || feedRefresh.kind === "stalled") && (
+              <Spinner aria-hidden="true" role="presentation" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ios-blue" />
+            )}
+            <span>
+              {feedRefresh.kind === "running" || feedRefresh.kind === "stalled"
+                ? feedRefresh.text
+                : ranking.state === "unavailable"
+                  ? "Preference ranking is unavailable right now — showing priority order."
+                  : "Preference ranking is still updating — showing priority order until your roles, preferences and posting evidence are current."}
+              {feedRefresh.kind === "failed" && <> {feedRefresh.text}</>}
+              {lastCheckedAt !== null && <> Last checked {formatCheckedAt(lastCheckedAt)}.</>}{" "}
+              {/* Retry invokes the REAL refresh path, not a reload of the same stale view. */}
+              <button
+                type="button"
+                onClick={() => startRankingRefresh(true)}
+                className="font-medium text-ios-blue hover:underline"
+              >
+                Retry
+              </button>
+            </span>
+          </PanelNotice>
         )}
 
         {ranking != null && ranking.state === "no_target_roles" && (
-          <p
-            role="status"
-            className="mb-3 rounded border border-ios-separator bg-ios-bg px-3 py-2 text-xs text-ios-text-secondary"
-          >
-            Choose your target roles to rank these jobs by your preferences.{" "}
-            <Link href="/target-roles" className="text-ios-blue hover:underline">
-              Choose roles
-            </Link>
-          </p>
+          <PanelNotice tone="info" label="Ranking" className="text-xs">
+            <span>
+              Choose your target roles to rank these jobs by your preferences.{" "}
+              <Link href="/target-roles" className="text-ios-blue hover:underline">
+                Choose roles
+              </Link>
+            </span>
+          </PanelNotice>
         )}
 
         {visibleOpportunities.length > 0 && (
@@ -1116,7 +1212,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             return (
               <li
                 key={opp.id}
-                className={`border rounded-lg p-4 ${
+                className={`border rounded-card p-4 ${
                   unverified ? "border-status-under-review/40 bg-status-under-review/8" : "border-ios-separator"
                 }`}
               >
@@ -1204,14 +1300,15 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           })}
         </ul>
         {hasMore && (
-          <button
-            type="button"
+          <Button
+            variant="secondary"
             onClick={loadMore}
             disabled={loadingMore}
-            className="mt-4 w-full rounded-lg border border-ios-separator py-2 text-sm text-ios-blue hover:bg-ios-separator/30 disabled:opacity-50"
+            aria-busy={loadingMore}
+            className="mt-4 w-full"
           >
             {loadingMore ? "Loading…" : "Load more"}
-          </button>
+          </Button>
         )}
       </CardContent>
 

@@ -166,6 +166,28 @@
 }
 
 /**
+ * Inline-notice enter (ui priming: the panel's PanelNotice).
+ *
+ * transform/opacity ONLY, so a notice appearing above the list never triggers layout
+ * while it moves and the rows below cannot reflow mid-animation. A short, decelerating
+ * travel from 2px up reads as "this just arrived" without being a bounce.
+ */
+@keyframes jb-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.jb-notice-in {
+  animation: jb-notice-in 180ms ease-out both;
+}
+
+/**
  * REDUCED MOTION: 1ms, DELIBERATELY NOT `animation: none`.
  *
  * `none` would stop animationend firing at all, and Radix would then never learn
@@ -174,6 +196,10 @@
  * and still completes, so the unmount happens exactly as it always did.
  */
 @media (prefers-reduced-motion: reduce) {
+  .jb-notice-in {
+    animation-duration: 1ms;
+  }
+
   .jb-sheet-content[data-state="open"],
   .jb-sheet-content[data-state="closed"],
   .jb-sheet-overlay[data-state="open"],

@@ -153,6 +153,18 @@ beforeEach(() => {
   bulkApi.submitBulkApply.mockReset();
   ingestionApi.discoverLiveJobs.mockReset();
   ingestionApi.readIntakeRefreshStatus.mockReset();
+  // The list is queried more than once per mount (filters, then search preferences, then
+  // saved decisions each change the effect's dependencies). Re-establish the default so a
+  // test that overrides it for one call cannot leak, and so a test that wants a stable
+  // result can use mockResolvedValue rather than a single-shot Once.
+  vi.mocked(listOpportunities).mockReset();
+  vi.mocked(listOpportunities).mockResolvedValue({
+    kind: "success",
+    opportunities: [fixtures.opportunity],
+    hasMore: false,
+    totalCount: 1,
+    ranking: fixtures.ranking,
+  } as never);
   // Default: nothing running. Tests that need a refresh in flight override this.
   ingestionApi.readIntakeRefreshStatus.mockResolvedValue({
     kind: "success",
@@ -196,6 +208,73 @@ describe("OpportunitiesPanel job links", () => {
     expect(screen.getByText(/Some listings come from sources we can/)).toBeTruthy();
     // ...and the full paragraph is no longer repeated for every card.
     expect(screen.queryByText(/We haven/)).toBeNull();
+  });
+});
+
+/**
+ * The panel's own status surfaces: the header has to say what the fetch button does, the
+ * first load has to be visibly loading, and "nothing here" has to be a real state rather
+ * than a bare sentence.
+ */
+describe("OpportunitiesPanel — status and empty states", () => {
+  it("says what the fetch button does, and that ranking is a separate thing", async () => {
+    renderPanel();
+
+    await screen.findByText("Azure Data Engineer");
+
+    expect(screen.getByText(/checks the public sources for new listings/i)).toBeTruthy();
+  });
+
+  it("shows a loading indicator while the first page is in flight", async () => {
+    vi.mocked(listOpportunities).mockReturnValueOnce(new Promise(() => {}) as never);
+
+    renderPanel();
+
+    expect(screen.getByRole("status", { name: "Loading" })).toBeTruthy();
+  });
+
+  it("labels the background job fetch so it cannot be confused with ranking", async () => {
+    ingestionApi.readIntakeRefreshStatus.mockResolvedValue({
+      kind: "success",
+      status: { status: "leased", running: true, result: null, lastError: null, updatedAt: null },
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText("Job search")).toBeTruthy();
+    // The two refreshes are different work and now say so on screen.
+    expect(screen.getByText("Ranking")).toBeTruthy();
+  });
+
+  it("shows an updating affordance when a re-query is in flight with an empty list", async () => {
+    // An empty list while a filter re-query is in flight must not read as "no jobs"; it
+    // reads as "updating". The list error's Retry is the one reliable way to put a query
+    // in flight from a test.
+    vi.mocked(listOpportunities).mockResolvedValue({ kind: "error", message: "Could not load jobs." } as never);
+
+    renderPanel();
+
+    const retry = await screen.findByRole("button", { name: /retry/i });
+    vi.mocked(listOpportunities).mockReset();
+    vi.mocked(listOpportunities).mockReturnValue(new Promise(() => {}) as never);
+    fireEvent.click(retry);
+
+    expect(await screen.findByText(/Updating your results/i)).toBeTruthy();
+  });
+
+  it("shows an empty state with the fetch call to action when there are no jobs", async () => {
+    vi.mocked(listOpportunities).mockResolvedValue({
+      kind: "success",
+      opportunities: [],
+      hasMore: false,
+      totalCount: 0,
+      ranking: fixtures.ranking,
+    } as never);
+
+    renderPanel();
+
+    expect(await screen.findByText("No opportunities yet")).toBeTruthy();
+    expect(screen.getByText(/pull the newest listings from public sources/i)).toBeTruthy();
   });
 });
 
