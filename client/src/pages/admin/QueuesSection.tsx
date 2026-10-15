@@ -17,8 +17,9 @@ import { AdminCard, RefreshButton, SectionMessage, getAccessToken } from "./shar
  * Queues and Workers — the last static mock in the console, replaced by real
  * data.
  *
- * WHAT THIS ANSWERS. Three Postgres lease queues back the background work
- * (ingestion_jobs, fit_analysis_jobs, company_registry_lookup_jobs), and before
+ * WHAT THIS ANSWERS. Four Postgres lease queues back the background work
+ * (ingestion_jobs, fit_analysis_jobs, company_registry_lookup_jobs,
+ * intake_refresh_jobs), and before
  * this screen the only way to see any of them was to open a SQL client. Depth
  * by status, how long the oldest pending row has waited, and the ten most
  * recent dead letters per queue are now one page — with a manual re-arm for a
@@ -164,7 +165,7 @@ export function QueuesSection() {
     <div className="space-y-4">
       <AdminCard
         title="Queue depth"
-        description="The three Postgres lease queues. Counts are per status; the age is how long the oldest pending job has been waiting."
+        description="The four Postgres lease queues. Counts are per status; the age is how long the oldest pending job has been waiting."
         action={<RefreshButton onClick={() => setReloadToken((current) => current + 1)} busy={loading} />}
       >
         {error && <SectionMessage tone="error">{error}</SectionMessage>}

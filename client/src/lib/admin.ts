@@ -331,12 +331,17 @@ export function getAdminSourceHealth(
  * are session + requireAdmin on the server; the browser never holds
  * WORKER_TRIGGER_SECRET, which is what the /api/worker/* routes require.
  */
-export type AdminQueueName = "ingestion_jobs" | "fit_analysis_jobs" | "company_registry_lookup_jobs";
+export type AdminQueueName =
+  | "ingestion_jobs"
+  | "fit_analysis_jobs"
+  | "company_registry_lookup_jobs"
+  | "intake_refresh_jobs";
 
 export const ADMIN_QUEUE_LABELS: Record<AdminQueueName, string> = {
   ingestion_jobs: "Ingestion",
   fit_analysis_jobs: "Fit analysis",
   company_registry_lookup_jobs: "Company registry",
+  intake_refresh_jobs: "Intake refresh",
 };
 
 export type AdminQueueJobStatus = "pending" | "leased" | "done" | "failed";

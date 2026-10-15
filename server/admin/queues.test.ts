@@ -78,6 +78,13 @@ describe("isQueueName", () => {
     }
   });
 
+  it("accepts the candidate intake refresh queue — the fourth lease queue", () => {
+    // Without this it is invisible to the console: a dead-lettered refresh could never
+    // be seen or re-armed, which is exactly the blind spot Step 6 would have left.
+    expect(isQueueName("intake_refresh_jobs")).toBe(true);
+    expect(QUEUE_NAMES).toContain("intake_refresh_jobs");
+  });
+
   it("rejects anything else, including near-misses", () => {
     for (const value of ["ingestion", "INGESTION_JOBS", "application_attempts", "", null, undefined, 7, {}]) {
       expect(isQueueName(value)).toBe(false);
@@ -145,6 +152,51 @@ describe("getQueueSummary", () => {
     const summary = await getQueueSummary(client, "fit_analysis_jobs");
 
     expect(summary.deadLetters[0].label).toBe("candidate 11111111 to vacancy 22222222");
+  });
+
+  it("labels an intake refresh by its candidate and the search they asked for", async () => {
+    const { client } = makeClient({
+      deadLetters: {
+        intake_refresh_jobs: [
+          {
+            id: "job-4",
+            candidate_id: "11111111-1111-1111-1111-111111111111",
+            search: "data engineer",
+            attempts: 5,
+            max_attempts: 5,
+            last_error: "jooble quota exhausted",
+            updated_at: "2026-10-15T12:00:00.000Z",
+          },
+        ],
+      },
+    });
+
+    const summary = await getQueueSummary(client, "intake_refresh_jobs");
+
+    expect(summary.deadLetters[0].label).toBe('candidate 11111111 refresh "data engineer"');
+    expect(summary.deadLetters[0].lastError).toBe("jooble quota exhausted");
+  });
+
+  it("labels an intake refresh with no search by the candidate alone", async () => {
+    const { client } = makeClient({
+      deadLetters: {
+        intake_refresh_jobs: [
+          {
+            id: "job-5",
+            candidate_id: "22222222-2222-2222-2222-222222222222",
+            search: null,
+            attempts: 2,
+            max_attempts: 5,
+            last_error: null,
+            updated_at: null,
+          },
+        ],
+      },
+    });
+
+    const summary = await getQueueSummary(client, "intake_refresh_jobs");
+
+    expect(summary.deadLetters[0].label).toBe("candidate 22222222 refresh");
   });
 
   it("labels a registry lookup by its CIN", async () => {

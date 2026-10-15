@@ -1,10 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Queue observability and dead-letter retry for the three Postgres lease queues
- * (PRD §23): ingestion_jobs, fit_analysis_jobs and company_registry_lookup_jobs.
+ * Queue observability and dead-letter retry for the four Postgres lease queues
+ * (PRD §23): ingestion_jobs, fit_analysis_jobs, company_registry_lookup_jobs and
+ * intake_refresh_jobs.
  *
- * ALL THREE SHARE ONE SHAPE, which is why one module reads them: same status
+ * ALL FOUR SHARE ONE SHAPE, which is why one module reads them: same status
  * vocabulary ('pending' | 'leased' | 'done' | 'failed'), same attempts /
  * max_attempts / leased_until / last_error columns, same 5-minute lease, and a
  * claim RPC built from the identical FOR UPDATE SKIP LOCKED query. What differs
@@ -17,12 +18,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * trade against a schema change for a read an operator makes on demand.
  */
 
-export type QueueName = "ingestion_jobs" | "fit_analysis_jobs" | "company_registry_lookup_jobs";
+export type QueueName =
+  | "ingestion_jobs"
+  | "fit_analysis_jobs"
+  | "company_registry_lookup_jobs"
+  | "intake_refresh_jobs";
 
 export const QUEUE_NAMES: readonly QueueName[] = [
   "ingestion_jobs",
   "fit_analysis_jobs",
   "company_registry_lookup_jobs",
+  "intake_refresh_jobs",
 ];
 
 export function isQueueName(value: unknown): value is QueueName {
@@ -85,6 +91,16 @@ const DESCRIPTORS: Record<QueueName, QueueDescriptor> = {
   company_registry_lookup_jobs: {
     deadLetterColumns: "id, company_id, cin, attempts, max_attempts, last_error, updated_at",
     label: (row) => "CIN " + String(row.cin ?? "unknown"),
+  },
+  intake_refresh_jobs: {
+    // The candidate is the actionable half; search names what they asked for when the
+    // refresh overrode their profile keywords. Both travel so an operator can tell one
+    // candidate's failed refresh from another's without opening a SQL client.
+    deadLetterColumns: "id, candidate_id, search, attempts, max_attempts, last_error, updated_at",
+    label: (row) => {
+      const search = typeof row.search === "string" ? row.search.trim() : "";
+      return "candidate " + shortId(row.candidate_id) + " refresh" + (search ? " " + JSON.stringify(search) : "");
+    },
   },
 };
 
