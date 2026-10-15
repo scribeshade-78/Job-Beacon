@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  KEYLESS_SCHEDULED_SOURCE_CODES,
   readScheduledRefreshBudget,
-  runScheduledDiscovery,
   runScheduledRankingRefresh,
   type ScheduledRefreshDeps,
 } from "./scheduledRefresh.js";
@@ -29,26 +27,10 @@ const SUCCESS = {
   deadlineReached: false,
 };
 
-const INTAKE_RESULT = {
-  sources: [],
-  received: 0,
-  ingested: 0,
-  created: 2,
-  updated: 1,
-  skippedByAdapter: 0,
-  newVacancyIds: [],
-  trustStatusCounts: {},
-  durationMs: 1,
-  failedSources: 0,
-};
-
 function deps(overrides: Partial<ScheduledRefreshDeps> = {}): ScheduledRefreshDeps {
   return {
     enumerateCandidates: vi.fn(async () => [{ candidate_id: "c-1", reason: "stale" }]),
     runRefresh: vi.fn(async () => SUCCESS),
-    findActiveCandidateIds: vi.fn(async () => ["c-1"]),
-    loadContext: vi.fn(async () => ({ keywords: "Data Engineer", location: "India", country: "in" })),
-    runIntake: vi.fn(async () => INTAKE_RESULT),
     ...overrides,
   } as ScheduledRefreshDeps;
 }
@@ -65,6 +47,19 @@ describe("readScheduledRefreshBudget", () => {
         SCHEDULER_REFRESH_TICK_DEADLINE_MS: "90000",
       }),
     ).toEqual({ maxCandidates: 5, perCandidateDeadlineMs: 10_000, tickDeadlineMs: 90_000 });
+  });
+});
+
+describe("the retired per-candidate discovery fetch", () => {
+  it("no longer exports a per-candidate discovery runner", async () => {
+    // WHY THIS IS A GUARD AND NOT JUST A DELETION. The global keyless pull fills the
+    // shared corpus once, from the same sources this used to fetch per candidate. The
+    // candidate-specific work it might look like it was doing is already covered:
+    // fit-analysis jobs are enqueued on a vacancy's transition into VERIFIED
+    // (scoreVacancy -> enqueueFitJobsForVacancy), and ranking has its own scheduled task.
+    const module = await import("./scheduledRefresh.js");
+
+    expect("runScheduledDiscovery" in module).toBe(false);
   });
 });
 
@@ -174,101 +169,3 @@ describe("runScheduledRankingRefresh", () => {
   });
 });
 
-describe("runScheduledDiscovery", () => {
-  it("only considers candidates the authorization gate returned, in a deterministic order", async () => {
-    const runIntake = vi.fn(async () => INTAKE_RESULT);
-    const loadContext = vi.fn(async (_client: unknown, _candidateId: string) => ({
-      keywords: "Data Engineer",
-      location: "India",
-      country: "in",
-    }));
-
-    await runScheduledDiscovery({} as never, {
-      budget: BUDGET,
-      deps: deps({
-        findActiveCandidateIds: vi.fn(async () => ["c-b", "c-a"]),
-        loadContext,
-        runIntake,
-      }),
-    });
-
-    expect(loadContext.mock.calls.map((call) => call[1])).toEqual(["c-a", "c-b"]);
-  });
-
-  it("uses only the keyless sources and passes the candidate context through", async () => {
-    const runIntake = vi.fn(async () => INTAKE_RESULT);
-
-    await runScheduledDiscovery({} as never, {
-      budget: BUDGET,
-      deps: deps({ runIntake }),
-    });
-
-    expect(runIntake).toHaveBeenCalledWith(
-      {},
-      expect.objectContaining({
-        sourceCodes: KEYLESS_SCHEDULED_SOURCE_CODES,
-        keywords: "Data Engineer",
-        location: "India",
-        country: "in",
-        deadlineMs: 10_000,
-      }),
-    );
-    expect(KEYLESS_SCHEDULED_SOURCE_CODES).not.toContain("jooble");
-    expect(KEYLESS_SCHEDULED_SOURCE_CODES).not.toContain("adzuna");
-    expect(KEYLESS_SCHEDULED_SOURCE_CODES).not.toContain("serpapi");
-  });
-
-  it("isolates a candidate whose context read fails and keeps going", async () => {
-    let call = 0;
-    const loadContext = vi.fn(async () => {
-      call += 1;
-      if (call === 1) throw new Error("context unavailable");
-      return { keywords: "Data Engineer" };
-    });
-
-    const summary = await runScheduledDiscovery({} as never, {
-      budget: BUDGET,
-      deps: deps({
-        findActiveCandidateIds: vi.fn(async () => ["c-1", "c-2"]),
-        loadContext,
-      }),
-    });
-
-    expect(summary.failed).toBe(1);
-    expect(summary.candidatesConsidered).toBe(2);
-  });
-
-  it("aggregates what the sources produced and stops at the cap", async () => {
-    const runIntake = vi.fn(async () => ({ ...INTAKE_RESULT, created: 3, updated: 1, failedSources: 1 }));
-
-    const summary = await runScheduledDiscovery({} as never, {
-      budget: { ...BUDGET, maxCandidates: 1 },
-      deps: deps({
-        findActiveCandidateIds: vi.fn(async () => ["c-1", "c-2"]),
-        runIntake,
-      }),
-    });
-
-    expect(summary.candidatesConsidered).toBe(1);
-    expect(summary.created).toBe(3);
-    expect(summary.updated).toBe(1);
-    expect(summary.failedSources).toBe(1);
-    expect(runIntake).toHaveBeenCalledTimes(1);
-  });
-
-  it("needs no candidate at all to be a valid tick", async () => {
-    const summary = await runScheduledDiscovery({} as never, {
-      budget: BUDGET,
-      deps: deps({ findActiveCandidateIds: vi.fn(async () => []) }),
-    });
-
-    expect(summary).toEqual({
-      candidatesConsidered: 0,
-      created: 0,
-      updated: 0,
-      failed: 0,
-      failedSources: 0,
-      deadlineReached: false,
-    });
-  });
-});

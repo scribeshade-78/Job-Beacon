@@ -7,7 +7,6 @@ import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
 import {
   KEYLESS_SCHEDULED_SOURCE_CODES,
-  runScheduledDiscovery,
   runScheduledRankingRefresh,
 } from "./opportunities/scheduledRefresh.js";
 import {
@@ -15,13 +14,11 @@ import {
   buildScheduledTasks,
   CALENDAR_SYNC_TASK_NAME,
   DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
-  DEFAULT_DISCOVERY_INTERVAL_MS,
   DEFAULT_FIT_INTERVAL_MS,
   DEFAULT_RANKING_REFRESH_INTERVAL_MS,
   DEFAULT_INGESTION_DRAIN_INTERVAL_MS,
   DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS,
   DEFAULT_KEYLESS_INGESTION_INTERVAL_MS,
-  DISCOVERY_TASK_NAME,
   FIT_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
@@ -58,7 +55,6 @@ vi.mock("./opportunities/scheduledRefresh.js", async (importActual) => {
   return {
     ...actual,
     runScheduledRankingRefresh: vi.fn(),
-    runScheduledDiscovery: vi.fn(),
   };
 });
 
@@ -93,7 +89,6 @@ const ALWAYS_ON = [
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
-  DISCOVERY_TASK_NAME,
 ];
 
 // The constants are imported for real rather than restubbed: the whole point of
@@ -131,7 +126,6 @@ beforeEach(() => {
   vi.mocked(enqueueIngestionBatch).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
   vi.mocked(runScheduledRankingRefresh).mockReset();
-  vi.mocked(runScheduledDiscovery).mockReset();
   vi.mocked(runFitAnalysisBatch).mockResolvedValue({ ...fitResult });
   vi.mocked(runFollowUpSweep).mockResolvedValue({ ...sweepResult });
 });
@@ -195,6 +189,16 @@ describe("buildScheduledTasks", () => {
     expect(names.indexOf(KEYLESS_INGESTION_ENQUEUE_TASK_NAME)).toBeLessThan(
       names.indexOf(INGESTION_DRAIN_TASK_NAME),
     );
+  });
+
+  it("no longer schedules a per-candidate discovery fetch", () => {
+    // The global keyless pull refreshes the shared corpus once; fetching the same sources
+    // again for every authorized candidate was the same requests repeated. The scheduler
+    // must not quietly regain that work.
+    const names = buildScheduledTasks(client, openai, {}).map((task) => task.name);
+
+    expect(names).not.toContain("discovery");
+    expect(names).toContain(KEYLESS_INGESTION_ENQUEUE_TASK_NAME);
   });
 
   it("retunes the keyless pull cadence without editing code", () => {
@@ -561,41 +565,13 @@ describe("the Batch C scheduled refresh tasks", () => {
     });
   });
 
-  it("schedules discovery at its own default cadence and logs the tick summary", async () => {
-    vi.mocked(runScheduledDiscovery).mockResolvedValue({
-      candidatesConsidered: 1,
-      created: 3,
-      updated: 0,
-      failed: 0,
-      failedSources: 0,
-      deadlineReached: false,
-    });
-
-    const task = taskByName(DISCOVERY_TASK_NAME, {});
-    expect(task.intervalMs).toBe(DEFAULT_DISCOVERY_INTERVAL_MS);
-
-    expect(await task.run()).toMatchObject({ created: 3 });
-    expect(vi.mocked(runScheduledDiscovery)).toHaveBeenCalledWith(client, {
-      budget: expect.objectContaining({ maxCandidates: 20 }),
-    });
-  });
-
-  it("retunes both new cadences without editing code", () => {
+  it("retunes the ranking cadence without editing code", () => {
     const tasks = buildScheduledTasks(client, openai, {
       SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "45000",
-      SCHEDULER_DISCOVERY_INTERVAL_MS: "3600000",
     });
 
     expect(tasks.find((task) => task.name === RANKING_REFRESH_TASK_NAME)?.intervalMs).toBe(45_000);
-    expect(tasks.find((task) => task.name === DISCOVERY_TASK_NAME)?.intervalMs).toBe(3_600_000);
   });
 
-  it("can disable either new task independently", () => {
-    const names = buildScheduledTasks(client, openai, { SCHEDULER_DISABLED_TASKS: "discovery" }).map(
-      (task) => task.name,
-    );
 
-    expect(names).toContain(RANKING_REFRESH_TASK_NAME);
-    expect(names).not.toContain(DISCOVERY_TASK_NAME);
-  });
 });

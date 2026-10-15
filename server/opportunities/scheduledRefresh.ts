@@ -1,40 +1,33 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { findActiveCandidateIds } from "../applications/activeCandidates.js";
 import { readEnvInt } from "../config/envInt.js";
-import { loadIntakeQueryContext } from "../intake/queryContext.js";
-import { runIntakeAcrossSources, type RunIntakeFanOutResult } from "../intake/intake.js";
 import { runRankingRefresh, type RankingRefreshClient, type RankingRefreshResult } from "./rankingRefresh.js";
 
 /**
- * BATCH C — the SCHEDULED callers of the refresh workflow.
+ * BATCH C — the SCHEDULED refresh workflow, driven by the existing scheduler daemon
+ * (server/schedulerTasks.ts); no new daemon, queue or pg-boss.
  *
- * Two independent tasks, both driven by the existing scheduler daemon
- * (server/schedulerTasks.ts); no new daemon, queue or pg-boss:
+ * RANKING REFRESH is DB-only over each candidate's own rows. It enumerates candidates
+ * whose ranking is not current (service-role RPC) and runs the SAME runRankingRefresh the
+ * manual route uses, bounded per candidate and per tick. It needs no automation consent:
+ * deriving a feed from a candidate's own stated preferences is not an automated action
+ * against a third party.
  *
- *   * RANKING REFRESH is DB-only over each candidate's own rows. It enumerates
- *     candidates whose ranking is not current (service-role RPC) and runs the
- *     SAME runRankingRefresh the manual route uses, bounded per candidate and per
- *     tick. It needs no automation consent: deriving a feed from a candidate's own
- *     stated preferences is not an automated action against a third party.
+ * THE PER-CANDIDATE DISCOVERY FETCH THAT USED TO LIVE HERE IS RETIRED. It fetched the
+ * keyless public sources separately for every authorized candidate — the same requests,
+ * repeated — while the shared corpus is now refreshed once by schedulerTasks'
+ * keyless-ingestion-enqueue task. Nothing candidate-specific was left for it to do:
+ * fit-analysis jobs are enqueued on a vacancy's transition into VERIFIED
+ * (scoreVacancy -> enqueueFitJobsForVacancy), and ranking has this task.
  *
- *   * DISCOVERY reaches the network, so it is gated on
- *     automation_authorizations.status = 'authorized' (findActiveCandidateIds) and
- *     restricted to the KEYLESS public sources. It calls the same
- *     loadIntakeQueryContext -> runIntakeAcrossSources pair the on-demand route
- *     calls, so source_policies (discovery_allowed, kill_switch) are enforced by
- *     that layer. It makes NO model call and submits NOTHING.
- *
- * BUDGETS ARE PER TICK, NOT PER CORPUS. A tick stops at maxCandidates or at the
- * tick deadline and the remainder waits for the next tick, so a schedule can
- * never turn into one unbounded run. A candidate failure is isolated: the tick
- * continues.
+ * BUDGETS ARE PER TICK, NOT PER CORPUS. A tick stops at maxCandidates or at the tick
+ * deadline and the remainder waits for the next tick, so a schedule can never turn into
+ * one unbounded run. A candidate failure is isolated: the tick continues.
  */
 
 /**
- * The ONLY sources an unattended run may poll today: the keyless, free public
- * APIs. The registry filters this list to what is actually registered, so The
- * Muse is included only when its opt-in flag is set. Adzuna, Jooble, SerpApi and
- * every credentialed adapter are deliberately absent.
+ * The only sources the unattended path may poll: the keyless, free public APIs.
+ * Credentialed aggregators — Jooble's lifetime 500-request plan, Adzuna, SerpApi — are
+ * deliberately absent. Consumed by schedulerTasks' keyless-ingestion-enqueue task, which
+ * queues them into the SHARED corpus once rather than once per candidate.
  */
 export const KEYLESS_SCHEDULED_SOURCE_CODES = ["remotive", "arbeitnow", "themuse"] as const;
 
@@ -81,14 +74,7 @@ export interface ScheduledRankingRefreshSummary {
   identities: string[];
 }
 
-export interface ScheduledDiscoverySummary {
-  candidatesConsidered: number;
-  created: number;
-  updated: number;
-  failed: number;
-  failedSources: number;
-  deadlineReached: boolean;
-}
+
 
 export interface EnumeratedCandidate {
   candidate_id: string;
@@ -105,22 +91,6 @@ export interface ScheduledRefreshDeps {
     candidateId: string,
     options: { force: boolean; deadlineMs: number },
   ) => Promise<RankingRefreshResult>;
-  findActiveCandidateIds: (client: SupabaseClient) => Promise<string[]>;
-  loadContext: (
-    client: SupabaseClient,
-    candidateId: string,
-  ) => Promise<{ keywords?: string; location?: string; country?: string; countries?: string[] }>;
-  runIntake: (
-    client: SupabaseClient,
-    input: {
-      sourceCodes: readonly string[];
-      keywords?: string;
-      location?: string;
-      country?: string;
-      countries?: readonly string[];
-      deadlineMs: number;
-    },
-  ) => Promise<RunIntakeFanOutResult>;
 }
 
 /**
@@ -146,9 +116,6 @@ async function enumerateCandidates(
 const DEFAULT_DEPS: ScheduledRefreshDeps = {
   enumerateCandidates,
   runRefresh: (client, candidateId, options) => runRankingRefresh(client, candidateId, options),
-  findActiveCandidateIds,
-  loadContext: (client, candidateId) => loadIntakeQueryContext(client, candidateId),
-  runIntake: (client, input) => runIntakeAcrossSources(client, input),
 };
 
 function describeError(error: unknown): string {
@@ -230,68 +197,4 @@ export async function runScheduledRankingRefresh(
   return summary;
 }
 
-/**
- * One bounded tick of scheduled discovery. Authorization is enforced by
- * findActiveCandidateIds; provider policy and kill switches by the intake layer.
- * No model call and no submission happen here.
- */
-export async function runScheduledDiscovery(
-  client: SupabaseClient,
-  options: RunScheduledOptions = {},
-): Promise<ScheduledDiscoverySummary> {
-  const budget = options.budget ?? readScheduledRefreshBudget();
-  const now = options.now ?? (() => Date.now());
-  const deps: ScheduledRefreshDeps = { ...DEFAULT_DEPS, ...options.deps };
-  const deadline = now() + budget.tickDeadlineMs;
 
-  // Sorted for a deterministic, resumable order across ticks.
-  const candidateIds = [...(await deps.findActiveCandidateIds(client))].sort();
-
-  const summary: ScheduledDiscoverySummary = {
-    candidatesConsidered: 0,
-    created: 0,
-    updated: 0,
-    failed: 0,
-    failedSources: 0,
-    deadlineReached: false,
-  };
-
-  for (const candidateId of candidateIds) {
-    if (summary.candidatesConsidered >= budget.maxCandidates) break;
-
-    if (now() >= deadline) {
-      summary.deadlineReached = true;
-      break;
-    }
-
-    summary.candidatesConsidered += 1;
-
-    try {
-      const context = await deps.loadContext(client, candidateId);
-      const result = await deps.runIntake(client, {
-        sourceCodes: KEYLESS_SCHEDULED_SOURCE_CODES,
-        keywords: context.keywords,
-        location: context.location,
-        country: context.country,
-        // Multi-market on the scheduled path too, so a candidate's cross-border
-        // markets refresh on the same schedule as everything else. Inert while this
-        // path only runs keyless sources - and correct the moment that changes.
-        countries: context.countries,
-        deadlineMs: budget.perCandidateDeadlineMs,
-      });
-
-      summary.created += result.created;
-      summary.updated += result.updated;
-      summary.failedSources += result.failedSources;
-      if (result.stoppedOnDeadline) summary.deadlineReached = true;
-    } catch (error) {
-      summary.failed += 1;
-      console.error("[scheduler] discovery candidate failed", {
-        candidateId,
-        error: describeError(error),
-      });
-    }
-  }
-
-  return summary;
-}

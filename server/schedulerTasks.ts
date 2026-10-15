@@ -6,7 +6,6 @@ import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import {
   KEYLESS_SCHEDULED_SOURCE_CODES,
   readScheduledRefreshBudget,
-  runScheduledDiscovery,
   runScheduledRankingRefresh,
 } from "./opportunities/scheduledRefresh.js";
 import { DEFAULT_DRAFT_LIMIT, DEFAULT_MIN_AGE_DAYS, runFollowUpSweep } from "./mailbox/antiGhosting.js";
@@ -72,7 +71,6 @@ export const DEFAULT_ANTI_GHOSTING_INTERVAL_MS = 24 * 60 * 60_000;
 
 export const FIT_TASK_NAME = "fit-analysis";
 export const RANKING_REFRESH_TASK_NAME = "ranking-refresh";
-export const DISCOVERY_TASK_NAME = "discovery";
 export const ANTI_GHOSTING_TASK_NAME = "anti-ghosting";
 export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
 export const MAILBOX_CLASSIFY_TASK_NAME = "mailbox-classify";
@@ -117,7 +115,7 @@ export const DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS = 60_000;
  * How often the unattended path tops up the ingestion queue with the keyless public
  * sources.
  *
- * CONSERVATIVE ON PURPOSE, matching the discovery task's four-runs-a-day cadence. This
+ * CONSERVATIVE ON PURPOSE: four runs a day. This
  * task only ENQUEUES - the network cost is paid by the ingestion drain, whose per-target
  * cooldown is the real guard - but the cadence decides how often each of those public
  * APIs is swept, and they are somebody else's free infrastructure.
@@ -158,13 +156,6 @@ export const DEFAULT_CALENDAR_SYNC_INTERVAL_MS = 10 * 60_000;
  */
 export const DEFAULT_RANKING_REFRESH_INTERVAL_MS = 10 * 60_000;
 
-/**
- * Batch C — scheduled discovery. It reaches third-party APIs, so it defaults
- * CONSERVATIVELY to four runs a day even though the unattended path is restricted
- * to keyless public sources; SCHEDULER_DISCOVERY_INTERVAL_MS changes it without a
- * deploy, and each tick is capped to SCHEDULER_REFRESH_MAX_CANDIDATES_PER_TICK.
- */
-export const DEFAULT_DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
 
 /**
  * Parses SCHEDULER_DISABLED_TASKS, a comma-separated list of task names.
@@ -464,11 +455,10 @@ export function buildScheduledTasks(
     ...(capability.googleCalendar.enabled ? [calendarSyncTask(client, env)] : []),
 
     /**
-     * The candidate-triggered intake refresh drain. Placed AFTER the mailbox block and
-     * BEFORE scheduled discovery: it is the heaviest network task in the array (a
-     * multi-source fan-out plus a bounded fit batch), so putting it ahead of mail
-     * classification would let it delay the messages a candidate actually notices, while
-     * a candidate waiting on their own button should not sit behind an unattended sweep.
+     * The candidate-triggered intake refresh drain. Placed AFTER the mailbox block: it is
+     * the heaviest network task in the array (a multi-source fan-out plus a bounded fit
+     * batch), so putting it ahead of mail classification would let it delay the messages a
+     * candidate actually notices.
      *
      * It carries the OpenAI client because scoring the vacancies a refresh just created
      * moved here with the fan-out. Fetching without scoring leaves the new jobs ranked
@@ -496,16 +486,6 @@ export function buildScheduledTasks(
       },
     },
 
-    /**
-     * Batch C scheduled discovery. LAST so its network latency never delays the
-     * DB tasks; authorization and keyless-only source selection live inside the
-     * task, and new vacancies are ranked by the next ranking-refresh tick.
-     */
-    {
-      name: DISCOVERY_TASK_NAME,
-      intervalMs: readEnvInt("SCHEDULER_DISCOVERY_INTERVAL_MS", DEFAULT_DISCOVERY_INTERVAL_MS, env),
-      run: async () => ({ ...(await runScheduledDiscovery(client, { budget: readScheduledRefreshBudget(env) })) }),
-    },
   ];
 
   return tasks.filter((task) => !disabled.has(task.name));
