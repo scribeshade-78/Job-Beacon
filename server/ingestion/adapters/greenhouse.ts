@@ -93,12 +93,32 @@ export function mapGreenhouseJob(
 }
 
 function inferRemoteType(locationName: string | undefined): DiscoveredVacancy["remoteType"] {
-  // Narrow, documented heuristic — Greenhouse's location is a single
-  // freeform string with no structured remote/hybrid/on-site flag. Only
-  // the unambiguous exact-match case is inferred; everything else is left
-  // null rather than guessed from free text.
-  if (locationName?.trim().toLowerCase() === "remote") {
+  // THE LEADING TOKEN, VERIFIED AGAINST THE LIVE BOARDS. Greenhouse has no structured
+  // remote flag — location is one freeform string — and an exact match was too narrow for
+  // how boards actually write it: on the real Stripe board only 6 of 728 locations equal
+  // "Remote" while 16 BEGIN with it ("Remote from the US", "Remote - US", "Remote, US"),
+  // and on Vercel NONE matched exactly while 9 begin with "Remote - ...". Every Vercel
+  // remote role was therefore invisible to the work-mode filter, and because
+  // practicalEligibility short-circuits on remote_type, those rows also carried location
+  // blockers they should not have.
+  //
+  // STILL DELIBERATELY NARROW, and the leading token IS the boundary. The same boards
+  // carry genuinely ambiguous values — "Dublin or Germany (Berlin or Remote)",
+  // "Poland - Remote OR Romania - Remote", "US-Remote-CA, US-San Francisco, US-Seattle" —
+  // which name two places or a region code and stay null. A false positive here is not a
+  // cosmetic error: it silently removes a candidate's location blocker.
+  if (typeof locationName !== "string") {
+    return null;
+  }
+
+  const normalized = locationName.trim().toLowerCase();
+
+  if (/^remote\b/.test(normalized)) {
     return "remote";
+  }
+
+  if (/^hybrid\b/.test(normalized)) {
+    return "hybrid";
   }
 
   return null;

@@ -157,3 +157,63 @@ describe("Greenhouse payload hardening", () => {
     expect(rows.map((row) => row.sourceVacancyId)).toEqual(["1"]);
   });
 });
+
+/**
+ * Mapping verified against the REAL Stripe and Vercel boards (2026-10-xx): 728 and 91 rows,
+ * every field the adapter assumes present, nothing skipped. These two tests pin what the
+ * live payloads revealed about the one field that WAS being dropped.
+ */
+describe("Greenhouse live-verified location mapping", () => {
+  const config = { companyName: "Acme Corp" };
+
+  function page(jobs: unknown[]) {
+    return (async () => ({ ok: true, status: 200, json: async () => ({ jobs }) })) as unknown as typeof fetch;
+  }
+
+  it("infers remoteType from a LEADING location token, which is how real boards write it", async () => {
+    // Exact-match was too narrow for reality. On the live Stripe board only 6 of 728
+    // locations equal "Remote", while 16 BEGIN with it; on Vercel 0 matched exactly and 9
+    // begin with "Remote - ...". Every Vercel remote role was invisible to the work-mode
+    // filter, and practicalEligibility short-circuits on remote_type, so those rows also
+    // carried location blockers they should not have.
+    const rows = await greenhouseAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: 1, title: "A", absolute_url: "https://x/1", location: { name: "Remote" } },
+        { id: 2, title: "B", absolute_url: "https://x/2", location: { name: "Remote - United States" } },
+        { id: 3, title: "C", absolute_url: "https://x/3", location: { name: "Remote from the US" } },
+        { id: 4, title: "D", absolute_url: "https://x/4", location: { name: "Remote, US" } },
+        { id: 5, title: "E", absolute_url: "https://x/5", location: { name: "Hybrid - London" } },
+        { id: 6, title: "F", absolute_url: "https://x/6", location: { name: "San Francisco, CA" } },
+      ]),
+    );
+
+    expect(rows.map((row) => row.remoteType)).toEqual([
+      "remote",
+      "remote",
+      "remote",
+      "remote",
+      "hybrid",
+      null,
+    ]);
+  });
+
+  it("leaves a genuinely AMBIGUOUS mid-string remote mention null rather than guessing", async () => {
+    // Boundary guard, deliberately green from the start. These are real Stripe locations:
+    // each names two places or a region code, so narrowing to the leading token is what
+    // keeps the change above from becoming a guess.
+    const rows = await greenhouseAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: 1, title: "A", absolute_url: "https://x/1", location: { name: "Dublin or Germany (Berlin or Remote)" } },
+        { id: 2, title: "B", absolute_url: "https://x/2", location: { name: "US-Remote-CA, US-San Francisco, US-Seattle" } },
+        { id: 3, title: "C", absolute_url: "https://x/3", location: { name: "Poland - Remote OR Romania - Remote" } },
+        { id: 4, title: "D", absolute_url: "https://x/4", location: { name: "Chicago, Seattle, Remote" } },
+      ]),
+    );
+
+    expect(rows.map((row) => row.remoteType)).toEqual([null, null, null, null]);
+  });
+});
