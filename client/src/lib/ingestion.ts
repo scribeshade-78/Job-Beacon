@@ -78,6 +78,10 @@ export interface IntakeRefreshStatus {
   updatedAt: string | null;
 }
 
+export type IntakeMonitorOutcome =
+  | { kind: "success"; status: IntakeRefreshStatus }
+  | { kind: "error"; message: string };
+
 export interface DiscoverLiveJobsDeps {
   fetchImpl?: typeof fetch;
   getAccessToken?: () => Promise<string | null>;
@@ -101,9 +105,21 @@ const DISCOVERY_FAILED = "Could not fetch new jobs. Please try again.";
 const DISCOVERY_PENDING =
   "Your job search is running in the background. New jobs will appear as soon as it finishes.";
 
-/** Poll cadence and ceiling: three seconds apart, up to two minutes of watching. */
+/**
+ * THE FOREGROUND BUDGET IS DELIBERATELY SHORT. The drain runs on the scheduler's
+ * cadence, so a refresh routinely takes longer than anyone should stare at a spinner:
+ * the button watches for about twelve seconds (an immediate read plus four more), then
+ * hands off to the panel's persistent indicator, which keeps watching without blocking
+ * the page and survives navigating away.
+ */
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
-const DEFAULT_MAX_POLLS = 40;
+const DEFAULT_MAX_POLLS = 4;
+
+/**
+ * How often the PANEL polls the monitor once the button has handed off. Exported so the
+ * component and this module cannot disagree about the cadence.
+ */
+export const BACKGROUND_MONITOR_INTERVAL_MS = 5_000;
 
 /**
  * Never throws — every outcome resolves to one shape the panel can render,
@@ -157,8 +173,9 @@ export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise
     return { kind: "error", message: serverMessage ?? DISCOVERY_FAILED };
   }
 
-  // 2. MONITOR THE BACKGROUND WORK. The drain runs on the scheduler's cadence, so
-  //    "accepted" has to be turned into "what was found" by asking.
+  // 2. MONITOR THE BACKGROUND WORK, BRIEFLY. The drain runs on the scheduler's cadence,
+  //    so a refresh still running after a few seconds is normal rather than slow; watching
+  //    it to completion here would hold the candidate on a spinner for minutes.
   for (let attempt = 0; attempt <= maxPolls; attempt += 1) {
     // The FIRST read happens immediately: a fast drain can finish before the browser has
     // even painted the spinner, and waiting three seconds to discover that is pointless.
@@ -166,22 +183,13 @@ export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise
       await sleep(pollIntervalMs);
     }
 
-    let status: IntakeRefreshStatus;
-    try {
-      const statusResponse = await fetchImpl(DISCOVER_ENDPOINT, { headers: authHeader });
+    const monitor = await readIntakeRefreshStatus({ fetchImpl, getAccessToken });
 
-      if (statusResponse.status === 401) {
-        return { kind: "error", message: SESSION_EXPIRED };
-      }
-
-      if (!statusResponse.ok) {
-        return { kind: "error", message: DISCOVERY_FAILED };
-      }
-
-      status = (await statusResponse.json()) as IntakeRefreshStatus;
-    } catch {
-      return { kind: "error", message: "Network error contacting the server." };
+    if (monitor.kind === "error") {
+      return { kind: "error", message: monitor.message };
     }
+
+    const status = monitor.status;
 
     if (status.running) {
       continue;
@@ -199,10 +207,53 @@ export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise
     return { kind: "error", message: DISCOVERY_FAILED };
   }
 
-  // Still running when the polling budget ran out. Honest rather than a failure: the work
-  // is queued and will finish, and calling it an error would tell the candidate to retry
-  // something already in flight.
+  // Still running when the FOREGROUND budget ran out. Honest rather than a failure, and a
+  // handoff rather than an ending: the panel's indicator keeps watching from here.
   return { kind: "pending", message: DISCOVERY_PENDING };
+}
+
+/**
+ * ONE read of the monitor, for callers that are not the button: the panel reads it on
+ * mount to learn whether a refresh started on an earlier visit is still running, and
+ * polls it while its background indicator is showing.
+ *
+ * Never throws, matching discoverLiveJobs: a failed read is returned as a value, because
+ * a transient network blip must not be presented as the refresh itself failing.
+ */
+export async function readIntakeRefreshStatus(
+  deps: DiscoverLiveJobsDeps = {},
+): Promise<IntakeMonitorOutcome> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const getAccessToken = deps.getAccessToken ?? defaultGetAccessToken;
+
+  let accessToken: string | null;
+  try {
+    accessToken = await getAccessToken();
+  } catch {
+    return { kind: "error", message: SESSION_EXPIRED };
+  }
+
+  if (!accessToken) {
+    return { kind: "error", message: SESSION_EXPIRED };
+  }
+
+  try {
+    const response = await fetchImpl(DISCOVER_ENDPOINT, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 401) {
+      return { kind: "error", message: SESSION_EXPIRED };
+    }
+
+    if (!response.ok) {
+      return { kind: "error", message: DISCOVERY_FAILED };
+    }
+
+    return { kind: "success", status: (await response.json()) as IntakeRefreshStatus };
+  } catch {
+    return { kind: "error", message: "Network error contacting the server." };
+  }
 }
 
 

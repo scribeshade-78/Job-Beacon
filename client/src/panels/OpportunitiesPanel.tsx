@@ -37,7 +37,12 @@ import {
   fetchQueueCapability,
   type QueueCapabilityState,
 } from "../lib/queueCapability";
-import { describeDiscoveryResult, discoverLiveJobs } from "../lib/ingestion";
+import {
+  BACKGROUND_MONITOR_INTERVAL_MS,
+  describeDiscoveryResult,
+  discoverLiveJobs,
+  readIntakeRefreshStatus,
+} from "../lib/ingestion";
 import { workplaceLabel } from "../lib/opportunityFilters";
 import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
 import {
@@ -83,6 +88,14 @@ interface RefreshNotice {
   text: string;
 }
 
+/**
+ * How many consecutive monitor-read failures end the background indicator. Six at the
+ * poll cadence is about half a minute: long enough that a transient blip is not reported
+ * as a failure, short enough that an expired session does not leave a spinner turning
+ * forever.
+ */
+const MAX_MONITOR_FAILURES = 6;
+
 interface OpportunitiesPanelProps {
   /**
    * The signed-in candidate, or undefined before the profile resolves. Task I
@@ -99,6 +112,13 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  /**
+   * True while the BACKEND reports a refresh running — whether this visit started it or an
+   * earlier one did. Kept apart from `refreshing` (this browser is mid-request): that one
+   * owns the button, this one owns the persistent indicator, and only this one survives
+   * navigating away and coming back.
+   */
+  const [refreshRunning, setRefreshRunning] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState<RefreshNotice | null>(null);
   /**
    * Every vacancy the last fetch created, whether or not it was scored.
@@ -151,6 +171,149 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
    * OBSOLETE and is ignored, so a slow page can never overwrite a newer one.
    */
   const requestSeq = useRef(0);
+
+  /**
+   * Re-reads page 1 through the paginated ranked query, under the CURRENT filters,
+   * exclusions and sort, and replaces the list.
+   *
+   * SHARED BY THE BUTTON AND THE BACKGROUND MONITOR, so a refresh that finishes while the
+   * candidate is reading reloads against the same filters one that finished while they were
+   * watching would. The request token is bumped here, so a slow page from either path can
+   * never overwrite a newer one.
+   */
+  async function reloadList(): Promise<void> {
+    const seq = ++requestSeq.current;
+
+    const reloaded = await listOpportunities(getSupabaseBrowserClient(), {
+      filters: filters ?? EMPTY_FILTERS,
+      searchPreferences,
+      sort,
+      excludeVacancyIds: excludedFromFeed(decisions),
+    });
+
+    if (seq !== requestSeq.current) {
+      // A newer request (a filter change, or another refresh) owns the list.
+      return;
+    }
+
+    if (reloaded.kind === "success") {
+      setOpportunities(reloaded.opportunities);
+      setHasMore(reloaded.hasMore);
+      setTotalCount(reloaded.totalCount);
+      setRanking(reloaded.ranking);
+      setError(null);
+    } else {
+      setError(reloaded.message);
+    }
+  }
+
+  /**
+   * Always the latest reloadList, for the background poller. That effect deliberately does
+   * not depend on filters/sort/decisions — re-running it on every filter change would
+   * restart polling — so without this it would reload with whatever they were when the
+   * refresh started.
+   */
+  const reloadListRef = useRef(reloadList);
+  useEffect(() => {
+    reloadListRef.current = reloadList;
+  });
+
+  /**
+   * RESUME A REFRESH STARTED ON AN EARLIER VISIT. The queue row is the source of truth for
+   * whether work is still running, so arriving mid-refresh shows the indicator rather than
+   * a button that looks idle and a list that looks stale. A failed read is not evidence of
+   * a refresh, so it is ignored rather than surfaced as one.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const monitor = await readIntakeRefreshStatus();
+      if (cancelled || monitor.kind !== "success") {
+        return;
+      }
+      if (monitor.status.running) {
+        setRefreshRunning(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * THE PERSISTENT INDICATOR. While the backend reports the refresh running, poll the
+   * monitor and, when it settles, tell the candidate and reload the list — however long
+   * they were away. A failed READ does not stop this: the refresh is not the read, so the
+   * next tick tries again instead of reporting something untrue.
+   */
+  useEffect(() => {
+    if (!refreshRunning) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+
+    async function poll() {
+      const monitor = await readIntakeRefreshStatus();
+      if (cancelled) {
+        return;
+      }
+
+      if (monitor.kind === "error") {
+        failures += 1;
+
+        // A failed READ is not the refresh failing, so one blip must not end the
+        // indicator — but it cannot run forever either. After a bounded run of failures
+        // (an expired session, a dead network) the indicator stops and says what it saw,
+        // rather than spinning for a refresh nobody can observe.
+        if (failures >= MAX_MONITOR_FAILURES) {
+          setRefreshRunning(false);
+          setRefreshNotice({ tone: "error", text: monitor.message });
+          return;
+        }
+
+        timer = setTimeout(() => void poll(), BACKGROUND_MONITOR_INTERVAL_MS);
+        return;
+      }
+
+      failures = 0;
+
+      if (monitor.status.running) {
+        timer = setTimeout(() => void poll(), BACKGROUND_MONITOR_INTERVAL_MS);
+        return;
+      }
+
+      setRefreshRunning(false);
+
+      if (monitor.status.status === "failed") {
+        const message = monitor.status.lastError ?? "Could not fetch new jobs. Please try again.";
+        setRefreshNotice({ tone: "error", text: message });
+        showToast({ title: message, tone: "error" });
+        return;
+      }
+
+      if (monitor.status.result) {
+        setNewVacancyIds(monitor.status.result.newVacancyIds);
+        const text = describeDiscoveryResult(monitor.status.result);
+        setRefreshNotice({ tone: "info", text });
+        showToast({ title: text, tone: monitor.status.result.created > 0 ? "success" : "default" });
+        await reloadListRef.current();
+      }
+    }
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    };
+  }, [refreshRunning]);
   /** Bumped by a Retry control to force the single read effect to run again. */
   const [reloadToken, setReloadToken] = useState(0);
   /**
@@ -495,13 +658,14 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   }
 
   /**
-   * Queues a live job refresh, watches it settle, then re-reads the list.
+   * Queues a live job refresh, watches it BRIEFLY, then hands off.
    *
    * THE WORK IS NO LONGER DONE IN THIS REQUEST. /api/intake/discover answers 202 and a
    * scheduler drain does the fan-out, because a sequential multi-source fetch can take
    * minutes and anything in front of the server kills a held-open request first.
-   * discoverLiveJobs owns the queue-then-poll sequence; this function only decides what
-   * to show once it resolves.
+   * discoverLiveJobs owns the queue-then-watch sequence; when its foreground budget runs
+   * out the persistent indicator above takes over, so the candidate gets their page back
+   * in seconds instead of holding a spinner for the whole drain.
    *
    * It previously called /api/opportunities/refresh, which drained an ingestion queue
    * nothing ever filled — the button span and did nothing, which is exactly what it
@@ -525,34 +689,12 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       }
 
       if (outcome.kind === "pending") {
-        // ACCEPTED, NOT FINISHED. The background refresh is still running; the old
-        // synchronous route would have held this request open until it finished or a
-        // proxy killed it. An info notice is the honest state — a spinner that never
-        // resolves, or a "no new jobs" that is not yet known to be true, would not be.
-        setRefreshNotice({ tone: "info", text: outcome.message });
+        // HAND OFF, DO NOT SPIN. The indicator owns the wait from here: the button is
+        // released and the work stays visible even if the candidate navigates away. The old
+        // synchronous route would have held this request open until it finished — or until
+        // a proxy killed it and the candidate was told it failed.
+        setRefreshRunning(true);
         showToast({ title: "Job search running in the background.", tone: "default" });
-        return;
-      }
-
-      // RELOAD THROUGH THE PAGINATED RANKED QUERY. The previously hoisted,
-      // independently ordered "newly discovered" slice is deliberately gone: it
-      // implied the combined list was globally ranked when it was two differently
-      // ordered slices stacked together. Newly discovered rows now appear where
-      // the ranked query places them, and the "New" badge still marks them.
-      const seq = ++requestSeq.current;
-
-      const reloaded = await listOpportunities(getSupabaseBrowserClient(), {
-        // The SAME filters, exclusions and sort the list is currently showing.
-        // Re-reading page 1 unfiltered here would silently replace a filtered list
-        // with an unfiltered one the moment somebody pressed "Fetch latest jobs".
-        filters: filters ?? EMPTY_FILTERS,
-        searchPreferences,
-        sort,
-        excludeVacancyIds: excludedFromFeed(decisions),
-      });
-
-      if (seq !== requestSeq.current) {
-        // A newer request (a filter change, or another refresh) owns the list.
         return;
       }
 
@@ -560,26 +702,22 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
 
       const text = describeDiscoveryResult(outcome.result);
 
-      // The notice is set on SUCCESS as well as on failure, and that is the
-      // fix for "the button does nothing". The toast was previously the entire
-      // success signal, and a toast is transient — while `created: 0` is the
-      // NORMAL outcome (one source returns the same listings until it publishes
-      // new ones), so on the common path the list came back byte-identical and
-      // a candidate who glanced away for the few seconds the toast lived saw no
-      // change at all. The notice persists until the next attempt starts.
+      // The notice is set on SUCCESS as well as on failure, and that is the fix for "the
+      // button does nothing". A toast is transient, while `created: 0` is the NORMAL
+      // outcome (one source returns the same listings until it publishes new ones), so on
+      // the common path the list came back byte-identical and a candidate who glanced away
+      // for the few seconds the toast lived saw no change at all. The notice persists until
+      // the next attempt starts.
       setRefreshNotice({ tone: "info", text });
       // "No new jobs" is a correct answer, not a failure, and the tone says so.
       showToast({ title: text, tone: outcome.result.created > 0 ? "success" : "default" });
 
-      if (reloaded.kind === "success") {
-        setOpportunities(reloaded.opportunities);
-        setHasMore(reloaded.hasMore);
-        setTotalCount(reloaded.totalCount);
-        setRanking(reloaded.ranking);
-        setError(null);
-      } else {
-        setError(reloaded.message);
-      }
+      // RELOAD THROUGH THE PAGINATED RANKED QUERY, shared with the background monitor. The
+      // previously hoisted, independently ordered "newly discovered" slice is deliberately
+      // gone: it implied the combined list was globally ranked when it was two differently
+      // ordered slices stacked together. Newly discovered rows now appear where the ranked
+      // query places them, and the "New" badge still marks them.
+      await reloadList();
     } catch (error) {
       // Nothing in this path is expected to throw, but `void handleRefresh()`
       // would turn a throw into an unhandled rejection AND strand the button on
@@ -780,6 +918,17 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
         {preferencesError && (
           <p role="alert" className="text-sm text-status-blocked-fg mb-4">
             {preferencesError} Your filters started empty.
+          </p>
+        )}
+
+        {refreshRunning && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="mb-4 flex items-center gap-2 rounded border border-ios-separator bg-ios-separator/50 px-3 py-2 text-sm text-ios-text-secondary"
+          >
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            Refreshing jobs in the background. New jobs will appear here as soon as it finishes.
           </p>
         )}
 

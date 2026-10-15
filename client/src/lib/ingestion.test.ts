@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  BACKGROUND_MONITOR_INTERVAL_MS,
   describeDiscoveryResult,
   describeRefreshResult,
   discoverLiveJobs,
+  readIntakeRefreshStatus,
   refreshOpportunities,
   type DiscoverySourceSummary,
   type IngestionRefreshResult,
@@ -241,6 +243,20 @@ describe("discoverLiveJobs", () => {
     expect(outcome).toEqual({ kind: "error", message: "jooble is down" });
   });
 
+  it("hands off after a SHORT foreground budget rather than spinning for minutes", async () => {
+    // The drain runs on the scheduler's cadence, so watching a refresh to completion
+    // would hold the candidate on a spinner for minutes. The button watches briefly and
+    // the panel's persistent indicator takes over from there.
+    const fetchImpl = vi.fn(async () => monitor({ status: "pending", running: true }));
+
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
+
+    expect(outcome.kind).toBe("pending");
+    // One POST, the immediate read, then the bounded remainder of the budget.
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    expect(BACKGROUND_MONITOR_INTERVAL_MS).toBeGreaterThan(0);
+  });
+
   it("gives up gracefully when the work is still running, rather than calling it a failure", async () => {
     // A bounded poll, not an infinite spinner. The work is queued and will finish, so
     // reporting an error would tell the candidate to retry work already in flight.
@@ -310,6 +326,64 @@ describe("discoverLiveJobs", () => {
     if (outcome.kind === "error") {
       expect(outcome.message).toMatch(/wait a few minutes/i);
     }
+  });
+});
+
+/**
+ * The monitor read on its own. The panel calls this on mount and while its background
+ * indicator is showing, so a refresh started on an earlier visit is still visible.
+ */
+describe("readIntakeRefreshStatus", () => {
+  it("reads the monitor with the caller's bearer token and returns the status", async () => {
+    const status = { status: "leased", running: true, result: null, lastError: null, updatedAt: null };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, status));
+
+    const outcome = await readIntakeRefreshStatus({ fetchImpl: fetchImpl as never, getAccessToken: token });
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/intake/discover", {
+      headers: { Authorization: "Bearer token-123" },
+    });
+    expect(outcome).toEqual({ kind: "success", status });
+  });
+
+  it("returns the stored summary for a finished refresh", async () => {
+    const status = {
+      status: "done",
+      running: false,
+      result: DISCOVERY_RESULT,
+      lastError: null,
+      updatedAt: "2026-10-15T12:00:00.000Z",
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, status));
+
+    const outcome = await readIntakeRefreshStatus({ fetchImpl: fetchImpl as never, getAccessToken: token });
+
+    expect(outcome).toEqual({ kind: "success", status });
+  });
+
+  it("maps 401 to a re-authenticate message", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: "Unauthorized" }));
+
+    const outcome = await readIntakeRefreshStatus({ fetchImpl: fetchImpl as never, getAccessToken: token });
+
+    expect(outcome).toEqual({ kind: "error", message: "Your session has expired. Please sign in again." });
+  });
+
+  it("returns an error value rather than throwing when the read fails", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error("offline"));
+
+    const outcome = await readIntakeRefreshStatus({ fetchImpl: fetchImpl as never, getAccessToken: token });
+
+    expect(outcome.kind).toBe("error");
+  });
+
+  it("makes no request at all without a session", async () => {
+    const fetchImpl = vi.fn();
+
+    const outcome = await readIntakeRefreshStatus({ fetchImpl: fetchImpl as never, getAccessToken: async () => null });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe("error");
   });
 });
 

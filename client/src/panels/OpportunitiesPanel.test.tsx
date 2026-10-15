@@ -122,6 +122,23 @@ vi.mock("../lib/bulkApply", async (importOriginal) => {
   return { ...actual, submitBulkApply: bulkApi.submitBulkApply };
 });
 
+// The intake refresh monitor. The panel reads it on mount and polls it while its
+// background indicator is showing, so these tests drive that state directly rather than
+// standing up fetch. describeDiscoveryResult stays real — it is what the notice renders.
+const ingestionApi = vi.hoisted(() => ({
+  discoverLiveJobs: vi.fn(),
+  readIntakeRefreshStatus: vi.fn(),
+}));
+
+vi.mock("../lib/ingestion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/ingestion")>();
+  return {
+    ...actual,
+    discoverLiveJobs: ingestionApi.discoverLiveJobs,
+    readIntakeRefreshStatus: ingestionApi.readIntakeRefreshStatus,
+  };
+});
+
 import { OpportunitiesPanel } from "./OpportunitiesPanel";
 import { listOpportunities } from "../lib/opportunities";
 
@@ -134,6 +151,13 @@ beforeEach(() => {
   rankingApi.runRankingRefresh.mockResolvedValue({ kind: "timeout", result: null });
   capabilityApi.canQueue = false;
   bulkApi.submitBulkApply.mockReset();
+  ingestionApi.discoverLiveJobs.mockReset();
+  ingestionApi.readIntakeRefreshStatus.mockReset();
+  // Default: nothing running. Tests that need a refresh in flight override this.
+  ingestionApi.readIntakeRefreshStatus.mockResolvedValue({
+    kind: "success",
+    status: { status: "idle", running: false, result: null, lastError: null, updatedAt: null },
+  });
 });
 
 function renderPanel() {
@@ -172,6 +196,32 @@ describe("OpportunitiesPanel job links", () => {
     expect(screen.getByText(/Some listings come from sources we can/)).toBeTruthy();
     // ...and the full paragraph is no longer repeated for every card.
     expect(screen.queryByText(/We haven/)).toBeNull();
+  });
+});
+
+/**
+ * The persistent half of the refresh: the queue row is the source of truth, so a refresh
+ * started on an earlier visit is still visible when the candidate comes back.
+ */
+describe("OpportunitiesPanel — persistent refresh indicator", () => {
+  it("shows the indicator when a refresh started earlier is still running", async () => {
+    ingestionApi.readIntakeRefreshStatus.mockResolvedValue({
+      kind: "success",
+      status: { status: "leased", running: true, result: null, lastError: null, updatedAt: null },
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/Refreshing jobs in the background/i)).toBeTruthy();
+  });
+
+  it("shows no indicator when nothing is running", async () => {
+    renderPanel();
+
+    await screen.findByRole("link", { name: "Azure Data Engineer" });
+    await waitFor(() => expect(ingestionApi.readIntakeRefreshStatus).toHaveBeenCalled());
+
+    expect(screen.queryByText(/Refreshing jobs in the background/i)).toBeNull();
   });
 });
 
