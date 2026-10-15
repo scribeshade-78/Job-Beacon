@@ -382,6 +382,32 @@ export interface AdminQueueRetryResult {
   rearmed: boolean;
 }
 
+/**
+ * Integration readiness — PRESENCE ONLY.
+ *
+ * There is deliberately no field here that could carry a credential: the server sends
+ * booleans plus the NAMES of missing variables, and this type has nowhere to put a
+ * value. Keeping that true is what stops a future change from leaking a key into a
+ * browser response.
+ */
+export interface AdminIntegrationStatus {
+  id: string;
+  label: string;
+  purpose: string;
+  configured: boolean;
+  missingEnv: string[];
+  sourceCode: string | null;
+  discoveryAllowed: boolean | null;
+  killSwitch: boolean | null;
+  policyVersion: string | null;
+  enabledTargets: number | null;
+  requiresReview: boolean;
+}
+
+export interface AdminIntegrationsOverview {
+  integrations: AdminIntegrationStatus[];
+}
+
 /** Keep in sync with server/admin/workerTasks.ts ADMIN_WORKER_TASKS. */
 export type AdminWorkerTaskName =
   | "ingestion"
@@ -425,6 +451,10 @@ export interface AdminWorkerTaskResult {
 
 export function getAdminQueues(accessToken: string, fetchImpl: typeof fetch = fetch) {
   return adminGet<AdminQueuesOverview>("/api/admin/queues", accessToken, fetchImpl);
+}
+
+export function getAdminIntegrations(accessToken: string, fetchImpl: typeof fetch = fetch) {
+  return adminGet<AdminIntegrationsOverview>("/api/admin/integrations", accessToken, fetchImpl);
 }
 
 export function retryAdminQueueJob(

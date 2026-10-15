@@ -45,6 +45,7 @@ import {
   QUEUE_NAMES,
   rearmFailedJob,
 } from "./admin/queues.js";
+import { listIntegrations } from "./admin/integrations.js";
 import {
   ADMIN_WORKER_TASKS,
   isAdminWorkerTask,
@@ -2590,6 +2591,23 @@ export function createApp(options: CreateAppOptions = {}) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Queue overview read failed:", message);
       response.status(500).json({ error: "Failed to load queue state" });
+    }
+  });
+
+  // Integration readiness. Reports whether the SERVER can use each provider, as
+  // presence booleans and variable NAMES — never a value. Admin-gated for the same
+  // reason the queue state is: it describes the deployment, not the candidate.
+  // no-store, because an operator who just set a variable expects the next read to see
+  // it rather than a cached "Not configured".
+  app.get("/api/admin/integrations", requireAuth, requireAdmin, async (_request, response) => {
+    try {
+      const overview = await listIntegrations(resolveServiceClient());
+      response.set("Cache-Control", "no-store");
+      response.status(200).json(overview);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Integrations overview read failed:", message);
+      response.status(500).json({ error: "Failed to load integration state" });
     }
   });
 

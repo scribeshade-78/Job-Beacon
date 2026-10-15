@@ -7,6 +7,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Plug,
   Rss,
   ScrollText,
   Settings,
@@ -23,6 +24,7 @@ import { ModerationSection } from "./admin/ModerationSection";
 import { TrustScoringSection } from "./admin/TrustScoringSection";
 import { UsersBillingSection } from "./admin/UsersBillingSection";
 import { QueuesSection } from "./admin/QueuesSection";
+import { IntegrationsSection } from "./admin/IntegrationsSection";
 import { AdminCard, MockBadge } from "./admin/shared";
 
 interface AdminPageProps {
@@ -37,6 +39,7 @@ type SectionId =
   | "trust"
   | "users"
   | "errors"
+  | "integrations"
   | "audit"
   | "settings";
 
@@ -48,6 +51,7 @@ const NAV: Array<{ id: SectionId; label: string; Icon: LucideIcon }> = [
   { id: "trust", label: "Trust Scoring", Icon: Gauge },
   { id: "users", label: "Users & Billing", Icon: Users },
   { id: "errors", label: "Queues & Workers", Icon: Activity },
+  { id: "integrations", label: "Integrations", Icon: Plug },
   { id: "audit", label: "Audit Log", Icon: ScrollText },
   { id: "settings", label: "Settings", Icon: Settings },
 ];
@@ -156,6 +160,7 @@ export function AdminPage({ onLogout }: AdminPageProps) {
             {section === "trust" && <TrustScoringSection />}
             {section === "users" && <UsersBillingSection />}
             {section === "errors" && <QueuesSection />}
+            {section === "integrations" && <IntegrationsSection />}
             {section === "audit" && <AuditSection />}
             {section === "settings" && <SettingsMock />}
           </main>

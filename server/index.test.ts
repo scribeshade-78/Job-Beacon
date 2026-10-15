@@ -37,6 +37,7 @@ import { cancelCandidateSubscription, getCandidateSubscription } from "./billing
 import { evaluateEntitlements } from "./billing/entitlements.js";
 import { getAdminBilling } from "./admin/billing.js";
 import { listQueues, rearmFailedJob } from "./admin/queues.js";
+import { listIntegrations } from "./admin/integrations.js";
 import { runAdminWorkerTask, WorkerTaskNotConfiguredError } from "./admin/workerTasks.js";
 
 // Real PDF/DOCX parsing is exercised in server/resumes/textExtraction.test.ts —
@@ -96,6 +97,12 @@ vi.mock("./admin/billing.js", () => ({ getAdminBilling: vi.fn() }));
 vi.mock("./admin/queues.js", async () => {
   const actual = await vi.importActual<typeof import("./admin/queues.js")>("./admin/queues.js");
   return { ...actual, listQueues: vi.fn(), rearmFailedJob: vi.fn() };
+});
+// Integration readiness: presence-only, so the route test asserts the shape and the
+// gating while server/admin/integrations.test.ts owns the never-leak-a-value property.
+vi.mock("./admin/integrations.js", async () => {
+  const actual = await vi.importActual<typeof import("./admin/integrations.js")>("./admin/integrations.js");
+  return { ...actual, listIntegrations: vi.fn() };
 });
 vi.mock("./admin/workerTasks.js", async () => {
   const actual = await vi.importActual<typeof import("./admin/workerTasks.js")>("./admin/workerTasks.js");
@@ -1846,6 +1853,75 @@ function makeAuditCapturingClient() {
 
   return { serviceClient: { from } as never, auditRows };
 }
+
+describe("GET /api/admin/integrations", () => {
+  const overview = {
+    integrations: [
+      {
+        id: "adzuna",
+        label: "Adzuna",
+        purpose: "The licensed job aggregator. Candidate-pressed intake only.",
+        configured: true,
+        missingEnv: [],
+        sourceCode: "adzuna",
+        discoveryAllowed: true,
+        killSwitch: false,
+        policyVersion: "adzuna-tou-review-pending",
+        enabledTargets: 0,
+        requiresReview: true,
+      },
+    ],
+  };
+
+  it("returns 401 when unauthenticated", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/admin/integrations`);
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it("returns 403 for an authenticated non-admin", async () => {
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => false },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/integrations`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(403);
+      },
+    );
+  });
+
+  it("returns 200 with presence booleans for an admin", async () => {
+    vi.mocked(listIntegrations).mockResolvedValue(overview as never);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from: vi.fn() } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/integrations`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(overview);
+      },
+    );
+  });
+
+  it("returns 500 when the read fails", async () => {
+    vi.mocked(listIntegrations).mockRejectedValue(new Error("db down"));
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, checkIsAdmin: async () => true, serviceClient: { from: vi.fn() } as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/admin/integrations`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+        expect(response.status).toBe(500);
+      },
+    );
+  });
+});
 
 describe("GET /api/admin/queues", () => {
   const overview = { queues: [], deadLetterLimit: 10 };

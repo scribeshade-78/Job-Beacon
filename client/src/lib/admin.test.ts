@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  getAdminIntegrations,
   getAdminQueues,
   getAdminRoles,
   getAdminSourceHealth,
@@ -260,5 +261,41 @@ describe("runAdminWorkerTask", () => {
     expect(await runAdminWorkerTask("ingestion", "tok", fetchImpl as unknown as typeof fetch)).toEqual({
       kind: "forbidden",
     });
+  });
+});
+
+describe("getAdminIntegrations", () => {
+  it("fetches presence-only integration state with a bearer token", async () => {
+    const payload = {
+      integrations: [
+        {
+          id: "adzuna",
+          label: "Adzuna",
+          purpose: "Aggregator",
+          configured: true,
+          missingEnv: [],
+          sourceCode: "adzuna",
+          discoveryAllowed: true,
+          killSwitch: false,
+          policyVersion: "adzuna-tou-review-pending",
+          enabledTargets: 0,
+          requiresReview: true,
+        },
+      ],
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse(payload));
+
+    const result = await getAdminIntegrations("tok", fetchImpl as unknown as typeof fetch);
+
+    expect(result).toEqual({ kind: "success", data: payload });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/admin/integrations", {
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("returns forbidden on 403", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ error: "Forbidden" }) });
+
+    expect(await getAdminIntegrations("tok", fetchImpl as unknown as typeof fetch)).toEqual({ kind: "forbidden" });
   });
 });
