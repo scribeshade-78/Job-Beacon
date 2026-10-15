@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { enqueueIngestionBatch, runIngestionBatch } from "./runner.js";
 import { runOneIngestionJob } from "./worker.js";
+// The real allow-list the scheduled pull will pass, imported rather than retyped so this
+// test cannot pass against a list that has drifted from the one Step 6 will use.
+import { KEYLESS_SCHEDULED_SOURCE_CODES } from "../opportunities/scheduledRefresh.js";
 
 vi.mock("./worker.js", () => ({
   runOneIngestionJob: vi.fn(),
@@ -111,6 +114,7 @@ function makeClient(options: {
 
 const JOOBLE: Target = { id: "vs-jooble", source_code: "jooble", target_key: "us-data-engineer" };
 const USAJOBS: Target = { id: "vs-usajobs", source_code: "usajobs", target_key: "us-data-engineer" };
+const REMOTIVE: Target = { id: "vs-remotive", source_code: "remotive", target_key: "remote" };
 
 function insertedSourceIds(jobs: ReturnType<typeof makeClient>["jobs"]): string[] {
   const insert = jobs.calls.find((call) => call.method === "insert");
@@ -316,5 +320,58 @@ describe("enqueueIngestionBatch — the asynchronous half", () => {
     const result = await enqueueIngestionBatch(client);
     expect(result.enqueued).toBe(0);
     expect(result.targets).toEqual([]);
+  });
+
+  /**
+   * THE SOURCE FILTER (Step 6 prerequisite). The scheduled pull must be able to say
+   * "only these sources", because the unattended path spends third-party quota and
+   * Jooble's free plan is a LIFETIME 500 requests.
+   */
+  it("restricts the batch to the named sources, never touching an excluded one", async () => {
+    const { client, jobs, from } = makeClient({ targets: [JOOBLE, USAJOBS] });
+
+    const result = await enqueueIngestionBatch(client, { sourceCodes: ["usajobs"] });
+
+    expect(insertedSourceIds(jobs)).toEqual(["usajobs"]);
+    expect(result.enqueued).toBe(1);
+    expect(result.targets.map((target) => target.sourceCode)).toEqual(["usajobs"]);
+    // Excluded BEFORE any per-target work: no cooldown lookup, no pending-job lookup.
+    expect(from.mock.calls.filter((call) => call[0] === "source_health_events")).toHaveLength(1);
+  });
+
+  it("keeps Jooble out when restricted to the keyless scheduled sources", async () => {
+    // The exact call Step 6 will make. Jooble is enabled in vacancy_sources and would be
+    // enqueued by an unfiltered batch; the allow-list is what keeps its lifetime quota
+    // out of the unattended path.
+    const { client, jobs } = makeClient({ targets: [JOOBLE, USAJOBS, REMOTIVE] });
+
+    const result = await enqueueIngestionBatch(client, { sourceCodes: KEYLESS_SCHEDULED_SOURCE_CODES });
+
+    expect(insertedSourceIds(jobs)).toEqual(["remotive"]);
+    expect(result.enqueued).toBe(1);
+    expect(KEYLESS_SCHEDULED_SOURCE_CODES).not.toContain("jooble");
+  });
+
+  it("treats an explicitly EMPTY source list as nothing-is-allowed", async () => {
+    // Deliberately the opposite of the intake fan-out's empty case. There an empty list
+    // means "no preference"; here the parameter is a guard, so a caller that computed an
+    // empty allow-list must enqueue nothing rather than fall back to the whole table -
+    // a fallback would put every quota-bearing source back on the scheduled path.
+    const { client, from } = makeClient({ targets: [JOOBLE, USAJOBS] });
+
+    const result = await enqueueIngestionBatch(client, { sourceCodes: [] });
+
+    expect(result.enqueued).toBe(0);
+    expect(result.targets).toEqual([]);
+    expect(from.mock.calls.filter((call) => call[0] === "source_health_events")).toHaveLength(0);
+  });
+
+  it("still enqueues every enabled target when no filter is given", async () => {
+    const { client, jobs } = makeClient({ targets: [JOOBLE, USAJOBS] });
+
+    const result = await enqueueIngestionBatch(client);
+
+    expect(insertedSourceIds(jobs)).toEqual(["jooble", "usajobs"]);
+    expect(result.enqueued).toBe(2);
   });
 });

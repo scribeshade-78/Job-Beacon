@@ -37,6 +37,18 @@ export interface RunIngestionBatchOptions {
   maxJobs?: number;
   /** Per-target cooldown in minutes. Defaults to 15. */
   minIntervalMinutes?: number;
+  /**
+   * Restrict the batch to these source codes — the scheduled pull passes the keyless
+   * public APIs so the unattended path never spends a credentialed source's quota.
+   *
+   * OMITTED means every enabled target; an EXPLICITLY EMPTY list means NONE. The empty
+   * case is deliberately the opposite of the intake fan-out's, where an empty list means
+   * "no preference". This parameter is a GUARD: a caller that computed an empty
+   * allow-list must enqueue nothing, because treating it as "all" would silently put
+   * Jooble's lifetime 500-request allowance back on the scheduled path — the exact
+   * outcome the filter exists to prevent.
+   */
+  sourceCodes?: readonly string[];
   /** Injectable clock — tests only. */
   now?: () => Date;
 }
@@ -160,7 +172,19 @@ async function enqueueInternal(
     throw sourceError;
   }
 
-  const targets = (sourceRows ?? []) as VacancySourceRow[];
+  const allTargets = (sourceRows ?? []) as VacancySourceRow[];
+
+  // THE SOURCE FILTER, APPLIED BEFORE ANY PER-TARGET WORK. Filtering here rather than in
+  // the query means an excluded target is never cooldown-checked or pending-checked at
+  // all, and it makes the empty case explicit instead of depending on how PostgREST
+  // renders an empty IN list. undefined is the ONLY value that means "every enabled target".
+  let targets: VacancySourceRow[];
+  if (options.sourceCodes === undefined) {
+    targets = allTargets;
+  } else {
+    const allowed = new Set(options.sourceCodes);
+    targets = allTargets.filter((target) => allowed.has(target.source_code));
+  }
 
   if (targets.length === 0) {
     return { result, enqueuedTargets: [], batchStart: null };
