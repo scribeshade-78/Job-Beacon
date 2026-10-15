@@ -95,3 +95,94 @@ describe("leverAdapter", () => {
     expect(() => leverAdapter.validateConfig({ companyName: "Acme Corp", companyDomain: "acme.com" })).not.toThrow();
   });
 });
+
+/** Phase 8 — payload hardening, same class as Greenhouse, Adzuna and USAJOBS. */
+describe("Lever payload hardening", () => {
+  const payloadError = /Lever returned a payload/;
+  const config = { companyName: "Acme Corp" };
+
+  function page(postings: unknown[]) {
+    return (async () => ({ ok: true, status: 200, json: async () => postings })) as unknown as typeof fetch;
+  }
+
+  it("throws a payload error, not a TypeError, when the body is not an array", async () => {
+    // Lever answers with a BARE ARRAY, so an error object or a null body would make .map
+    // itself the TypeError.
+    await expect(leverAdapter.discover("acme", config, fixtureFetch(200, null))).rejects.toThrow(payloadError);
+    await expect(leverAdapter.discover("acme", config, fixtureFetch(200, {}))).rejects.toThrow(payloadError);
+  });
+
+  it("throws a payload error when the body is not JSON at all", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON");
+      },
+    }) as unknown as typeof fetch;
+
+    await expect(leverAdapter.discover("acme", config, fetchImpl)).rejects.toThrow(payloadError);
+  });
+
+  it("skips a posting without an id, title or hosted URL", async () => {
+    const rows = await leverAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: "1", text: "Analyst", hostedUrl: "https://x/1" },
+        { text: "No id", hostedUrl: "https://x/2" },
+        { id: "3", hostedUrl: "https://x/3" },
+        { id: "4", text: "No url" },
+        {},
+        null,
+      ]),
+    );
+
+    expect(rows.map((row) => row.sourceVacancyId)).toEqual(["1"]);
+  });
+
+  it("does not claim a disclosed salary when salaryRange carries no figure", async () => {
+    // The old truthiness test counted an EMPTY salaryRange object, so the row advertised
+    // an employer-disclosed salary with every amount null.
+    const [row] = await leverAdapter.discover(
+      "acme",
+      config,
+      page([{ id: "1", text: "Analyst", hostedUrl: "https://x/1", salaryRange: {} }]),
+    );
+
+    expect(row.salarySource).toBeNull();
+    expect(row.currency).toBeNull();
+  });
+
+  it("ignores salary bounds that are not finite numbers", async () => {
+    const [row] = await leverAdapter.discover(
+      "acme",
+      config,
+      page([
+        {
+          id: "1",
+          text: "Analyst",
+          hostedUrl: "https://x/1",
+          salaryRange: { currency: "USD", interval: "year", min: "140000", max: null },
+        },
+      ]),
+    );
+
+    expect(row.salaryMin).toBeNull();
+    expect(row.salaryMax).toBeNull();
+    expect(row.salaryInterval).toBeNull();
+    expect(row.salarySource).toBeNull();
+  });
+
+  it("keeps the row when createdAt cannot be parsed, instead of failing the whole batch", async () => {
+    // new Date("not-a-date").toISOString() throws RangeError, and a row-level throw here
+    // costs every other posting in the same response.
+    const [row] = await leverAdapter.discover(
+      "acme",
+      config,
+      page([{ id: "1", text: "Analyst", hostedUrl: "https://x/1", createdAt: "not-a-date" }]),
+    );
+
+    expect(row.publishedAt).toBeNull();
+  });
+});

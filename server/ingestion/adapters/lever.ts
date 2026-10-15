@@ -45,6 +45,99 @@ const SALARY_INTERVAL_MAP: Record<string, DiscoveredVacancy["salaryInterval"]> =
   hourly: "hour",
 };
 
+export class LeverPayloadError extends Error {
+  constructor(detail: string) {
+    super(`Lever returned a payload this adapter cannot read: ${detail}`);
+    this.name = "LeverPayloadError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Non-empty and trimmed, or null. */
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** A real finite number, or null. Lever types these as numbers but the body is untyped. */
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * An unusable timestamp is null, NOT a throw.
+ *
+ * new Date("not-a-date").toISOString() raises RangeError, and a row-level throw inside the
+ * map costs every other posting in the same response. Zero and non-finite values are also
+ * null, which preserves the previous truthiness behaviour for an unset createdAt.
+ */
+function toIsoString(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * Maps ONE Lever posting, or returns null when it cannot be identified or linked.
+ *
+ * SKIP, DO NOT REPAIR: vacancies.source_vacancy_id, authoritative_url and raw_title are
+ * NOT NULL, so a posting missing any of them is a failed insert or a garbage vacancy.
+ */
+export function mapLeverPosting(posting: unknown, config: LeverTargetConfig): DiscoveredVacancy | null {
+  const record = asRecord(posting);
+
+  const sourceVacancyId = asString(record.id);
+  const authoritativeUrl = asString(record.hostedUrl);
+  const rawTitle = asString(record.text);
+
+  if (!sourceVacancyId || !authoritativeUrl || !rawTitle) {
+    return null;
+  }
+
+  const typed = record as unknown as LeverPosting;
+  const salary = asRecord(record.salaryRange);
+
+  const min = asFiniteNumber(salary.min);
+  const max = asFiniteNumber(salary.max);
+  const hasSalary = min !== null || max !== null;
+
+  return {
+    sourceVacancyId,
+    authoritativeUrl,
+    rawTitle,
+    companyName: config.companyName,
+    companyDomain: config.companyDomain ?? null,
+    // categories.location is a single freeform string (e.g. "New York, NY" or
+    // "Remote - US"), same ambiguity as Greenhouse's location field — not decomposed into
+    // country/region/city without guessing. The raw string survives in `raw` below.
+    country: null,
+    region: null,
+    city: null,
+    remoteType:
+      typeof typed.workplaceType === "string" ? (WORKPLACE_TYPE_MAP[typed.workplaceType] ?? null) : null,
+    // CURRENCY AND INTERVAL FOLLOW THE FIGURE. A salaryRange object with no readable amount
+    // is not a disclosed salary, so none of the four salary fields are taken from it — the
+    // old truthiness test on the object advertised a disclosed salary with every amount
+    // null.
+    currency: hasSalary ? asString(salary.currency) : null,
+    salaryMin: min,
+    salaryMax: max,
+    salaryInterval:
+      hasSalary && typeof salary.interval === "string"
+        ? (SALARY_INTERVAL_MAP[salary.interval.toLowerCase()] ?? null)
+        : null,
+    salarySource: hasSalary ? "employer_disclosed" : null,
+    publishedAt: toIsoString(typed.createdAt),
+    raw: typed,
+  };
+}
+
 const LEVER_SOURCE_CODE = "lever" as const;
 
 const leverAdapter: DiscoveryAdapter<LeverTargetConfig> = {
@@ -65,34 +158,24 @@ const leverAdapter: DiscoveryAdapter<LeverTargetConfig> = {
       throw new Error(`Lever discovery failed for site "${siteSlug}": HTTP ${response.status}`);
     }
 
-    const postings = (await response.json()) as LeverPosting[];
+    // A MALFORMED BODY IS NAMED, NOT A STACK TRACE. Lever answers with a BARE ARRAY, so a
+    // null body or an error object made `.map` itself the TypeError, and the ingestion
+    // worker stored that message as the source's health error.
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new LeverPayloadError("the response body was not JSON");
+    }
 
-    return postings.map((posting) => {
-      const salary = posting.salaryRange;
+    if (!Array.isArray(payload)) {
+      throw new LeverPayloadError("the response was not a postings array");
+    }
 
-      return {
-        sourceVacancyId: posting.id,
-        authoritativeUrl: posting.hostedUrl,
-        rawTitle: posting.text,
-        companyName: config.companyName,
-        companyDomain: config.companyDomain ?? null,
-        // categories.location is a single freeform string (e.g. "New York,
-        // NY" or "Remote - US"), same ambiguity as Greenhouse's location
-        // field — not decomposed into country/region/city without guessing.
-        // The raw string survives in `raw` below.
-        country: null,
-        region: null,
-        city: null,
-        remoteType: posting.workplaceType ? (WORKPLACE_TYPE_MAP[posting.workplaceType] ?? null) : null,
-        currency: salary?.currency ?? null,
-        salaryMin: salary?.min ?? null,
-        salaryMax: salary?.max ?? null,
-        salaryInterval: salary?.interval ? (SALARY_INTERVAL_MAP[salary.interval.toLowerCase()] ?? null) : null,
-        salarySource: salary ? "employer_disclosed" : null,
-        publishedAt: posting.createdAt ? new Date(posting.createdAt).toISOString() : null,
-        raw: posting,
-      };
-    });
+    // UNMAPPABLE POSTINGS ARE SKIPPED, NOT REPAIRED — see mapLeverPosting.
+    return payload
+      .map((posting) => mapLeverPosting(posting, config))
+      .filter((vacancy): vacancy is DiscoveredVacancy => vacancy !== null);
   },
 
   validateConfig(config: LeverTargetConfig): void {
