@@ -186,3 +186,61 @@ describe("Lever payload hardening", () => {
     expect(row.publishedAt).toBeNull();
   });
 });
+
+/**
+ * Mapping verified against the REAL leverdemo board (10 postings, every assumed field
+ * present, nothing skipped). Two fields were being dropped, both confirmed by the live
+ * payload rather than inferred.
+ */
+describe("Lever live-verified workplace and salary mapping", () => {
+  const config = { companyName: "Acme Corp" };
+
+  function page(postings: unknown[]) {
+    return (async () => ({ ok: true, status: 200, json: async () => postings })) as unknown as typeof fetch;
+  }
+
+  it("maps workplaceType, including the real spelling onsite", async () => {
+    // Live distribution: {"hybrid":3,"onsite":3,"remote":3,"unspecified":1}. The map only
+    // carried the hyphenated "on-site", so a third of the demo board lost its work mode.
+    const rows = await leverAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: "1", text: "A", hostedUrl: "https://x/1", workplaceType: "remote" },
+        { id: "2", text: "B", hostedUrl: "https://x/2", workplaceType: "hybrid" },
+        { id: "3", text: "C", hostedUrl: "https://x/3", workplaceType: "onsite" },
+        { id: "4", text: "D", hostedUrl: "https://x/4", workplaceType: "on-site" },
+        { id: "5", text: "E", hostedUrl: "https://x/5", workplaceType: "unspecified" },
+      ]),
+    );
+
+    expect(rows.map((row) => row.remoteType)).toEqual([
+      "remote",
+      "hybrid",
+      "on_site",
+      "on_site",
+      // "unspecified" is a real Lever value meaning the poster did not say; null, not on_site.
+      null,
+    ]);
+  });
+
+  it("maps the compound salary interval Lever actually sends", async () => {
+    // Live salaryRange.interval is always "per-year-salary"; the exact-key map held only
+    // bare units (year/annual/month/hour/...), so EVERY posting with a salary lost its
+    // interval while keeping its amounts.
+    const rows = await leverAdapter.discover(
+      "acme",
+      config,
+      page([
+        { id: "1", text: "A", hostedUrl: "https://x/1", salaryRange: { min: 85000, max: 175000, currency: "USD", interval: "per-year-salary" } },
+        { id: "2", text: "B", hostedUrl: "https://x/2", salaryRange: { min: 40, max: 60, currency: "USD", interval: "per-hour-wage" } },
+        { id: "3", text: "C", hostedUrl: "https://x/3", salaryRange: { min: 5000, max: 6000, currency: "USD", interval: "per-month-salary" } },
+        { id: "4", text: "D", hostedUrl: "https://x/4", salaryRange: { min: 1, max: 2, currency: "USD", interval: "per-fortnight-stipend" } },
+      ]),
+    );
+
+    expect(rows.map((row) => row.salaryInterval)).toEqual(["year", "hour", "month", null]);
+    expect(rows[0].salaryMin).toBe(85000);
+    expect(rows[0].salarySource).toBe("employer_disclosed");
+  });
+});

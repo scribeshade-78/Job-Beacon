@@ -33,6 +33,11 @@ interface LeverPosting {
 const WORKPLACE_TYPE_MAP: Record<string, DiscoveredVacancy["remoteType"]> = {
   remote: "remote",
   hybrid: "hybrid",
+  // THE LIVE SPELLING IS "onsite", NOT "on-site". The leverdemo board returns
+  // {"hybrid":3,"onsite":3,"remote":3,"unspecified":1}, so the hyphenated key alone dropped
+  // a third of the board to null. Both spellings are kept because the hyphenated form is
+  // what the public documentation shows.
+  onsite: "on_site",
   "on-site": "on_site",
 };
 
@@ -128,14 +133,48 @@ export function mapLeverPosting(posting: unknown, config: LeverTargetConfig): Di
     currency: hasSalary ? asString(salary.currency) : null,
     salaryMin: min,
     salaryMax: max,
-    salaryInterval:
-      hasSalary && typeof salary.interval === "string"
-        ? (SALARY_INTERVAL_MAP[salary.interval.toLowerCase()] ?? null)
-        : null,
+    salaryInterval: hasSalary ? parseLeverInterval(salary.interval) : null,
     salarySource: hasSalary ? "employer_disclosed" : null,
     publishedAt: toIsoString(typed.createdAt),
     raw: typed,
   };
+}
+
+/**
+ * Lever's salary interval is a COMPOUND string, not the bare unit the map holds.
+ *
+ * The live board sends "per-year-salary" for every posting that has a range, so the
+ * exact-key map matched none of them: each row kept its amounts and lost its interval.
+ *
+ * Matched by UNIT TOKEN rather than by extending the key list, because enumerating a
+ * compound vocabulary I cannot verify would rot. Only the three units the schema can
+ * represent are returned; anything else is null rather than approximated.
+ */
+function parseLeverInterval(value: unknown): DiscoveredVacancy["salaryInterval"] {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const exact = SALARY_INTERVAL_MAP[normalized];
+
+  if (exact) {
+    return exact;
+  }
+
+  if (normalized.includes("year") || normalized.includes("annual")) {
+    return "year";
+  }
+
+  if (normalized.includes("month")) {
+    return "month";
+  }
+
+  if (normalized.includes("hour")) {
+    return "hour";
+  }
+
+  return null;
 }
 
 const LEVER_SOURCE_CODE = "lever" as const;
