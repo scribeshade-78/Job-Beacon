@@ -2,12 +2,24 @@ import { describe, expect, it, vi } from "vitest";
 import { reconcileFitAnalyses } from "./reconcile.js";
 import { PRIORITY_SCORE_VERSION } from "../../shared/priorityScore.js";
 
-/** Thenable chainable stub — select/eq/in all return `this`. */
-function tableStub(result: { data: unknown; error?: unknown }) {
+/**
+ * Thenable chainable stub — select/eq/in all return `this`.
+ *
+ * `inCalls` records every .in() filter so a test can assert on the SIZE of the id lists,
+ * which is what the URI limit is a function of. Optional, so the other tables' stubs are
+ * unaffected.
+ */
+function tableStub(
+  result: { data: unknown; error?: unknown },
+  inCalls?: Array<{ column: string; values: unknown[] }>,
+) {
   const b: Record<string, unknown> = {};
-  for (const m of ["select", "eq", "in"]) {
-    b[m] = () => b;
-  }
+  b.select = () => b;
+  b.eq = () => b;
+  b.in = (column: string, values: unknown[]) => {
+    inCalls?.push({ column, values });
+    return b;
+  };
   b.then = (resolve: (v: unknown) => void) => resolve({ error: null, ...result });
   return b;
 }
@@ -24,6 +36,7 @@ interface ClientOpts {
 
 function makeClient(opts: ClientOpts = {}) {
   const upserts: unknown[][] = [];
+  const fitAnalysisInCalls: Array<{ column: string; values: unknown[] }> = [];
 
   const from = vi.fn((table: string) => {
     if (table === "automation_authorizations") {
@@ -39,10 +52,13 @@ function makeClient(opts: ClientOpts = {}) {
       });
     }
     if (table === "fit_analyses") {
-      return tableStub({
-        data: opts.existingError ? null : opts.existing ?? [],
-        error: opts.existingError ?? null,
-      });
+      return tableStub(
+        {
+          data: opts.existingError ? null : opts.existing ?? [],
+          error: opts.existingError ?? null,
+        },
+        fitAnalysisInCalls,
+      );
     }
     if (table === "fit_analysis_jobs") {
       return {
@@ -55,7 +71,7 @@ function makeClient(opts: ClientOpts = {}) {
     throw new Error(`unexpected table ${table}`);
   });
 
-  return { client: { from } as never, upserts };
+  return { client: { from } as never, upserts, fitAnalysisInCalls };
 }
 
 function scored(candidate_id: string, vacancy_id: string, over: Record<string, unknown> = {}) {
@@ -187,6 +203,50 @@ describe("reconcileFitAnalyses", () => {
 
     expect(result.candidates).toBe(1);
     expect(result.enqueued).toBe(1);
+  });
+
+  it("chunks the fit_analyses read so a large catalogue cannot exceed the URI limit", async () => {
+    // MEASURED against the real database: 743 eligible vacancies produced a ~28.9 KB
+    // .in(vacancy_id, ...) filter and the gateway answered {"message":"URI too long"}, so
+    // this pass threw outright and the back-fill never ran at all. The identical read
+    // chunked at 100 succeeded. PostgREST carries .in() in the URL, so the id list is a
+    // URI-length problem, not a page-size preference.
+    const vacancies = Array.from({ length: 250 }, (_, i) => "vac-" + i);
+    const { client, fitAnalysisInCalls } = makeClient({
+      authorized: ["cand-1"],
+      vacancies,
+      existing: [],
+    });
+
+    const result = await reconcileFitAnalyses(client);
+
+    const vacancyFilters = fitAnalysisInCalls.filter((call) => call.column === "vacancy_id");
+    expect(vacancyFilters.length).toBeGreaterThan(1);
+    for (const call of vacancyFilters) {
+      expect(call.values.length).toBeLessThanOrEqual(100);
+    }
+
+    // Chunking must not lose a pair: all 250 are still examined and enqueued.
+    expect(result.scanned).toBe(250);
+    expect(result.enqueued).toBe(250);
+  });
+
+  it("chunks the candidate filter too, which is the other half of the same URI", async () => {
+    const candidates = Array.from({ length: 250 }, (_, i) => "cand-" + i);
+    const { client, fitAnalysisInCalls } = makeClient({
+      authorized: candidates,
+      withRoles: candidates,
+      vacancies: ["vac-1"],
+      existing: [],
+    });
+
+    await reconcileFitAnalyses(client, { limit: 1 });
+
+    const candidateFilters = fitAnalysisInCalls.filter((call) => call.column === "candidate_id");
+    expect(candidateFilters.length).toBeGreaterThan(1);
+    for (const call of candidateFilters) {
+      expect(call.values.length).toBeLessThanOrEqual(100);
+    }
   });
 
   it("propagates a vacancy query failure", async () => {
