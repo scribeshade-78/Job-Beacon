@@ -44,6 +44,18 @@ function asNumber(value: unknown): number | null {
 }
 
 /**
+ * Did the EMPLOYER state this salary, or did Adzuna predict it?
+ *
+ * Only an explicit "not predicted" counts. An absent, null or unrecognised flag returns
+ * false, because claiming an employer published a salary they did not is worse than
+ * under-claiming it. The live API sends the string "0"; the numeric form is accepted too
+ * so a shape change cannot silently start under-ranking disclosed salaries again.
+ */
+function isEmployerDisclosed(value: unknown): boolean {
+  return value === "0" || value === 0;
+}
+
+/**
  * Adzuna's own explanation, when it sends one, read best-effort.
  *
  * "HTTP 401" alone sends an operator to the Adzuna dashboard with nothing to search
@@ -106,10 +118,20 @@ export function mapAdzunaResult(result: AdzunaResult, countryCode: string): Disc
     salaryMin,
     salaryMax,
     salaryInterval: hasSalary ? "year" : null,
-    // Adzuna's overview page doesn't document whether salary_min/max is
-    // employer-disclosed or Adzuna's own estimate for a given listing — treated
-    // conservatively as "estimated" rather than assumed disclosed.
-    salarySource: hasSalary ? "estimated" : null,
+    // THE DISCLOSURE FLAG WAS BEING IGNORED. salary_is_predicted is Adzuna's own answer to
+    // "did the employer state this figure": "0" disclosed, "1" predicted. Hardcoding
+    // "estimated" was wrong twice over — the UI printed "(estimated)" for a salary the
+    // employer published, and priorityScore scores employer_disclosed at 90 (range) / 70
+    // (single figure) against 50 for estimated, so those vacancies ranked lower for the
+    // wrong reason.
+    //
+    // No figure means no source at all, whatever the flag says: "not predicted" is not a
+    // salary.
+    salarySource: hasSalary
+      ? isEmployerDisclosed(result.salary_is_predicted)
+        ? "employer_disclosed"
+        : "estimated"
+      : null,
     publishedAt: asString(result.created),
     raw: result,
   };
@@ -126,6 +148,12 @@ interface AdzunaResult {
   location?: { display_name?: string; area?: string[] };
   salary_min?: number;
   salary_max?: number;
+  /**
+   * Adzuna's disclosure flag, sent as the STRING "0" (the employer stated the figure) or
+   * "1" (Adzuna predicted it). Typed unknown because it is read from an untyped payload;
+   * anything that is not a clear "not predicted" is treated as estimated.
+   */
+  salary_is_predicted?: unknown;
   created?: string;
   redirect_url: string;
 }

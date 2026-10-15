@@ -232,6 +232,92 @@ describe("Adzuna payload hardening", () => {
     expect(rows.every((row) => typeof row.authoritativeUrl === "string" && row.authoritativeUrl !== "")).toBe(true);
   });
 
+  it("labels an explicitly disclosed salary employer_disclosed, not estimated", async () => {
+    // Adzuna's salary_is_predicted is the STRING "0" when the employer stated the figure
+    // and "1" when Adzuna predicted it. Ignoring it labelled disclosed salaries
+    // "estimated", which is wrong twice over: the UI prints "(estimated)" for a salary the
+    // employer published, AND priorityScore scores estimated at 50 where employer_disclosed
+    // is worth 90 (range) or 70 (single figure) — so those vacancies ranked lower for the
+    // wrong reason.
+    const rows = await discoverAdzuna(
+      "gb",
+      {},
+      credentials,
+      page([
+        {
+          id: "1",
+          title: "Engineer",
+          redirect_url: "https://adzuna.test/1",
+          salary_min: 60000,
+          salary_max: 80000,
+          salary_is_predicted: "0",
+        },
+        {
+          id: "2",
+          title: "Engineer",
+          redirect_url: "https://adzuna.test/2",
+          salary_min: 60000,
+          salary_max: 80000,
+          salary_is_predicted: "1",
+        },
+      ]),
+    );
+
+    expect(rows[0].salarySource).toBe("employer_disclosed");
+    expect(rows[1].salarySource).toBe("estimated");
+  });
+
+  it("stays conservatively estimated when the predicted flag is absent or unrecognised", async () => {
+    // Only an explicit "not predicted" may promote a figure to disclosed. An absent or
+    // unrecognised flag must not: claiming the employer stated a salary they did not is
+    // worse than under-claiming it.
+    const rows = await discoverAdzuna(
+      "gb",
+      {},
+      credentials,
+      page([
+        { id: "1", title: "E", redirect_url: "https://adzuna.test/1", salary_min: 1, salary_max: 2 },
+        {
+          id: "2",
+          title: "E",
+          redirect_url: "https://adzuna.test/2",
+          salary_min: 1,
+          salary_max: 2,
+          salary_is_predicted: "maybe",
+        },
+        {
+          id: "3",
+          title: "E",
+          redirect_url: "https://adzuna.test/3",
+          salary_min: 1,
+          salary_max: 2,
+          salary_is_predicted: 0,
+        },
+      ]),
+    );
+
+    expect(rows[0].salarySource).toBe("estimated");
+    expect(rows[1].salarySource).toBe("estimated");
+    // Numeric 0 as well as the string "0": the live API sends strings today, but a shape
+    // change must not silently start under-ranking disclosed salaries again.
+    expect(rows[2].salarySource).toBe("employer_disclosed");
+  });
+
+  it("leaves the source null when there is no figure, whatever the flag says", async () => {
+    // 8 of the 30 live rows looked exactly like this: salary_is_predicted="0" with no
+    // salary at all. Null is correct — "not predicted" is not a salary.
+    const [row] = await discoverAdzuna(
+      "gb",
+      {},
+      credentials,
+      page([{ id: "1", title: "E", redirect_url: "https://adzuna.test/1", salary_is_predicted: "0" }]),
+    );
+
+    expect(row.salarySource).toBeNull();
+    expect(row.salaryMin).toBeNull();
+    expect(row.salaryInterval).toBeNull();
+  });
+
   it("reads region from location.area[1] - the same structured array the city already trusts", async () => {
     // area is ["India","Tamil Nadu","Bangalore"] on real payloads. city already comes
     // from area[2]; leaving region null while the state sits one slot away is a
