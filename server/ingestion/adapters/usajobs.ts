@@ -30,6 +30,41 @@ export interface UsajobsCredentials {
   userAgent: string;
 }
 
+export class UsajobsPayloadError extends Error {
+  constructor(detail: string) {
+    super(`USAJOBS returned a payload this adapter cannot read: ${detail}`);
+    this.name = "UsajobsPayloadError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Non-empty and trimmed, or null. Used for every string this mapper trusts. */
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/**
+ * A real finite number, whether the API sends it as a string ("95000.50") or a number.
+ *
+ * NOT a cast and NOT a bare Number(): Number("1,000") is NaN and Number("") is 0, and both
+ * would have reached a numeric column. A rate that cannot be read is no rate at all.
+ */
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
 interface UsajobsPositionRemuneration {
   MinimumRange?: string;
   MaximumRange?: string;
@@ -80,9 +115,60 @@ export function parseUsajobsRemoteType(remoteIndicator: unknown): "remote" | nul
   return remoteIndicator === true ? "remote" : null;
 }
 
-interface UsajobsSearchResponse {
-  SearchResult: {
-    SearchResultItems: Array<{ MatchedObjectDescriptor: UsajobsMatchedObjectDescriptor }>;
+/**
+ * Maps ONE USAJOBS item, or returns null when it cannot be identified or linked.
+ *
+ * SKIPPING IS THE POINT, exactly as in the Adzuna mapper: vacancies.source_vacancy_id,
+ * authoritative_url and raw_title are NOT NULL, so a row missing any of them is a failed
+ * insert or a garbage vacancy — not something to repair with a placeholder.
+ */
+export function mapUsajobsItem(entry: unknown): DiscoveredVacancy | null {
+  const item = asRecord(asRecord(entry).MatchedObjectDescriptor);
+
+  const sourceVacancyId = asString(item.PositionID);
+  const authoritativeUrl = asString(item.PositionURI);
+  const rawTitle = asString(item.PositionTitle);
+
+  if (!sourceVacancyId || !authoritativeUrl || !rawTitle) {
+    return null;
+  }
+
+  const descriptor = item as unknown as UsajobsMatchedObjectDescriptor;
+  const remuneration = Array.isArray(descriptor.PositionRemuneration)
+    ? descriptor.PositionRemuneration[0]
+    : undefined;
+
+  const min = asFiniteNumber(remuneration?.MinimumRange);
+  const max = asFiniteNumber(remuneration?.MaximumRange);
+  const hasSalary = min !== null || max !== null;
+
+  return {
+    sourceVacancyId,
+    authoritativeUrl,
+    rawTitle,
+    companyName: asString(descriptor.OrganizationName) ?? "U.S. Government",
+    companyDomain: null,
+    country: "US",
+    region: null,
+    // Same freeform-string ambiguity as Greenhouse/Lever — not decomposed into
+    // region/city without guessing.
+    city: null,
+    // Only RemoteIndicator === true maps; false and absent both stay null — see
+    // parseUsajobsRemoteType.
+    remoteType: parseUsajobsRemoteType(descriptor.UserArea?.Details?.RemoteIndicator),
+    currency: hasSalary ? "USD" : null,
+    salaryMin: min,
+    salaryMax: max,
+    // A RATE INTERVAL WITH NO RATE IS NOT A SALARY, so this is gated on hasSalary for the
+    // same reason the amount and the source are: an interval alone asserts a salary that
+    // is not there.
+    salaryInterval:
+      hasSalary && remuneration?.RateIntervalCode
+        ? (RATE_INTERVAL_MAP[String(remuneration.RateIntervalCode).toLowerCase()] ?? null)
+        : null,
+    salarySource: hasSalary ? "employer_disclosed" : null,
+    publishedAt: asString(descriptor.PublicationStartDate),
+    raw: descriptor,
   };
 }
 
@@ -120,38 +206,27 @@ export async function discoverUsajobs(
     throw new Error(`USAJOBS discovery failed: HTTP ${response.status}`);
   }
 
-  const body = (await response.json()) as UsajobsSearchResponse;
+  // A MALFORMED BODY IS NAMED, NOT A STACK TRACE. `body.SearchResult.SearchResultItems
+  // .map(...)` used to run unguarded, so a null body, a renamed field or a non-JSON body
+  // threw a TypeError that the ingestion worker stored verbatim as the source's health
+  // error — naming our own code instead of the provider's payload.
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new UsajobsPayloadError("the response body was not JSON");
+  }
 
-  return body.SearchResult.SearchResultItems.map(({ MatchedObjectDescriptor: item }) => {
-    const remuneration = item.PositionRemuneration?.[0];
-    const min = remuneration?.MinimumRange ? Number(remuneration.MinimumRange) : null;
-    const max = remuneration?.MaximumRange ? Number(remuneration.MaximumRange) : null;
+  const items = asRecord(asRecord(payload).SearchResult).SearchResultItems;
 
-    return {
-      sourceVacancyId: item.PositionID,
-      authoritativeUrl: item.PositionURI,
-      rawTitle: item.PositionTitle,
-      companyName: item.OrganizationName ?? "U.S. Government",
-      companyDomain: null,
-      country: "US",
-      region: null,
-      // Same freeform-string ambiguity as Greenhouse/Lever — not
-      // decomposed into region/city without guessing.
-      city: null,
-      // Only RemoteIndicator === true maps; false and absent both stay null —
-      // see parseUsajobsRemoteType.
-      remoteType: parseUsajobsRemoteType(item.UserArea?.Details?.RemoteIndicator),
-      currency: min !== null || max !== null ? "USD" : null,
-      salaryMin: min,
-      salaryMax: max,
-      salaryInterval: remuneration?.RateIntervalCode
-        ? (RATE_INTERVAL_MAP[remuneration.RateIntervalCode.toLowerCase()] ?? null)
-        : null,
-      salarySource: min !== null || max !== null ? "employer_disclosed" : null,
-      publishedAt: item.PublicationStartDate ?? null,
-      raw: item,
-    };
-  });
+  if (!Array.isArray(items)) {
+    throw new UsajobsPayloadError("the response had no SearchResult.SearchResultItems array");
+  }
+
+  // UNMAPPABLE ROWS ARE SKIPPED, NOT REPAIRED — see mapUsajobsItem.
+  return items
+    .map((entry) => mapUsajobsItem(entry))
+    .filter((vacancy): vacancy is DiscoveredVacancy => vacancy !== null);
 }
 
 const USAJOBS_SOURCE_CODE = "usajobs" as const;

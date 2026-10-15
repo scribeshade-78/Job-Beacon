@@ -203,3 +203,120 @@ describe("usajobsAdapter (MP-A2.1 registry wrapper)", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 8 — payload hardening, the same class Adzuna's mapper just went through.
+ *
+ * This adapter is REGISTERED and its target row is ENABLED with credentials configured, so
+ * every one of these shapes is reachable from the ingestion drain. Before this suite, a
+ * malformed body reached `body.SearchResult.SearchResultItems.map(...)` unguarded: a
+ * TypeError whose message became the source's health error, naming our code rather than
+ * the provider's payload.
+ */
+describe("USAJOBS payload hardening", () => {
+  const payloadError = /USAJOBS returned a payload/;
+
+  function items(entries: unknown[]) {
+    return { SearchResult: { SearchResultItems: entries } };
+  }
+
+  it("throws a payload error, not a TypeError, when the body is null or not an object", async () => {
+    await expect(discoverUsajobs({}, credentials, fixtureFetch(200, null))).rejects.toThrow(payloadError);
+    await expect(discoverUsajobs({}, credentials, fixtureFetch(200, "nope"))).rejects.toThrow(payloadError);
+    await expect(discoverUsajobs({}, credentials, fixtureFetch(200, {}))).rejects.toThrow(payloadError);
+  });
+
+  it("throws a payload error when SearchResultItems is not an array", async () => {
+    await expect(
+      discoverUsajobs({}, credentials, fixtureFetch(200, { SearchResult: { SearchResultItems: "nope" } })),
+    ).rejects.toThrow(payloadError);
+  });
+
+  it("throws a payload error when the body is not JSON at all", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error("Unexpected token < in JSON");
+      },
+    }) as unknown as typeof fetch;
+
+    await expect(discoverUsajobs({}, credentials, fetchImpl)).rejects.toThrow(payloadError);
+  });
+
+  it("skips a row without an id, title or link instead of writing undefined into NOT NULL columns", async () => {
+    // vacancies.source_vacancy_id / authoritative_url / raw_title are NOT NULL, so a row
+    // missing any of them is a failed insert or a garbage vacancy — reset_index, not repair.
+    const rows = await discoverUsajobs(
+      {},
+      credentials,
+      fixtureFetch(
+        200,
+        items([
+          { MatchedObjectDescriptor: { PositionID: "1", PositionTitle: "Analyst", PositionURI: "https://x/1" } },
+          { MatchedObjectDescriptor: { PositionTitle: "No id", PositionURI: "https://x/2" } },
+          { MatchedObjectDescriptor: { PositionID: "3", PositionURI: "https://x/3" } },
+          { MatchedObjectDescriptor: { PositionID: "4", PositionTitle: "No url" } },
+          { MatchedObjectDescriptor: {} },
+          { NotADescriptor: true },
+          null,
+        ]),
+      ),
+    );
+
+    expect(rows.map((row) => row.sourceVacancyId)).toEqual(["1"]);
+  });
+
+  it("ignores a salary bound that is not a finite number instead of writing NaN", async () => {
+    const [row] = await discoverUsajobs(
+      {},
+      credentials,
+      fixtureFetch(
+        200,
+        items([
+          {
+            MatchedObjectDescriptor: {
+              PositionID: "1",
+              PositionTitle: "Analyst",
+              PositionURI: "https://x/1",
+              PositionRemuneration: [{ MinimumRange: "1,000", MaximumRange: "", RateIntervalCode: "Per Year" }],
+            },
+          },
+        ]),
+      ),
+    );
+
+    // Number("1,000") is NaN and Number("") is 0 — both would have reached a numeric column.
+    expect(row.salaryMin).toBeNull();
+    expect(row.salaryMax).toBeNull();
+    expect(row.salarySource).toBeNull();
+    expect(row.currency).toBeNull();
+    // A rate interval with no rate is the same defect as a salary with no figure.
+    expect(row.salaryInterval).toBeNull();
+  });
+
+  it("still parses real numeric strings, including one that arrives as a number", async () => {
+    const [row] = await discoverUsajobs(
+      {},
+      credentials,
+      fixtureFetch(
+        200,
+        items([
+          {
+            MatchedObjectDescriptor: {
+              PositionID: "1",
+              PositionTitle: "Analyst",
+              PositionURI: "https://x/1",
+              PositionRemuneration: [{ MinimumRange: "95000.50", MaximumRange: 120000, RateIntervalCode: "Per Year" }],
+            },
+          },
+        ]),
+      ),
+    );
+
+    expect(row.salaryMin).toBe(95000.5);
+    expect(row.salaryMax).toBe(120000);
+    expect(row.salaryInterval).toBe("year");
+    expect(row.salarySource).toBe("employer_disclosed");
+  });
+});
