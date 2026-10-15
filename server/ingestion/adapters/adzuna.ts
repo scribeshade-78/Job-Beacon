@@ -113,6 +113,14 @@ export function mapAdzunaResult(result: AdzunaResult, countryCode: string): Disc
     // display_name is still never decomposed — that would be guessing.
     region: asString(area[1]),
     city: asString(area[2]),
+    // DELIBERATELY NULL, NOT AN OVERSIGHT. Adzuna exposes no structured remote field:
+    // the live payload's complete key set is __CLASS__, adref, category, company,
+    // contract_time, contract_type, created, description, id, latitude, location,
+    // longitude, redirect_url, salary_is_predicted, salary_max, salary_min, title. A
+    // what=Remote search is a KEYWORD match rather than a filter — a live GB run returned
+    // "Nurse Disability Assessor Hybrid Work from Home" — so only free text in
+    // title/description carries the signal. Deriving a filter from that would be guessing,
+    // and Remotive carries the remote filter meanwhile.
     remoteType: null,
     currency: null,
     salaryMin,
