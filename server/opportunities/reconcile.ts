@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { findFitAnalysisCandidateIds } from "../applications/activeCandidates.js";
+import { chunkIds, READ_CHUNK_SIZE } from "../pgrestChunk.js";
 import { PRIORITY_SCORE_VERSION } from "../../shared/priorityScore.js";
 
 /**
@@ -25,25 +26,6 @@ import { PRIORITY_SCORE_VERSION } from "../../shared/priorityScore.js";
 
 /** Default ceiling on jobs enqueued per invocation. */
 const DEFAULT_RECONCILE_LIMIT = 500;
-
-/**
- * How many ids go into ONE PostgREST `.in()` filter.
- *
- * NOT a paging preference — a URL-LENGTH bound. PostgREST carries the filter as a query
- * parameter, so the whole id list has to fit in a URI. MEASURED against this database: 743
- * eligible vacancies produced a ~28.9 KB filter and the gateway answered
- * {"message":"URI too long"}. 100 ids is ~3.9 KB per request, inside the usual 8 KB proxy
- * default, and 8 requests for a 743-vacancy catalogue.
- */
-const READ_CHUNK_SIZE = 100;
-
-function chunk<T>(values: readonly T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < values.length; i += size) {
-    chunks.push(values.slice(i, i + size));
-  }
-  return chunks;
-}
 
 const RECONCILABLE_TRUST_STATUSES = ["VERIFIED", "VERIFIED_INCOMPLETE"];
 
@@ -125,8 +107,8 @@ export async function reconcileFitAnalyses(
   // Chunking loses nothing: the union of the chunks is the same set of pairs.
   const current = new Set<string>();
 
-  for (const candidateChunk of chunk(candidateIds, READ_CHUNK_SIZE)) {
-    for (const vacancyChunk of chunk(vacancyIds, READ_CHUNK_SIZE)) {
+  for (const candidateChunk of chunkIds(candidateIds, READ_CHUNK_SIZE)) {
+    for (const vacancyChunk of chunkIds(vacancyIds, READ_CHUNK_SIZE)) {
       const { data: existingRows, error: existingError } = await client
         .from("fit_analyses")
         .select("candidate_id, vacancy_id, priority_score, priority_score_version")

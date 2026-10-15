@@ -149,6 +149,10 @@ export async function indexVacancyEvidence(
 
     const vacancyIds = vacancies.map((vacancy) => vacancy.id);
 
+    // BOUNDED BY batchSize (default 100, DEFAULT_INDEX_BATCH_SIZE) because vacancyIds comes
+    // from the ranged read above - so this in() filter is already inside the URI-length bound
+    // the gateway enforces, and needs no chunking. Raising batchSize past roughly 150 would
+    // put it past that bound: chunk, do not raise.
     const { data: snapshotData, error: snapshotError } = await client
       .from("vacancy_jd_snapshots")
       .select("id, vacancy_id, clean_text, created_at")

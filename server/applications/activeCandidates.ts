@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { chunkIds } from "../pgrestChunk.js";
 
 interface CandidateIdRow {
   candidate_id: string;
@@ -32,16 +33,27 @@ export async function findActiveCandidateIds(client: SupabaseClient): Promise<st
     return [];
   }
 
-  const { data: roleRows, error: roleError } = await client
-    .from("candidate_selected_roles")
-    .select("candidate_id")
-    .in("candidate_id", authorizedCandidateIds);
+  // CHUNKED, because PostgREST carries in() in the URL and the authorized base grows with
+  // the candidate base. This runs on the AUTOMATED SUBMISSION path as well as the fit paths,
+  // so the failure it prevents is applications that never get submitted.
+  const withRoles = new Set<string>();
 
-  if (roleError) {
-    throw roleError;
+  for (const chunk of chunkIds(authorizedCandidateIds)) {
+    const { data: roleRows, error: roleError } = await client
+      .from("candidate_selected_roles")
+      .select("candidate_id")
+      .in("candidate_id", chunk);
+
+    if (roleError) {
+      throw roleError;
+    }
+
+    for (const row of (roleRows ?? []) as CandidateIdRow[]) {
+      withRoles.add(row.candidate_id);
+    }
   }
 
-  return [...new Set(((roleRows ?? []) as CandidateIdRow[]).map((row) => row.candidate_id))];
+  return [...withRoles];
 }
 
 /**
