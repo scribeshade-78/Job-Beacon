@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { findActiveCandidateIds } from "../applications/activeCandidates.js";
+import { findFitAnalysisCandidateIds } from "../applications/activeCandidates.js";
 import { PRIORITY_SCORE_VERSION } from "../../shared/priorityScore.js";
 
 /**
@@ -90,9 +90,11 @@ export async function reconcileFitAnalyses(
     truncated: false,
   };
 
-  // Same definition of "active candidate" as the vacancy-side enqueue —
-  // authorized automation plus at least one selected role.
-  const candidateIds = await findActiveCandidateIds(client);
+  // The same fit-signal set the vacancy-side enqueue uses (confirmed fact OR selected
+  // role), which is also what the DB triggers act on. NOT the automation gate: a consent
+  // gate here stranded every candidate who had not authorized automation at the fan-out
+  // cap, because this pass is the only thing that fills the tail.
+  const candidateIds = await findFitAnalysisCandidateIds(client);
   result.candidates = candidateIds.length;
   if (candidateIds.length === 0) {
     return result;

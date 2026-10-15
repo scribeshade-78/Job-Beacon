@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { findActiveCandidateIds } from "../applications/activeCandidates.js";
+import { findFitAnalysisCandidateIds } from "../applications/activeCandidates.js";
 
 /**
  * Response Intelligence Phase 2.1 — enqueue fit-analysis jobs when a
@@ -18,7 +18,9 @@ export async function enqueueFitJobsForVacancy(
   client: SupabaseClient,
   vacancyId: string,
 ): Promise<{ enqueued: number }> {
-  const candidateIds = await findActiveCandidateIds(client);
+  // The FIT signal set, not the automation gate: see findFitAnalysisCandidateIds for why a
+  // candidate who has not authorized automation still gets an analysis.
+  const candidateIds = await findFitAnalysisCandidateIds(client);
 
   if (candidateIds.length === 0) {
     return { enqueued: 0 };

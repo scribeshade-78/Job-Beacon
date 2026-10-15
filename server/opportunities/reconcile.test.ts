@@ -25,7 +25,7 @@ function tableStub(
 }
 
 interface ClientOpts {
-  authorized?: string[];
+  confirmedFactCandidates?: string[];
   withRoles?: string[];
   vacancies?: string[];
   existing?: unknown[];
@@ -39,11 +39,15 @@ function makeClient(opts: ClientOpts = {}) {
   const fitAnalysisInCalls: Array<{ column: string; values: unknown[] }> = [];
 
   const from = vi.fn((table: string) => {
-    if (table === "automation_authorizations") {
-      return tableStub({ data: (opts.authorized ?? []).map((candidate_id) => ({ candidate_id })) });
+    // The two fit signals. automation_authorizations is deliberately NOT dispatched here, so
+    // a query against it throws "unexpected table" instead of quietly passing.
+    if (table === "fact_confirmations") {
+      return tableStub({
+        data: (opts.confirmedFactCandidates ?? []).map((candidate_id) => ({ extracted_facts: { candidate_id } })),
+      });
     }
     if (table === "candidate_selected_roles") {
-      return tableStub({ data: (opts.withRoles ?? opts.authorized ?? []).map((candidate_id) => ({ candidate_id })) });
+      return tableStub({ data: (opts.withRoles ?? []).map((candidate_id) => ({ candidate_id })) });
     }
     if (table === "vacancies") {
       return tableStub({
@@ -71,7 +75,7 @@ function makeClient(opts: ClientOpts = {}) {
     throw new Error(`unexpected table ${table}`);
   });
 
-  return { client: { from } as never, upserts, fitAnalysisInCalls };
+  return { client: { from } as never, from, upserts, fitAnalysisInCalls };
 }
 
 function scored(candidate_id: string, vacancy_id: string, over: Record<string, unknown> = {}) {
@@ -86,7 +90,7 @@ function scored(candidate_id: string, vacancy_id: string, over: Record<string, u
 
 describe("reconcileFitAnalyses", () => {
   it("enqueues nothing when there are no active candidates", async () => {
-    const { client, upserts } = makeClient({ authorized: [] });
+    const { client, upserts } = makeClient({ confirmedFactCandidates: [] });
     const result = await reconcileFitAnalyses(client);
 
     expect(result).toMatchObject({ candidates: 0, enqueued: 0, scanned: 0 });
@@ -94,7 +98,7 @@ describe("reconcileFitAnalyses", () => {
   });
 
   it("enqueues nothing when no vacancy is verified and active", async () => {
-    const { client, upserts } = makeClient({ authorized: ["cand-1"], vacancies: [] });
+    const { client, upserts } = makeClient({ confirmedFactCandidates: ["cand-1"], vacancies: [] });
     const result = await reconcileFitAnalyses(client);
 
     expect(result).toMatchObject({ candidates: 1, vacancies: 0, enqueued: 0 });
@@ -103,7 +107,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("enqueues a pair that has no fit_analyses row at all", async () => {
     const { client, upserts } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [],
     });
@@ -118,7 +122,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("enqueues a row whose priority_score is null (the 2.3b backfill gap)", async () => {
     const { client, upserts } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [scored("cand-1", "vac-1", { priority_score: null, priority_score_version: null })],
     });
@@ -131,7 +135,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("enqueues a row scored under an older score version", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [scored("cand-1", "vac-1", { priority_score_version: "priority-v2" })],
     });
@@ -142,7 +146,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("skips a row already scored at the current version", async () => {
     const { client, upserts } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [scored("cand-1", "vac-1")],
     });
@@ -155,7 +159,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("treats a score of 0 as scored, not as missing", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [scored("cand-1", "vac-1", { priority_score: 0 })],
     });
@@ -167,7 +171,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("fans out across every active candidate x verified vacancy pair", async () => {
     const { client, upserts } = makeClient({
-      authorized: ["cand-1", "cand-2"],
+      confirmedFactCandidates: ["cand-1", "cand-2"],
       vacancies: ["vac-1", "vac-2", "vac-3"],
       existing: [scored("cand-1", "vac-2")],
     });
@@ -180,7 +184,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("stops at the limit and reports truncated", async () => {
     const { client, upserts } = makeClient({
-      authorized: ["cand-1", "cand-2"],
+      confirmedFactCandidates: ["cand-1", "cand-2"],
       vacancies: ["vac-1", "vac-2", "vac-3"],
       existing: [],
     });
@@ -191,18 +195,34 @@ describe("reconcileFitAnalyses", () => {
     expect(upserts[0]).toHaveLength(2);
   });
 
-  it("only counts candidates who are authorized AND have a selected role", async () => {
+  it("unions candidates with a confirmed fact and candidates with a selected role", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1", "cand-2"],
-      withRoles: ["cand-1"],
+      confirmedFactCandidates: ["cand-1", "cand-2"],
+      withRoles: ["cand-2", "cand-3"],
       vacancies: ["vac-1"],
       existing: [],
     });
 
     const result = await reconcileFitAnalyses(client);
 
-    expect(result.candidates).toBe(1);
-    expect(result.enqueued).toBe(1);
+    // A de-duplicated union: 3 distinct candidates, not 4 and not the intersection.
+    expect(result.candidates).toBe(3);
+    expect(result.enqueued).toBe(3);
+  });
+
+  it("does not consult automation_authorizations at all", async () => {
+    // The consent gate governs acting FOR a candidate. Gating the back-fill on it stranded
+    // every candidate who had not authorized automation at the 200-vacancy fan-out cap,
+    // because this pass is the only thing that ever fills the tail.
+    const { client, from } = makeClient({
+      confirmedFactCandidates: ["cand-1"],
+      vacancies: ["vac-1"],
+      existing: [],
+    });
+
+    await reconcileFitAnalyses(client);
+
+    expect(from).not.toHaveBeenCalledWith("automation_authorizations");
   });
 
   it("chunks the fit_analyses read so a large catalogue cannot exceed the URI limit", async () => {
@@ -213,7 +233,7 @@ describe("reconcileFitAnalyses", () => {
     // URI-length problem, not a page-size preference.
     const vacancies = Array.from({ length: 250 }, (_, i) => "vac-" + i);
     const { client, fitAnalysisInCalls } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies,
       existing: [],
     });
@@ -234,7 +254,7 @@ describe("reconcileFitAnalyses", () => {
   it("chunks the candidate filter too, which is the other half of the same URI", async () => {
     const candidates = Array.from({ length: 250 }, (_, i) => "cand-" + i);
     const { client, fitAnalysisInCalls } = makeClient({
-      authorized: candidates,
+      confirmedFactCandidates: candidates,
       withRoles: candidates,
       vacancies: ["vac-1"],
       existing: [],
@@ -251,7 +271,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("propagates a vacancy query failure", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancyError: { message: "vacancies down" },
     });
 
@@ -260,7 +280,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("propagates a fit_analyses query failure", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existingError: { message: "fit_analyses down" },
     });
@@ -270,7 +290,7 @@ describe("reconcileFitAnalyses", () => {
 
   it("propagates an enqueue failure rather than reporting success", async () => {
     const { client } = makeClient({
-      authorized: ["cand-1"],
+      confirmedFactCandidates: ["cand-1"],
       vacancies: ["vac-1"],
       existing: [],
       upsertError: { message: "queue down" },
