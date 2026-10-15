@@ -26,7 +26,7 @@ import {
   type OpportunityFilters,
 } from "../lib/opportunityQuery";
 import { parseListInput, type CandidatePreferences } from "../lib/candidatePreferences";
-import { cn } from "../lib/utils";
+import { INLINE_FOCUS_RING, cn } from "../lib/utils";
 
 /**
  * Task I — the Opportunities filter bar: all 10 declared filters plus the 6
@@ -94,6 +94,7 @@ const SOURCE_PLACEHOLDER = "remotive, greenhouse, usajobs";
 function pillClasses(active: boolean): string {
   return cn(
     "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+    INLINE_FOCUS_RING,
     active
       ? "border-ios-blue bg-ios-blue/10 text-ios-blue"
       : "border-ios-separator bg-ios-card text-black hover:bg-ios-bg",
@@ -173,6 +174,7 @@ function OptionRow({
       onClick={onClick}
       className={cn(
         "w-full rounded-control px-2 py-1.5 text-left text-sm transition-colors",
+        INLINE_FOCUS_RING,
         selected ? "bg-ios-blue/10 font-medium text-ios-blue" : "text-black hover:bg-ios-bg",
       )}
     >

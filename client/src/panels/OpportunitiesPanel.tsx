@@ -70,6 +70,7 @@ import { OpportunityFilterBar } from "./OpportunityFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
+import { INLINE_FOCUS_RING } from "../lib/utils";
 import {
   describeRankingRefresh,
   readRankingRefreshStatus,
@@ -981,7 +982,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
               <button
                 type="button"
                 onClick={() => setReloadToken((value) => value + 1)}
-                className="font-medium text-ios-blue hover:underline"
+                className={`font-medium text-ios-blue hover:underline ${INLINE_FOCUS_RING}`}
               >
                 Retry
               </button>
@@ -1064,7 +1065,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
                 <button
                   type="button"
                   onClick={() => void loadCapability()}
-                  className="font-medium text-ios-blue hover:underline"
+                  className={`font-medium text-ios-blue hover:underline ${INLINE_FOCUS_RING}`}
                 >
                   Retry
                 </button>
@@ -1148,7 +1149,7 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
               <button
                 type="button"
                 onClick={() => startRankingRefresh(true)}
-                className="font-medium text-ios-blue hover:underline"
+                className={`font-medium text-ios-blue hover:underline ${INLINE_FOCUS_RING}`}
               >
                 Retry
               </button>
@@ -1196,7 +1197,18 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
             candidate reads what it means. */}
         {(unverifiedCount > 0 || partiallyVerifiedCount > 0) && <TrustNoticeBanner />}
 
-        <ul className="space-y-4" role="list" aria-label="Job opportunities">
+        {/* UPDATING IN PLACE, NOT SWAPPING THE VIEW. A filter change keeps the previous
+            rows on screen at reduced opacity and marks the list busy, so the candidate
+            never watches the page collapse into a spinner and back. The reduced-motion
+            variant drops the fade rather than moving anything. */}
+        <ul
+          className={`space-y-4 transition-opacity duration-200 motion-reduce:transition-none ${
+            querying && visibleOpportunities.length > 0 ? "opacity-60" : "opacity-100"
+          }`}
+          role="list"
+          aria-label="Job opportunities"
+          aria-busy={querying && visibleOpportunities.length > 0}
+        >
           {visibleOpportunities.map((opp) => {
             const unverified = isUnverifiedSource(opp.trustStatus);
             const partiallyVerified = isPartiallyVerified(opp.trustStatus);

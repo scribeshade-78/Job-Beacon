@@ -246,6 +246,41 @@ describe("OpportunitiesPanel — status and empty states", () => {
     expect(screen.getByText("Ranking")).toBeTruthy();
   });
 
+  it("dims the list instead of replacing it while a re-query is in flight", async () => {
+    // The list must not jump: an update keeps the rows on screen at reduced opacity and
+    // marks itself busy. Reaching a re-query from a test means changing the filters, and
+    // the bulk-apply handler is the one control that resets them.
+    capabilityApi.canQueue = true;
+    bulkApi.submitBulkApply.mockResolvedValue({
+      kind: "success",
+      result: { requested: 1, queued: 1, blocked: 0, errors: 0, outcomes: [] },
+    });
+
+    renderPanel();
+    await screen.findByText("Azure Data Engineer");
+
+    vi.mocked(listOpportunities).mockReturnValue(new Promise(() => {}) as never);
+    fireEvent.click(screen.getByRole("button", { name: /Queue eligible applications/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("list", { name: /Job opportunities/i }).getAttribute("aria-busy")).toBe("true"),
+    );
+    // Still there — dimmed, not swapped for a spinner.
+    expect(screen.getByText("Azure Data Engineer")).toBeTruthy();
+  });
+
+  it("gives the custom inline controls an explicit focus ring", async () => {
+    renderPanel();
+    await screen.findByText("Azure Data Engineer");
+
+    // The inline text button and the filter pills are not the Button primitive, so they
+    // carry the token ring explicitly rather than relying on the global fallback.
+    expect(screen.getByRole("button", { name: /retry/i }).className).toContain("focus-visible:ring-2");
+    expect(screen.getByRole("button", { name: /Work mode filter/i }).className).toContain(
+      "focus-visible:ring-2",
+    );
+  });
+
   it("shows an updating affordance when a re-query is in flight with an empty list", async () => {
     // An empty list while a filter re-query is in flight must not read as "no jobs"; it
     // reads as "updating". The list error's Retry is the one reliable way to put a query
