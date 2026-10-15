@@ -4,6 +4,7 @@ import { leverAdapter } from "./lever.js";
 import { adzunaAdapter } from "./adzuna.js";
 import { usajobsAdapter } from "./usajobs.js";
 import { joobleAdapter } from "./jooble.js";
+import { arbeitnowAdapter, remotiveAdapter, theMuseAdapter } from "./keyless.js";
 
 /**
  * Registry of all registered discovery adapters.
@@ -20,6 +21,11 @@ const ADAPTERS: readonly DiscoveryAdapter[] = [
   adzunaAdapter,
   usajobsAdapter,
   joobleAdapter,
+  // Step 6: the keyless public aggregators, pollable on a schedule (and NOT
+  // expiring unseen rows — see their completesSweep flag).
+  remotiveAdapter,
+  arbeitnowAdapter,
+  theMuseAdapter,
 ] as const;
 
 /**

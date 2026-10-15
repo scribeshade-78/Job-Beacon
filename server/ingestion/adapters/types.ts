@@ -40,6 +40,20 @@ export interface DiscoveryAdapter<TConfig extends DiscoveryAdapterConfig = Disco
   ): Promise<DiscoveredVacancy[]>;
 
   /**
+   * Whether discover() returned this target's COMPLETE current listing set.
+   *
+   * ABSENT MEANS TRUE — the board semantics Greenhouse/Lever have: the target IS the
+   * whole board, so anything the run did not see is genuinely gone.
+   *
+   * A source that returns one bounded page of a much larger corpus MUST set this false.
+   * The worker expires every still-active vacancy for the target that the run did not
+   * see, and one page is not evidence that the rest of the corpus disappeared. The Muse
+   * serves twenty per page out of hundreds of thousands, so claiming completeness there
+   * would erase that source's live corpus on its first scheduled run.
+   */
+  readonly completesSweep?: boolean;
+
+  /**
    * Validate that the target config contains required fields.
    * Called before discovery to fail fast on misconfiguration.
    * @param config - Target configuration to validate.

@@ -14,8 +14,13 @@ async function discoverForSource(
   sourceCode: string,
   targetKey: string,
   config: Record<string, unknown>,
-): Promise<DiscoveredVacancy[]> {
-  return getDiscoveryAdapter(sourceCode).discover(targetKey, config as never);
+): Promise<{ vacancies: DiscoveredVacancy[]; completesSweep: boolean }> {
+  const adapter = getDiscoveryAdapter(sourceCode);
+  const vacancies = await adapter.discover(targetKey, config as never);
+
+  // The adapter's own claim about what it just returned. Absence means complete, which
+  // keeps every existing board adapter on exactly the behaviour it had before.
+  return { vacancies, completesSweep: adapter.completesSweep !== false };
 }
 
 export interface RunOneJobResult {
@@ -83,7 +88,7 @@ export async function runOneIngestionJob(client: SupabaseClient): Promise<RunOne
 
     const seenVacancyIds: string[] = [];
 
-    for (const item of discovered) {
+    for (const item of discovered.vacancies) {
       const result = await ingestDiscoveredVacancy(client, vacancySource.source_code, vacancySource.id, item);
       seenVacancyIds.push(result.vacancyId);
 
@@ -103,13 +108,17 @@ export async function runOneIngestionJob(client: SupabaseClient): Promise<RunOne
       }
     }
 
-    await markUnseenVacanciesExpired(client, vacancySource.id, seenVacancyIds);
+    // FRESHNESS ONLY WHEN THE SWEEP WAS COMPLETE. Expiring unseen rows is the right
+    // meaning of a full-board poll; applied to one bounded page it is data loss.
+    if (discovered.completesSweep) {
+      await markUnseenVacanciesExpired(client, vacancySource.id, seenVacancyIds);
+    }
 
     await client.from("source_health_events").insert({
       source_code: vacancySource.source_code,
       vacancy_source_id: vacancySource.id,
       status: "success",
-      vacancies_fetched: discovered.length,
+      vacancies_fetched: discovered.vacancies.length,
       duration_ms: Date.now() - startedAt,
     });
 
@@ -118,7 +127,7 @@ export async function runOneIngestionJob(client: SupabaseClient): Promise<RunOne
       .update({ status: "done", updated_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    return { processed: true, vacanciesFetched: discovered.length };
+    return { processed: true, vacanciesFetched: discovered.vacancies.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 

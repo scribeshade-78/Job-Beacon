@@ -10,6 +10,7 @@ import { leverAdapter } from "./lever.js";
 import { adzunaAdapter } from "./adzuna.js";
 import { usajobsAdapter } from "./usajobs.js";
 import { joobleAdapter } from "./jooble.js";
+import { arbeitnowAdapter, remotiveAdapter, theMuseAdapter } from "./keyless.js";
 
 describe("discoveryAdapterRegistry", () => {
   it("contains the greenhouse adapter", () => {
@@ -37,6 +38,14 @@ describe("discoveryAdapterRegistry", () => {
     expect(discoveryAdapterRegistry.get("jooble")).toBe(joobleAdapter);
   });
 
+  it("contains the keyless scheduled adapters (Step 6)", () => {
+    // Without these, the keyless-ingestion-enqueue task queues jobs the worker cannot
+    // process, and every one fails with "No discovery adapter registered".
+    expect(discoveryAdapterRegistry.get("remotive")).toBe(remotiveAdapter);
+    expect(discoveryAdapterRegistry.get("arbeitnow")).toBe(arbeitnowAdapter);
+    expect(discoveryAdapterRegistry.get("themuse")).toBe(theMuseAdapter);
+  });
+
   it("does not contain unregistered source codes", () => {
     expect(discoveryAdapterRegistry.has("not-a-real-source")).toBe(false);
   });
@@ -48,7 +57,10 @@ describe("discoveryAdapterRegistry", () => {
     expect(codes).toContain("adzuna");
     expect(codes).toContain("usajobs");
     expect(codes).toContain("jooble");
-    expect(codes.length).toBe(5);
+    expect(codes).toContain("remotive");
+    expect(codes).toContain("arbeitnow");
+    expect(codes).toContain("themuse");
+    expect(codes.length).toBe(8);
   });
 });
 

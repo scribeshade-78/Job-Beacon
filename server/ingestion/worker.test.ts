@@ -149,6 +149,23 @@ describe("runOneIngestionJob", () => {
     expect(markUnseenVacanciesExpired).toHaveBeenCalledWith(client, "target-1", ["v1", "v2"]);
   });
 
+  it("does NOT expire unseen vacancies when the adapter's sweep is a bounded page", async () => {
+    // A keyless aggregator returns one page (The Muse: twenty of hundreds of thousands).
+    // Expiring everything the page did not mention would delete most of that source's
+    // live corpus on the first run, so completeness is the adapter's claim to make.
+    const pageBound = { ...greenhouseAdapter, completesSweep: false };
+    vi.mocked(getDiscoveryAdapter).mockReturnValue(pageBound as never);
+    vi.mocked(greenhouseAdapter.discover).mockResolvedValue([{ sourceVacancyId: "1" }] as never);
+    vi.mocked(ingestDiscoveredVacancy).mockResolvedValue({ vacancyId: "v1", outcome: "created" });
+    vi.mocked(markUnseenVacanciesExpired).mockClear();
+
+    const client = makeClient();
+    const result = await runOneIngestionJob(client);
+
+    expect(result).toEqual({ processed: true, vacanciesFetched: 1 });
+    expect(markUnseenVacanciesExpired).not.toHaveBeenCalled();
+  });
+
   it("does not call the adapter and fails the job when discovery_allowed is false", async () => {
     vi.mocked(greenhouseAdapter.discover).mockClear();
     const client = makeClient({ policyResult: { data: { discovery_allowed: false, kill_switch: false }, error: null } });
