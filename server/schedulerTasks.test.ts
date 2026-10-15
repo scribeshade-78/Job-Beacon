@@ -12,8 +12,10 @@ import {
   DEFAULT_DISCOVERY_INTERVAL_MS,
   DEFAULT_FIT_INTERVAL_MS,
   DEFAULT_RANKING_REFRESH_INTERVAL_MS,
+  DEFAULT_INGESTION_DRAIN_INTERVAL_MS,
   DISCOVERY_TASK_NAME,
   FIT_TASK_NAME,
+  INGESTION_DRAIN_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
@@ -26,6 +28,9 @@ vi.mock("./mailbox/poll.js", () => ({ runMailboxPollingBatch: vi.fn() }));
 vi.mock("./mailbox/classifyBatch.js", () => ({ runMessageClassificationBatch: vi.fn() }));
 vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() }));
 vi.mock("./calendar/sync.js", () => ({ runCalendarSyncBatch: vi.fn() }));
+// The ingestion drain reaches the network through its own client. Nothing in this file
+// exercises a real fetch, so the runner is mocked rather than handed the {} client.
+vi.mock("./ingestion/runner.js", () => ({ drainIngestionJobs: vi.fn() }));
 
 // Batch C. The tasks' own coordination is covered by
 // server/opportunities/scheduledRefresh.test.ts; here only registration, cadence
@@ -55,10 +60,15 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
   MAILBOX_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 3).toString("base64"),
 };
 
+// ORDER IS THE CONTRACT, not a set: the scheduler runs due tasks in this order within a
+// tick, and several tests below assert on positions. ingestion-drain sits before the
+// mailbox block deliberately — a drain that overruns its deadline delays whatever follows
+// it, and mail classification is what the candidate actually notices.
 const ALWAYS_ON = [
   FIT_TASK_NAME,
   RANKING_REFRESH_TASK_NAME,
   ANTI_GHOSTING_TASK_NAME,
+  INGESTION_DRAIN_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   DISCOVERY_TASK_NAME,
@@ -136,6 +146,16 @@ describe("buildScheduledTasks", () => {
       DEFAULT_RANKING_REFRESH_INTERVAL_MS,
       DEFAULT_ANTI_GHOSTING_INTERVAL_MS,
     ]);
+  });
+
+  it("drains queued ingestion on its own cadence", () => {
+    // The task that makes the 202 real. Without it, queue-and-return would only move the
+    // work somewhere nothing ever collects it - the same shape as the old refresh route,
+    // which drained a queue nothing filled.
+    const task = taskByName(INGESTION_DRAIN_TASK_NAME, { SCHEDULER_INGESTION_DRAIN_INTERVAL_MS: "30000" });
+
+    expect(task.intervalMs).toBe(30_000);
+    expect(taskByName(INGESTION_DRAIN_TASK_NAME).intervalMs).toBe(DEFAULT_INGESTION_DRAIN_INTERVAL_MS);
   });
 
   it("lets each cadence be retuned without editing code", () => {

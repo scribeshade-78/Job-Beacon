@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { drainIngestionJobs } from "./ingestion/runner.js";
 import {
   readScheduledRefreshBudget,
   runScheduledDiscovery,
@@ -31,10 +32,23 @@ import type { ScheduledTask } from "./schedulerLoop.js";
  * mean applications leaving the building on a schedule the candidate never
  * approved. Submission stays behind its own explicit trigger.
  *
- * No ingestion and no mailbox polling. Both reach the network and need
- * credentials this scheduler does not have to own, and neither was asked for.
- * Adding a task here is one entry in the array below, so the decision stays
- * cheap to revisit - but it is a decision, not a default.
+ * INGESTION IS HERE NOW, AND THAT IS A RECENT CHANGE - the original position was "no
+ * ingestion and no mailbox polling: both reach the network and need credentials this
+ * scheduler does not have to own, and neither was asked for." Mailbox polling arrived with
+ * Google OAuth. Ingestion arrives because of a MEASURED DEFECT rather than a preference:
+ *
+ *   POST /api/opportunities/refresh used to AWAIT the whole batch. One job is one board,
+ *   and boards are not small - a real Stripe board of 726 postings took 392s end to end
+ *   (measured, scripts/discovery-live.ts) against ~42s for Vercel's 90. No browser, proxy
+ *   or gateway holds a request open that long, so the candidate was shown a failure while
+ *   the work carried on and succeeded. Draining moves here, where overrunning costs a tick
+ *   instead of a user's request; the route now enqueues and returns 202.
+ *
+ * THE DEADLINE IS CHECKED BETWEEN JOBS, NOT DURING ONE, so a single oversized board can
+ * still overrun a tick. Bounding a job in flight is possible but NOT safe on its own:
+ * worker.ts calls markUnseenVacanciesExpired after ingesting, so stopping a fetch early
+ * would mark every not-yet-reached vacancy EXPIRED - live jobs vanishing from the feed.
+ * An in-flight deadline has to suppress that sweep, and that is a separate change.
  *
  * Both tasks that ARE here are drains of a queue that something else fills, and
  * both are idempotent: fit_analysis_jobs is leased with FOR UPDATE SKIP LOCKED,
@@ -62,6 +76,28 @@ export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
 export const MAILBOX_CLASSIFY_TASK_NAME = "mailbox-classify";
 export const MAILBOX_MATCH_TASK_NAME = "mailbox-match";
 export const CALENDAR_SYNC_TASK_NAME = "calendar-sync";
+export const INGESTION_DRAIN_TASK_NAME = "ingestion-drain";
+
+/**
+ * How often queued discovery work is drained.
+ *
+ * Short is cheap: an empty queue is a single no-op claim, so a cadence faster than the work
+ * arrives costs one round trip. Two minutes keeps a button press feeling responsive without
+ * turning the scheduler into a poller.
+ */
+export const DEFAULT_INGESTION_DRAIN_INTERVAL_MS = 2 * 60_000;
+
+/** Caps jobs per tick. The queue is normally near-empty, so this is a backstop, not a target. */
+export const DEFAULT_INGESTION_DRAIN_MAX_JOBS = 5;
+
+/**
+ * Wall-clock budget for the drain, well inside the 5-minute claim lease.
+ *
+ * A job whose lease expires while still running becomes claimable again, and a second
+ * worker would start a duplicate fetch of the same board. Staying under the lease is what
+ * keeps one slow board from being fetched twice.
+ */
+export const DEFAULT_INGESTION_DRAIN_DEADLINE_MS = 4 * 60_000;
 
 /**
  * Mail polling every five minutes, matching POLL_INTERVAL_MS inside poll.ts:
@@ -344,6 +380,27 @@ export function buildScheduledTasks(
           failed: result.failed,
           ...(failures.length > 0 ? { failures } : {}),
         };
+      },
+    },
+
+    /**
+     * Ingestion drain. Placed before the mailbox block rather than after, because every
+     * task in this array shares the tick: a drain that overruns its deadline delays
+     * everything behind it, and mailbox classification is what the candidate notices.
+     *
+     * It QUEUES NOTHING. Whatever the button enqueued, or a future scheduled-pull task
+     * enqueues, is what gets drained - so this task can be enabled, disabled or reordered
+     * without changing what the feed contains.
+     */
+    {
+      name: INGESTION_DRAIN_TASK_NAME,
+      intervalMs: readEnvInt("SCHEDULER_INGESTION_DRAIN_INTERVAL_MS", DEFAULT_INGESTION_DRAIN_INTERVAL_MS, env),
+      run: async () => {
+        const result = await drainIngestionJobs(client, {
+          maxJobs: readEnvInt("SCHEDULER_INGESTION_DRAIN_MAX_JOBS", DEFAULT_INGESTION_DRAIN_MAX_JOBS, env),
+          deadlineMs: readEnvInt("SCHEDULER_INGESTION_DRAIN_DEADLINE_MS", DEFAULT_INGESTION_DRAIN_DEADLINE_MS, env),
+        });
+        return { ...result };
       },
     },
 

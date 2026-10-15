@@ -44,18 +44,58 @@ export interface RunIngestionBatchOptions {
 export interface IngestionTargetOutcome {
   sourceCode: string;
   targetKey: string;
-  status: "fetched" | "skipped_recent" | "skipped_queued" | "failed";
+  /**
+   * "queued" means this call put the target INTO the queue and did not wait for it.
+   * It is the only status the HTTP path can now produce, because the HTTP path no
+   * longer drains.
+   */
+  status: "queued" | "fetched" | "skipped_recent" | "skipped_queued" | "failed";
   vacanciesFetched: number;
   /** Present when status is skipped_recent and the last run errored. */
   lastError?: string;
 }
 
-export interface RunIngestionBatchResult {
+export interface EnqueueIngestionBatchResult {
   targets: IngestionTargetOutcome[];
-  vacanciesFetched: number;
-  failed: number;
+  /**
+   * Targets this call put INTO the queue. Deliberately distinct from skippedQueued,
+   * which is targets already in it — a caller reporting "started 3 refreshes" must not
+   * be counting work somebody else queued.
+   */
+  enqueued: number;
   skippedRecent: number;
   skippedQueued: number;
+}
+
+export interface RunIngestionBatchResult extends EnqueueIngestionBatchResult {
+  vacanciesFetched: number;
+  failed: number;
+}
+
+export interface DrainIngestionJobsOptions {
+  /** Caps how many queued jobs one call claims. Defaults to 10. */
+  maxJobs?: number;
+  /**
+   * Wall-clock budget, checked BEFORE each claim. This is the real bound: maxJobs counts
+   * JOBS, and a single job is a whole board — a 726-posting board took 392s in
+   * production. Without a deadline, "drain up to 10 jobs" is unbounded in the dimension
+   * that actually matters.
+   */
+  deadlineMs?: number;
+  /** Injectable clock — tests only. */
+  now?: () => Date;
+}
+
+export interface DrainIngestionJobsResult {
+  processed: number;
+  stoppedOnDeadline: boolean;
+}
+
+export interface IngestionQueueStatus {
+  pending: number;
+  leased: number;
+  /** True while anything is queued or in flight — the condition a "refreshing" UI waits on. */
+  running: boolean;
 }
 
 interface VacancySourceRow {
@@ -72,18 +112,38 @@ interface HealthRow {
   run_at: string;
 }
 
-export async function runIngestionBatch(
+interface EnqueueInternals {
+  result: EnqueueIngestionBatchResult;
+  /** Rows this call queued, in the order they were queued. */
+  enqueuedTargets: VacancySourceRow[];
+  /** Set only when something was queued — the attribution window's lower bound. */
+  batchStart: string | null;
+}
+
+/**
+ * THE ENQUEUE HALF, ON ITS OWN.
+ *
+ * This is everything runIngestionBatch used to do before its drain loop, factored out so
+ * the HTTP route can queue work and return immediately. The drain is what costs minutes,
+ * and a request that blocks for minutes is a request that times out somewhere between the
+ * browser and this process — while the work itself succeeded, so the candidate sees a
+ * failure and the system sees a success.
+ *
+ * All the quota protection lives here rather than in the drain: the per-target cooldown
+ * and the one-live-job-per-target check are what stand between a candidate-pressable
+ * button and Jooble's lifetime 500-request allowance. Moving the drain off the request
+ * path must not move those with it.
+ */
+async function enqueueInternal(
   client: SupabaseClient,
-  options: RunIngestionBatchOptions = {},
-): Promise<RunIngestionBatchResult> {
-  const maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
+  options: RunIngestionBatchOptions,
+): Promise<EnqueueInternals> {
   const minIntervalMinutes = options.minIntervalMinutes ?? DEFAULT_MIN_INTERVAL_MINUTES;
   const now = (options.now ?? (() => new Date()))();
 
-  const result: RunIngestionBatchResult = {
+  const result: EnqueueIngestionBatchResult = {
     targets: [],
-    vacanciesFetched: 0,
-    failed: 0,
+    enqueued: 0,
     skippedRecent: 0,
     skippedQueued: 0,
   };
@@ -103,7 +163,7 @@ export async function runIngestionBatch(
   const targets = (sourceRows ?? []) as VacancySourceRow[];
 
   if (targets.length === 0) {
-    return result;
+    return { result, enqueuedTargets: [], batchStart: null };
   }
 
   const cooldownStart = new Date(now.getTime() - minIntervalMinutes * 60_000).toISOString();
@@ -168,7 +228,7 @@ export async function runIngestionBatch(
   }
 
   if (enqueued.length === 0) {
-    return result;
+    return { result, enqueuedTargets: [], batchStart: null };
   }
 
   const { error: insertError } = await client.from("ingestion_jobs").insert(
@@ -182,7 +242,130 @@ export async function runIngestionBatch(
     throw insertError;
   }
 
-  const batchStart = now.toISOString();
+  // A queued target is REPORTED as queued, not as fetched. Nothing has been fetched yet.
+  for (const target of enqueued) {
+    result.targets.push({
+      sourceCode: target.source_code,
+      targetKey: target.target_key,
+      status: "queued",
+      vacanciesFetched: 0,
+    });
+  }
+  result.enqueued = enqueued.length;
+
+  return { result, enqueuedTargets: enqueued, batchStart: now.toISOString() };
+}
+
+/**
+ * Queues discovery work for every enabled target that is eligible, and returns without
+ * waiting for any of it. The counterpart half of runIngestionBatch; see enqueueInternal.
+ */
+export async function enqueueIngestionBatch(
+  client: SupabaseClient,
+  options: RunIngestionBatchOptions = {},
+): Promise<EnqueueIngestionBatchResult> {
+  return (await enqueueInternal(client, options)).result;
+}
+
+/**
+ * Claims and processes queued jobs, bounded by maxJobs and by a wall-clock deadline.
+ *
+ * WHY A DEADLINE IS NOT OPTIONAL FOR A BACKGROUND CALLER. maxJobs bounds TARGETS, not
+ * POSTINGS: one job is one board, and boards range from 10 postings (~8s) to 726 (~392s).
+ * A caller that wants to run inside a scheduler tick has to say how long it is willing to
+ * spend, or the tick overruns whatever cadence it was put on.
+ */
+export async function drainIngestionJobs(
+  client: SupabaseClient,
+  options: DrainIngestionJobsOptions = {},
+): Promise<DrainIngestionJobsResult> {
+  const maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
+  const now = options.now ?? (() => new Date());
+  const deadline = options.deadlineMs === undefined ? null : now().getTime() + options.deadlineMs;
+
+  let processed = 0;
+
+  for (let claimed = 0; claimed < maxJobs; claimed += 1) {
+    if (deadline !== null && now().getTime() >= deadline) {
+      return { processed, stoppedOnDeadline: true };
+    }
+
+    let job;
+    try {
+      job = await runOneIngestionJob(client);
+    } catch (error) {
+      // An infra-level claim failure (the RPC itself), not a per-target outcome — there is
+      // no source to attribute it to. Stop draining rather than looping against a broken
+      // queue, matching the attempt-drain loop in server/applications/runner.ts.
+      console.error("[ingestion:runner] claim failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { processed, stoppedOnDeadline: false };
+    }
+
+    if (!job.processed) {
+      return { processed, stoppedOnDeadline: false };
+    }
+
+    processed += 1;
+  }
+
+  return { processed, stoppedOnDeadline: false };
+}
+
+/**
+ * How much work is queued or in flight, for the UI that triggered it.
+ *
+ * The 202 tells a candidate their request was accepted; without this they have no way to
+ * learn whether it finished, failed, or is still going. Deliberately two COUNT queries
+ * rather than a paged read of the rows: the caller wants to render a state, not a list.
+ */
+export async function readIngestionQueueStatus(
+  client: SupabaseClient,
+): Promise<IngestionQueueStatus> {
+  const countWhere = async (status: "pending" | "leased"): Promise<number> => {
+    const { count, error } = await client
+      .from("ingestion_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("status", status);
+    if (error) throw error;
+    return count ?? 0;
+  };
+
+  const pending = await countWhere("pending");
+  const leased = await countWhere("leased");
+
+  return { pending, leased, running: pending > 0 || leased > 0 };
+}
+
+/**
+ * Enqueue AND drain, in one call. Kept because the admin worker task and the external
+ * scheduler trigger both want "do the whole thing now"; the candidate-facing HTTP route
+ * uses enqueueIngestionBatch instead and lets the scheduler do the draining.
+ */
+export async function runIngestionBatch(
+  client: SupabaseClient,
+  options: RunIngestionBatchOptions = {},
+): Promise<RunIngestionBatchResult> {
+  const internals = await enqueueInternal(client, options);
+  const result: RunIngestionBatchResult = {
+    ...internals.result,
+    // The enqueue phase records every queued target so the 202 body can name them. Here
+    // they are DROPPED, because the attribution loop below replaces each one with what
+    // actually happened to it — keeping both would report every target twice, once as
+    // "queued" and once as its outcome.
+    targets: internals.result.targets.filter((target) => target.status !== "queued"),
+    vacanciesFetched: 0,
+    failed: 0,
+  };
+
+  if (internals.enqueuedTargets.length === 0) {
+    return result;
+  }
+
+  const enqueued = internals.enqueuedTargets;
+  const batchStart = internals.batchStart!;
+  const maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
 
   for (let processed = 0; processed < maxJobs; processed += 1) {
     let job;

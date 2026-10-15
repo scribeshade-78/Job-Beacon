@@ -142,7 +142,7 @@ const MAX_FIT_ANALYSES_PER_DISCOVERY = 5;
  * was left queued rather than pretending the work finished.
  */
 const FIT_ANALYSIS_BUDGET_MS = 45_000;
-import { runIngestionBatch } from "./ingestion/runner.js";
+import { enqueueIngestionBatch, readIngestionQueueStatus } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
 import { loadLocationOptions } from "./opportunities/locationOptions.js";
@@ -756,8 +756,20 @@ export function createApp(options: CreateAppOptions = {}) {
   // Unlike the /api/worker/* routes below (external-scheduler driven, worker
   // secret), this one is deliberately reachable by any signed-in candidate —
   // that is the feature. The quota danger that creates is handled inside
-  // runIngestionBatch's per-target cooldown; this limiter only bounds request
-  // volume so one candidate cannot spin the endpoint.
+  // enqueueIngestionBatch's per-target cooldown; this limiter only bounds
+  // request volume so one candidate cannot spin the endpoint.
+  //
+  // IT QUEUES AND RETURNS 202. IT DOES NOT DRAIN, AND THAT IS THE POINT.
+  // This route used to await the whole batch. A single job is a whole board, and boards
+  // are not small: a real Stripe board of 726 postings measured 392s end to end
+  // (scripts/discovery-live.ts), against ~42s for Vercel's 90. A request that holds for
+  // minutes is killed by whatever sits in front of this process first — browser, proxy or
+  // gateway — and the candidate is told the fetch failed while the work carries on and
+  // succeeds. 202 says only what is true: the work is accepted and not yet done.
+  //
+  // The per-target cooldown and the one-live-job-per-target check still run here, inside
+  // enqueueIngestionBatch. Those are the quota guard (Jooble's free plan is a LIFETIME
+  // 500 requests); they must stay on the request path even though the draining leaves it.
   const ingestionRefreshRateLimit = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 6,
@@ -773,13 +785,35 @@ export function createApp(options: CreateAppOptions = {}) {
     ingestionRefreshRateLimit,
     async (_request: AuthenticatedRequest, response) => {
       try {
-        const result = await runIngestionBatch(resolveServiceClient());
+        const result = await enqueueIngestionBatch(resolveServiceClient());
         response.set("Cache-Control", "no-store");
-        response.status(200).json(result);
+        // 202, not 200: accepted for processing, not finished. The body reports what was
+        // queued so the UI can say "refreshing 2 sources" instead of guessing.
+        response.status(202).json({ status: "queued", ...result });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error("Opportunity refresh failed:", message);
         response.status(500).json({ error: "Failed to refresh opportunities" });
+      }
+    },
+  );
+
+  // The MONITOR half of trigger-and-monitor. The 202 above says "accepted"; this says
+  // whether it is still going, so the UI can settle instead of polling forever or giving
+  // up while the scheduler is still working. Shares the same auth and limiter: reading a
+  // queue depth is cheap, but it is candidate-scoped data and the limiter already exists.
+  app.get(
+    "/api/opportunities/refresh",
+    requireAuth,
+    async (_request: AuthenticatedRequest, response) => {
+      try {
+        const status = await readIngestionQueueStatus(resolveServiceClient());
+        response.set("Cache-Control", "no-store");
+        response.status(200).json(status);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Opportunity refresh status failed:", message);
+        response.status(500).json({ error: "Failed to read refresh status" });
       }
     },
   );

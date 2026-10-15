@@ -11,7 +11,7 @@ import { runMessageClassificationBatch } from "./mailbox/classifyBatch.js";
 import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
-import { runIngestionBatch } from "./ingestion/runner.js";
+import { enqueueIngestionBatch, readIngestionQueueStatus, runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
 import { IntakePolicyError } from "./intake/intake.js";
@@ -145,6 +145,8 @@ vi.mock("./billing/stripe.js", async () => {
 // server/ingestion/runner.test.ts; here only auth-gating and response wiring.
 vi.mock("./ingestion/runner.js", () => ({
   runIngestionBatch: vi.fn(),
+  enqueueIngestionBatch: vi.fn(),
+  readIngestionQueueStatus: vi.fn(),
 }));
 
 // POST /api/opportunities/bulk-apply — internals covered by
@@ -506,9 +508,71 @@ describe("POST /api/vacancies/:vacancyId/reports", () => {
 
 describe("POST /api/opportunities/refresh", () => {
   const mockedRunIngestionBatch = vi.mocked(runIngestionBatch);
+  const mockedEnqueue = vi.mocked(enqueueIngestionBatch);
+  const mockedQueueStatus = vi.mocked(readIngestionQueueStatus);
 
   beforeEach(() => {
     mockedRunIngestionBatch.mockReset();
+    mockedEnqueue.mockReset();
+    mockedQueueStatus.mockReset();
+  });
+
+  it("GET reports whether the queued refresh is still running", async () => {
+    // The MONITOR half. Without it the 202 is a dead end: the UI knows a request was
+    // accepted and has no way to learn that the scheduler finished it.
+    mockedQueueStatus.mockResolvedValueOnce({ pending: 2, leased: 1, running: true });
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, {
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ pending: 2, leased: 1, running: true });
+      },
+    );
+  });
+
+  it("GET returns 401 when unauthenticated, like its POST sibling", async () => {
+    await withTestServer({ verifyAccessToken: testVerifier }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`);
+      expect(response.status).toBe(401);
+      expect(mockedQueueStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 202 immediately and does NOT drain, so a large board cannot time the request out", async () => {
+    // The measured failure this encodes: 726 postings / 392s through the synchronous
+    // path. The route must hand back a queued acknowledgement and let the scheduler
+    // drain, which is the only place a multi-minute job belongs.
+    mockedEnqueue.mockResolvedValueOnce({
+      targets: [
+        { sourceCode: "greenhouse", targetKey: "stripe", status: "queued", vacanciesFetched: 0 },
+      ],
+      enqueued: 1,
+      skippedRecent: 0,
+      skippedQueued: 0,
+    } as never);
+
+    await withTestServer(
+      { verifyAccessToken: testVerifier, serviceClient: {} as never },
+      async (testBaseUrl) => {
+        const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, {
+          method: "POST",
+          headers: { Authorization: "Bearer valid-test-token" },
+        });
+
+        expect(response.status).toBe(202);
+        const body = await response.json();
+        expect(body.status).toBe("queued");
+        expect(body.enqueued).toBe(1);
+        expect(mockedEnqueue).toHaveBeenCalledTimes(1);
+        // The synchronous drain is no longer this route's job.
+        expect(mockedRunIngestionBatch).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("returns 401 when unauthenticated", async () => {
@@ -520,38 +584,13 @@ describe("POST /api/opportunities/refresh", () => {
     });
   });
 
-  it("returns 200 with the batch summary for a signed-in candidate", async () => {
-    const batchResult = {
-      targets: [
-        { sourceCode: "jooble", targetKey: "us-data-engineer", status: "fetched" as const, vacanciesFetched: 50 },
-        { sourceCode: "usajobs", targetKey: "us-data-engineer", status: "skipped_recent" as const, vacanciesFetched: 0 },
-      ],
-      vacanciesFetched: 50,
-      failed: 0,
-      skippedRecent: 1,
-      skippedQueued: 0,
-    };
-    mockedRunIngestionBatch.mockResolvedValueOnce(batchResult);
+  // REPLACED: this test used to assert a 200 carrying the drained batch summary. That
+  // contract is the defect - it meant the candidate's request held open for the whole
+  // drain. The 202 test above asserts the replacement, including that drainIngestion is
+  // no longer called from the request path at all.
 
-    await withTestServer(
-      { verifyAccessToken: testVerifier, serviceClient: {} as never },
-      async (testBaseUrl) => {
-        const response = await fetch(`${testBaseUrl}/api/opportunities/refresh`, {
-          method: "POST",
-          headers: { Authorization: "Bearer valid-test-token" },
-        });
-
-        expect(response.status).toBe(200);
-        expect(await response.json()).toEqual(batchResult);
-        // The route must hand the batch the service-role client, never a
-        // request-scoped one — ingestion reads source_policies/vacancy_sources.
-        expect(mockedRunIngestionBatch).toHaveBeenCalledTimes(1);
-      },
-    );
-  });
-
-  it("returns 500 with a generic message when the batch throws", async () => {
-    mockedRunIngestionBatch.mockRejectedValueOnce(new Error("claim_ingestion_job exploded"));
+  it("returns 500 with a generic message when queueing throws", async () => {
+    mockedEnqueue.mockRejectedValueOnce(new Error("claim_ingestion_job exploded"));
 
     await withTestServer(
       { verifyAccessToken: testVerifier, serviceClient: {} as never },

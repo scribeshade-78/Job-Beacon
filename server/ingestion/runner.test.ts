@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runIngestionBatch } from "./runner.js";
+import { enqueueIngestionBatch, runIngestionBatch } from "./runner.js";
 import { runOneIngestionJob } from "./worker.js";
 
 vi.mock("./worker.js", () => ({
@@ -196,6 +196,9 @@ describe("runIngestionBatch", () => {
 
     expect(result).toEqual({
       targets: [],
+      // Additive with the enqueue/drain split: the same call now reports how many targets
+      // it QUEUED as well as how many it skipped.
+      enqueued: 0,
       vacanciesFetched: 0,
       failed: 0,
       skippedRecent: 0,
@@ -258,5 +261,60 @@ describe("runIngestionBatch", () => {
     const gte = health.calls.find((call) => call.method === "gte")!;
     expect(gte.args[0]).toBe("run_at");
     expect(gte.args[1]).toBe("2026-09-17T11:30:00.000Z");
+  });
+});
+
+describe("enqueueIngestionBatch — the asynchronous half", () => {
+  // THE WHOLE POINT OF THE SPLIT. The HTTP route must return before any third-party
+  // fetch happens. A real Stripe board of 726 postings took 392s through the synchronous
+  // path (measured, scripts/discovery-live.ts); no proxy, gateway or browser holds a
+  // request that long, so the candidate saw a failure while the work actually succeeded.
+
+  it("enqueues the work and processes NONE of it", async () => {
+    const { client, jobs } = makeClient({ targets: [JOOBLE, USAJOBS] });
+
+    const result = await enqueueIngestionBatch(client);
+
+    expect(insertedSourceIds(jobs)).toEqual(["jooble", "usajobs"]);
+    expect(mockedRunOneJob).not.toHaveBeenCalled();
+    expect(result.enqueued).toBe(2);
+  });
+
+  it("still refuses to stack a second job on a target that already has one", async () => {
+    const { client, jobs } = makeClient({
+      targets: [JOOBLE],
+      hasPendingByTarget: { [JOOBLE.id]: true },
+    });
+
+    const result = await enqueueIngestionBatch(client);
+
+    expect(jobs.calls.some((call) => call.method === "insert")).toBe(false);
+    expect(result.skippedQueued).toBe(1);
+    expect(result.enqueued).toBe(0);
+    expect(mockedRunOneJob).not.toHaveBeenCalled();
+  });
+
+  it("still honours the per-target cooldown, so the quota guard survives the refactor", async () => {
+    // Jooble's free plan is a lifetime 500-request quota. The cooldown is the only thing
+    // standing between a candidate-pressable button and that allowance, and it must not
+    // be lost while the drain is being moved off the request path.
+    const { client, jobs } = makeClient({
+      targets: [JOOBLE],
+      recentByTarget: { [JOOBLE.id]: { status: "success", vacancies_fetched: 50 } },
+    });
+
+    const result = await enqueueIngestionBatch(client);
+
+    expect(jobs.calls.some((call) => call.method === "insert")).toBe(false);
+    expect(result.skippedRecent).toBe(1);
+    expect(result.enqueued).toBe(0);
+    expect(mockedRunOneJob).not.toHaveBeenCalled();
+  });
+
+  it("reports no work rather than failing when nothing is enqueueable", async () => {
+    const { client } = makeClient({ targets: [] });
+    const result = await enqueueIngestionBatch(client);
+    expect(result.enqueued).toBe(0);
+    expect(result.targets).toEqual([]);
   });
 });
