@@ -562,13 +562,16 @@ function buildRequestBody(
     companysearch: config.companySearch === true ? "true" : "false",
   };
 
-  if (config.radius !== undefined) {
+  // `!= null`, NOT `!== undefined`. An explicit null arrives from vacancy_sources.config
+  // (jsonb), and treating it as "supplied" sent the literal string "null" as a query value
+  // — a filter Jooble would have to interpret rather than an absent one.
+  if (config.radius != null) {
     body.radius = String(config.radius);
   }
-  if (config.salary !== undefined) {
+  if (config.salary != null) {
     body.salary = String(config.salary);
   }
-  if (config.searchMode !== undefined) {
+  if (config.searchMode != null) {
     body.SearchMode = String(config.searchMode);
   }
 
@@ -803,7 +806,15 @@ export async function discoverJooble(
       { fetchImpl, pacer, minIntervalMs, maxRetries, retryBaseDelayMs, runState, maxRequestsPerRun },
     );
 
-    if (!Array.isArray(body.jobs)) {
+    // A NULL BODY IS A SHAPE PROBLEM, NOT A CRASH. The JSON parser returns a literal null
+    // happily, so the cast inside postJoobleSearch cannot be trusted to have produced an
+    // object — `body.jobs` would throw the very TypeError this guard exists to replace,
+    // and the worker stores that message as the source's health error.
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !Array.isArray(body.jobs)
+    ) {
       throw new Error(
         "Jooble returned HTTP 200 but the response contained no 'jobs' array for " +
           REDACTED_JOOBLE_ENDPOINT +

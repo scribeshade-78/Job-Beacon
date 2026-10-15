@@ -569,3 +569,56 @@ describe("joobleAdapter (registry wrapper)", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 8 — the two narrow gaps left after the cross-adapter audit.
+ *
+ * The dangerous class was already covered in this adapter: `Array.isArray(body.jobs)`
+ * guards the mapping, JSON parsing is caught, and normalizeJoobleJob skips and dedupes.
+ * These are the edges of that guard, plus the request-side option handling.
+ */
+describe("jooble payload and option hardening", () => {
+  it("names the shape problem when a 200 body is null, instead of dereferencing it", async () => {
+    // The JSON parser returns a literal null happily, so the cast to JoobleSearchResponse
+    // cannot be trusted: `body.jobs` would throw the very TypeError the guard exists to
+    // replace, and the worker would store that stack trace as the source's health error.
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => null,
+    }) as unknown as typeof fetch;
+
+    await expect(discoverJooble({ ...searchConfig, ...fast }, credentials, fetchImpl)).rejects.toThrow(
+      /no 'jobs' array/,
+    );
+  });
+
+  it("does not send an optional parameter that is explicitly null", async () => {
+    // null arrives from vacancy_sources.config (jsonb), and `!== undefined` treated it as
+    // supplied — sending the literal string "null" as a query value.
+    const fetchImpl = fixtureFetch();
+    const config = {
+      ...searchConfig,
+      ...fast,
+      radius: null,
+      salary: null,
+      searchMode: null,
+    } as unknown as Parameters<typeof discoverJooble>[0];
+
+    await discoverJooble(config, credentials, fetchImpl);
+
+    const body = callJsonBody(fetchImpl);
+    expect(body).not.toHaveProperty("radius");
+    expect(body).not.toHaveProperty("salary");
+    expect(body).not.toHaveProperty("SearchMode");
+  });
+
+  it("still sends an option that is genuinely provided", async () => {
+    const fetchImpl = fixtureFetch();
+
+    await discoverJooble({ ...searchConfig, ...fast, radius: "80" }, credentials, fetchImpl);
+
+    expect(callJsonBody(fetchImpl).radius).toBe("80");
+  });
+});
