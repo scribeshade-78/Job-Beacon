@@ -36,6 +36,31 @@ export const FIT_ANALYSIS_PROMPT_VERSION = "fit-analysis-v1";
  */
 export const DEFAULT_FIT_MODEL = "~deepseek/deepseek-flash-latest";
 
+/**
+ * The output ceiling for the fit call.
+ *
+ * THE SAME 402 THE GENERATORS ALREADY DOCUMENT. Without a ceiling the SDK asks the provider
+ * for the model's maximum, and OpenRouter refuses any request whose max_tokens exceeds the
+ * account's remaining credit even though the real response is far smaller. Observed live
+ * against ~deepseek/deepseek-flash-latest: "You requested up to 131072 tokens, but can only
+ * afford 905" - no fit analysis could complete at all. See
+ * applications/resumeGenerator.ts's MODEL_MAX_OUTPUT_TOKENS for the full reasoning.
+ *
+ * WHY 2048 AND NOT THE GENERATORS' 4096. Those emit a whole resume or cover letter. This
+ * response is six rationales plus three short arrays, and MEASURED against a real resume and
+ * real vacancies it runs about 1,000-1,200 output tokens (two live analyses: 1,020 and
+ * 1,192), so 2048 is roughly 1.7x the observed maximum. This call also runs PER VACANCY, the
+ * highest volume in the system, so the reservation is paid against every catalogue row and a
+ * ceiling closer to the real payload is what keeps each request affordable.
+ *
+ * IT REMAINS A CEILING, NOT A TARGET. The headroom is thinner than the generators' 2.7x, and
+ * that is a deliberate trade rather than an oversight: a truncated response fails LOUDLY -
+ * finish_reason "length" leaves malformed JSON, which becomes a MalformedFitAnalysisError and
+ * a retry - so the cost of being wrong is one retry, not a silently bad score. Raise the
+ * ceiling if a larger payload is ever observed.
+ */
+export const FIT_MAX_OUTPUT_TOKENS = 2048;
+
 export const FIT_DIMENSIONS = [
   "core_technical_skills",
   "cloud_alignment",
@@ -227,6 +252,10 @@ export async function analyzeTechnicalFit(
       { role: "user", content: renderInput(input) },
     ],
     response_format: FIT_RESPONSE_FORMAT,
+    // See FIT_MAX_OUTPUT_TOKENS: without this the SDK reserves the model's maximum for every
+    // vacancy scored, which both unbounds a runaway generation and makes the request
+    // unaffordable on a credit-metered provider.
+    max_tokens: FIT_MAX_OUTPUT_TOKENS,
   });
 
   const content = completion.choices[0]?.message?.content;

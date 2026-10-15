@@ -4,6 +4,7 @@ import {
   isValidRawFitAnalysis,
   MalformedFitAnalysisError,
   FIT_DIMENSIONS,
+  FIT_MAX_OUTPUT_TOKENS,
   type RawFitAnalysis,
 } from "./fitPrompt.js";
 
@@ -81,5 +82,27 @@ describe("analyzeTechnicalFit", () => {
     await expect(
       analyzeTechnicalFit(fakeClient(JSON.stringify({ ...wellFormed(), overall: -5 })), input),
     ).rejects.toBeInstanceOf(MalformedFitAnalysisError);
+  });
+
+  it("bounds max_tokens, so the provider's reservation cannot exceed the account's credit", async () => {
+    // THE 402 THE GENERATORS ALREADY DOCUMENT (see MODEL_MAX_OUTPUT_TOKENS in
+    // applications/resumeGenerator.ts). Without a ceiling the SDK asks for the model's
+    // maximum, and OpenRouter refuses a request whose max_tokens exceeds the remaining
+    // credit even though the real response is a few hundred tokens. Observed live against
+    // ~deepseek/deepseek-flash-latest: "You requested up to 131072 tokens, but can only
+    // afford 905" - so this call, which runs PER VACANCY, could not complete at all.
+    const create = vi.fn().mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify(wellFormed()) } }],
+    });
+    const client = { chat: { completions: { create } } } as never;
+
+    await analyzeTechnicalFit(client, input);
+
+    // Asserted on the constant first, so a missing export cannot pass as a missing value.
+    expect(FIT_MAX_OUTPUT_TOKENS).toBeGreaterThan(1024);
+    expect(FIT_MAX_OUTPUT_TOKENS).toBeLessThan(8192);
+
+    const request = create.mock.calls[0][0] as { max_tokens?: number };
+    expect(request.max_tokens).toBe(FIT_MAX_OUTPUT_TOKENS);
   });
 });
