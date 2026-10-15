@@ -14,7 +14,8 @@ insert into candidate_profiles (id) values
   ('22222222-7004-1111-1111-111111111111');
 
 insert into source_policies (source_code, authentication_method, policy_version, countries)
-values ('greenhouse', 'none', 'r2-v1', array['US']);
+values ('greenhouse', 'none', 'r2-v1', array['US'])
+on conflict (source_code) do nothing;
 
 insert into companies (id, displayed_name, domain)
 values ('cccccccc-7004-1111-1111-111111111111', 'Applyco', 'applyco.example');

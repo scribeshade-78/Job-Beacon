@@ -16,7 +16,8 @@ insert into candidate_profiles (id) values ('11111111-9000-1111-1111-11111111111
 insert into automation_authorizations (candidate_id, status, consent_version)
 values ('11111111-9000-1111-1111-111111111111', 'authorized', 'r1-v1');
 insert into source_policies (source_code, authentication_method, policy_version, countries)
-values ('greenhouse', 'none', 'r2-v1', array['US']);
+values ('greenhouse', 'none', 'r2-v1', array['US'])
+on conflict (source_code) do nothing;
 insert into companies (id, displayed_name, domain)
 values ('cccccccc-9000-1111-1111-111111111111', 'Applyco', 'applyco.example');
 insert into vacancy_sources (id, source_code, target_key)

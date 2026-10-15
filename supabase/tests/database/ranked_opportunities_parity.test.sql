@@ -43,7 +43,8 @@ insert into candidate_profiles (id) values
   ('b2b2b2b2-2222-2222-2222-222222222222');
 
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('pgtap_fixture', 'none', 'r2-v1');
+values ('pgtap_fixture', 'none', 'r2-v1')
+on conflict (source_code) do nothing;
 insert into vacancy_sources (id, source_code, target_key)
 values ('c3c3c3c3-3333-3333-3333-333333333333', 'pgtap_fixture', 'pgtap');
 

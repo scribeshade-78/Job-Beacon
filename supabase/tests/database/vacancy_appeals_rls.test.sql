@@ -12,7 +12,8 @@ insert into user_roles (user_id, role) values
   ('22222222-7777-1111-1111-111111111111', 'moderator');
 
 insert into source_policies (source_code, authentication_method, policy_version, countries)
-values ('greenhouse', 'none', 'r2-v1', array['US']);
+values ('greenhouse', 'none', 'r2-v1', array['US'])
+on conflict (source_code) do nothing;
 
 insert into companies (id, displayed_name, domain)
 values ('cccccccc-7777-1111-1111-111111111111', 'Appealco', 'appealco.example');

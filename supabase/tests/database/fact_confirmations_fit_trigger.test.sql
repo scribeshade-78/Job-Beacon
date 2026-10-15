@@ -25,7 +25,8 @@ insert into fact_confirmations (extracted_fact_id, status)
 values ('dddddddd-9213-1111-1111-111111111111', 'pending');
 
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('greenhouse', 'none', 'r2-v1');
+values ('greenhouse', 'none', 'r2-v1')
+on conflict (source_code) do nothing;
 insert into vacancy_sources (id, source_code, target_key)
 values ('eeeeeeee-9213-1111-1111-111111111111', 'greenhouse', 'acme');
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title, trust_status)

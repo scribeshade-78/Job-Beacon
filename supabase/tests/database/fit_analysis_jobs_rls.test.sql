@@ -8,7 +8,8 @@ insert into auth.users (id, email) values
 insert into candidate_profiles (id) values
   ('aaaaaaaa-9212-1111-1111-111111111111');
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('greenhouse', 'none', 'r2-v1');
+values ('greenhouse', 'none', 'r2-v1')
+on conflict (source_code) do nothing;
 insert into vacancy_sources (id, source_code, target_key)
 values ('cccccccc-9212-1111-1111-111111111111', 'greenhouse', 'acme');
 insert into vacancies (id, source_code, vacancy_source_id, source_vacancy_id, authoritative_url, raw_title)

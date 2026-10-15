@@ -10,7 +10,8 @@ insert into candidate_profiles (id) values ('11111111-9001-1111-1111-11111111111
 -- so reusing a seeded code (local_fixture) collides with rows that already
 -- exist — every pgTAP file here picks its own.
 insert into source_policies (source_code, authentication_method, policy_version, countries)
-values ('ghost_fixture', 'none', 'test-v1', array['XX']);
+values ('ghost_fixture', 'none', 'test-v1', array['XX'])
+on conflict (source_code) do nothing;
 
 insert into vacancy_sources (id, source_code, target_key)
 values ('dddddddd-9001-1111-1111-111111111111', 'ghost_fixture', 'ghost-board');

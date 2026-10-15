@@ -7,7 +7,8 @@ insert into auth.users (id, email) values
   ('11111111-1111-1111-1111-111111111111', 'candidate-a@test.local');
 
 insert into source_policies (source_code, authentication_method, policy_version, countries)
-values ('greenhouse', 'none', 'r2-v1', array['US']);
+values ('greenhouse', 'none', 'r2-v1', array['US'])
+on conflict (source_code) do nothing;
 
 insert into companies (id, displayed_name, domain)
 values ('cccccccc-1111-1111-1111-111111111111', 'Acme Corp', 'acme.example');

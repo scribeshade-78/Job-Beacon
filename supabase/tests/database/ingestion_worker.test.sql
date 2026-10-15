@@ -3,7 +3,8 @@ create extension if not exists pgtap with schema extensions;
 select plan(9);
 
 insert into source_policies (source_code, authentication_method, policy_version)
-values ('greenhouse', 'none', 'r2-v1');
+values ('greenhouse', 'none', 'r2-v1')
+on conflict (source_code) do nothing;
 
 insert into vacancy_sources (id, source_code, target_key)
 values ('dddddddd-1111-1111-1111-111111111111', 'greenhouse', 'acme');
