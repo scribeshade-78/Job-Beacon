@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { drainIngestionJobs } from "./ingestion/runner.js";
+import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import {
   readScheduledRefreshBudget,
   runScheduledDiscovery,
@@ -77,6 +78,7 @@ export const MAILBOX_CLASSIFY_TASK_NAME = "mailbox-classify";
 export const MAILBOX_MATCH_TASK_NAME = "mailbox-match";
 export const CALENDAR_SYNC_TASK_NAME = "calendar-sync";
 export const INGESTION_DRAIN_TASK_NAME = "ingestion-drain";
+export const INTAKE_REFRESH_DRAIN_TASK_NAME = "intake-refresh-drain";
 
 /**
  * How often queued discovery work is drained.
@@ -98,6 +100,16 @@ export const DEFAULT_INGESTION_DRAIN_MAX_JOBS = 5;
  * keeps one slow board from being fetched twice.
  */
 export const DEFAULT_INGESTION_DRAIN_DEADLINE_MS = 4 * 60_000;
+
+/**
+ * How often a candidate's queued "Fetch latest jobs" press is drained.
+ *
+ * Sixty seconds, not the ingestion drain's two minutes: this queue is filled by a
+ * candidate who is watching, and an empty claim is a single RPC. A tick that finds no
+ * work costs one round trip; a tick that finds work spends as long as the fan-out takes,
+ * and the next tick simply waits for it.
+ */
+export const DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS = 60_000;
 
 /**
  * Mail polling every five minutes, matching POLL_INTERVAL_MS inside poll.ts:
@@ -410,6 +422,39 @@ export function buildScheduledTasks(
     mailboxClassifyTask(client, openai, env),
     mailboxMatchTask(client, env),
     ...(capability.googleCalendar.enabled ? [calendarSyncTask(client, env)] : []),
+
+    /**
+     * The candidate-triggered intake refresh drain. Placed AFTER the mailbox block and
+     * BEFORE scheduled discovery: it is the heaviest network task in the array (a
+     * multi-source fan-out plus a bounded fit batch), so putting it ahead of mail
+     * classification would let it delay the messages a candidate actually notices, while
+     * a candidate waiting on their own button should not sit behind an unattended sweep.
+     *
+     * It carries the OpenAI client because scoring the vacancies a refresh just created
+     * moved here with the fan-out. Fetching without scoring leaves the new jobs ranked
+     * below everything else, which is the defect this whole path exists to remove.
+     */
+    {
+      name: INTAKE_REFRESH_DRAIN_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_INTAKE_REFRESH_INTERVAL_MS",
+        DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS,
+        env,
+      ),
+      run: async () => {
+        const result = await drainIntakeRefreshJobs(client, {
+          deps: { openai },
+          // Unset leaves the drain's own defaults (3 jobs; a lease-safe 4-minute budget).
+          ...(env.SCHEDULER_INTAKE_REFRESH_MAX_JOBS
+            ? { maxJobs: Number.parseInt(env.SCHEDULER_INTAKE_REFRESH_MAX_JOBS, 10) }
+            : {}),
+          ...(env.SCHEDULER_INTAKE_REFRESH_DEADLINE_MS
+            ? { deadlineMs: Number.parseInt(env.SCHEDULER_INTAKE_REFRESH_DEADLINE_MS, 10) }
+            : {}),
+        });
+        return { ...result };
+      },
+    },
 
     /**
      * Batch C scheduled discovery. LAST so its network latency never delays the

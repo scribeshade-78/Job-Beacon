@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { runIntakeAcrossSources } from "./intake.js";
+import type OpenAI from "openai";
+import { runFitAnalysisBatch } from "../opportunities/runner.js";
+import { runIntakeAcrossSources, type IntakeSourceSummary } from "./intake.js";
 import { loadIntakeQueryContext } from "./queryContext.js";
 
 /**
@@ -48,6 +50,13 @@ export interface IntakeRefreshDeps {
   /** Injectable for tests; defaults to the real profile reader. */
   loadQueryContext?: (client: SupabaseClient, candidateId: string) => Promise<IntakeRefreshQueryContext>;
   runIntake?: typeof runIntakeAcrossSources;
+  /**
+   * The model client the post-refresh fit batch needs. Absent means "fetch only": the
+   * new vacancies stay queued for the scheduled fit drain rather than being scored here.
+   */
+  openai?: Pick<OpenAI, "chat">;
+  /** Injectable for tests; defaults to runFitAnalysisBatch. */
+  runFit?: typeof runFitAnalysisBatch;
 }
 
 /** Postgres unique_violation. Raised by the partial index that allows one active refresh. */
@@ -108,8 +117,43 @@ export interface DrainIntakeRefreshResult {
   stoppedOnDeadline: boolean;
 }
 
+/**
+ * What a finished refresh stores. This is the summary the HTTP route used to return
+ * synchronously, now durable so the monitor can render it minutes after the press.
+ *
+ * THE CLIENT'S describeDiscoveryResult READS EVERY FIELD HERE, the per-source list
+ * included - attribution is a per-source legal obligation and cannot be collapsed to a
+ * scalar, and newVacancyIds is what lets the list mark the rows that are actually new.
+ */
+export interface IntakeRefreshStoredResult {
+  sources: IntakeSourceSummary[];
+  received: number;
+  ingested: number;
+  created: number;
+  updated: number;
+  newVacancyIds: string[];
+  skippedByAdapter: number;
+  trustStatusCounts: Record<string, number>;
+  durationMs: number;
+  failedSources: number;
+  fitAnalyzed: number;
+  fitPending: number;
+  fitStoppedOnDeadline: boolean;
+  fitError: string | null;
+}
+
 const DEFAULT_MAX_JOBS = 3;
 const DEFAULT_DEADLINE_MS = 4 * 60_000;
+
+/**
+ * Bounds for the post-refresh fit batch, moved here from the route that used to run it.
+ *
+ * Each analysis is two model calls, so a count bound alone is not enough - five analyses
+ * at roughly ten seconds each is close to a minute of wall clock, which is why the batch
+ * also carries a wall-clock ceiling and stops STARTING work when it expires.
+ */
+const MAX_FIT_ANALYSES_PER_REFRESH = 5;
+const FIT_ANALYSIS_BUDGET_MS = 45_000;
 
 /**
  * Claims and processes queued refreshes, one at a time, bounded by maxJobs and a deadline.
@@ -173,19 +217,32 @@ export async function drainIntakeRefreshJobs(
         {},
       );
 
+      // SCORING HAPPENS HERE NOW, immediately after the pull, so the vacancies a
+      // refresh just created rank on their own instead of waiting behind the scheduled
+      // fit drain's FIFO backlog.
+      const fit = await runPostRefreshFit(client, result.newVacancyIds, deps, now, deadline);
+
       await client
         .from("intake_refresh_jobs")
         .update({
           status: "done",
-          // The summary the route used to return synchronously, kept so the UI can report
-          // what a finished refresh actually found rather than only that it stopped.
+          // THE FULL SUMMARY the monitor renders, not only the counts.
           result: {
             sources: result.sources,
             received: result.received,
             ingested: result.ingested,
             created: result.created,
             updated: result.updated,
-          },
+            newVacancyIds: result.newVacancyIds,
+            skippedByAdapter: result.skippedByAdapter,
+            trustStatusCounts: result.trustStatusCounts,
+            durationMs: result.durationMs,
+            failedSources: result.failedSources,
+            fitAnalyzed: fit.analyzed,
+            fitPending: Math.max(result.newVacancyIds.length - fit.analyzed, 0),
+            fitStoppedOnDeadline: fit.stoppedOnDeadline,
+            fitError: fit.error ?? null,
+          } satisfies IntakeRefreshStoredResult,
           last_error: null,
           updated_at: new Date().toISOString(),
         })
@@ -205,3 +262,129 @@ export async function drainIntakeRefreshJobs(
 
   return { processed, stoppedOnDeadline: false };
 }
+
+/**
+ * Scores the vacancies a refresh just created, immediately after the pull.
+ *
+ * THIS MOVED HERE FROM THE HTTP ROUTE. It used to run inline after the fan-out; when the
+ * fan-out became background work, its scoring step had to become background work too, or
+ * a candidate's new jobs would carry a NULL priority score and sort below every scored
+ * row - the original "fetch produced jobs I cannot find" defect in a new costume.
+ *
+ * BEST-EFFORT, EXACTLY AS ON THE REQUEST PATH. The vacancies are already ingested and
+ * visible, and the scheduled fit drain will pick them up, so a scoring failure must not
+ * turn a successful refresh into a failed job.
+ */
+async function runPostRefreshFit(
+  client: SupabaseClient,
+  newVacancyIds: readonly string[],
+  deps: IntakeRefreshDeps,
+  now: () => Date,
+  deadline: number | null,
+): Promise<{ analyzed: number; failed: number; stoppedOnDeadline: boolean; error?: string }> {
+  if (newVacancyIds.length === 0) {
+    return { analyzed: 0, failed: 0, stoppedOnDeadline: false };
+  }
+
+  const openai = deps.openai;
+  if (!openai) {
+    // No model client means fetch-only. The vacancies stay queued for the scheduled fit
+    // drain - the honest state, not "scored zero" as if an attempt had been made.
+    return { analyzed: 0, failed: 0, stoppedOnDeadline: false };
+  }
+
+  // NEVER OUTLIVE THE DRAIN'S OWN DEADLINE. A job whose lease expires while still running
+  // becomes claimable again and a second worker duplicates the fan-out; bounding the fit
+  // step to what remains is what keeps one slow model call from causing that.
+  const remaining = deadline === null ? FIT_ANALYSIS_BUDGET_MS : deadline - now().getTime();
+  if (remaining <= 0) {
+    return { analyzed: 0, failed: 0, stoppedOnDeadline: true };
+  }
+
+  const runFit = deps.runFit ?? runFitAnalysisBatch;
+
+  try {
+    const fit = await runFit(
+      client,
+      { openai },
+      {
+        vacancyIds: newVacancyIds,
+        maxPerBatch: MAX_FIT_ANALYSES_PER_REFRESH,
+        deadlineMs: Math.min(FIT_ANALYSIS_BUDGET_MS, remaining),
+      },
+    );
+
+    return {
+      analyzed: fit.analyzed,
+      failed: fit.failed,
+      stoppedOnDeadline: fit.stoppedOnDeadline === true,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[intake:refresh] fit analysis failed", { error: message });
+    return { analyzed: 0, failed: 0, stoppedOnDeadline: false, error: message };
+  }
+}
+
+export type IntakeRefreshJobStatus = "idle" | "pending" | "leased" | "done" | "failed";
+
+export interface IntakeRefreshStatus {
+  status: IntakeRefreshJobStatus;
+  /** True while the queue still owns the work, so a poller knows to keep asking. */
+  running: boolean;
+  /** The stored summary, present only once the job is done. */
+  result: IntakeRefreshStoredResult | null;
+  /** Why the job failed, present only when it did. */
+  lastError: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * The candidate's LATEST refresh, for the monitor half of trigger-and-monitor.
+ *
+ * SCOPED TO ONE CANDIDATE BY THE CALLER, never by the client: the route passes the JWT
+ * subject, so one candidate cannot read another's refresh by guessing an id. There is no
+ * id parameter for exactly that reason.
+ *
+ * ONE ROW, NOT A LIST. The UI needs to render a state, and the newest row is the press
+ * the candidate is waiting on; showing them history would invite them to read an old
+ * result as the answer to the button they just pressed.
+ */
+export async function readLatestIntakeRefresh(
+  client: SupabaseClient,
+  candidateId: string,
+): Promise<IntakeRefreshStatus> {
+  const { data, error } = await client
+    .from("intake_refresh_jobs")
+    .select("status, result, last_error, updated_at")
+    .eq("candidate_id", candidateId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data) {
+    return { status: "idle", running: false, result: null, lastError: null, updatedAt: null };
+  }
+
+  const row = data as {
+    status: "pending" | "leased" | "done" | "failed";
+    result: IntakeRefreshStoredResult | null;
+    last_error: string | null;
+    updated_at: string | null;
+  };
+
+  return {
+    status: row.status,
+    running: row.status === "pending" || row.status === "leased",
+    // A result only means something for a finished job; a leased row's null must not be
+    // mistaken for "finished with nothing".
+    result: row.status === "done" ? (row.result ?? null) : null,
+    lastError: row.status === "failed" ? (row.last_error ?? null) : null,
+    updatedAt: row.updated_at ?? null,
+  };
+}
+

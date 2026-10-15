@@ -3,6 +3,7 @@ import type OpenAI from "openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { runFollowUpSweep } from "./mailbox/antiGhosting.js";
+import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import { runScheduledDiscovery, runScheduledRankingRefresh } from "./opportunities/scheduledRefresh.js";
 import {
   ANTI_GHOSTING_TASK_NAME,
@@ -13,9 +14,11 @@ import {
   DEFAULT_FIT_INTERVAL_MS,
   DEFAULT_RANKING_REFRESH_INTERVAL_MS,
   DEFAULT_INGESTION_DRAIN_INTERVAL_MS,
+  DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS,
   DISCOVERY_TASK_NAME,
   FIT_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
+  INTAKE_REFRESH_DRAIN_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
@@ -31,6 +34,11 @@ vi.mock("./calendar/sync.js", () => ({ runCalendarSyncBatch: vi.fn() }));
 // The ingestion drain reaches the network through its own client. Nothing in this file
 // exercises a real fetch, so the runner is mocked rather than handed the {} client.
 vi.mock("./ingestion/runner.js", () => ({ drainIngestionJobs: vi.fn() }));
+
+// The candidate-scoped refresh queue. Its own coordination - the lease, the fit
+// re-home, the failure isolation - is covered by server/intake/refreshQueue.test.ts;
+// here only registration, cadence and what the scheduler hands it.
+vi.mock("./intake/refreshQueue.js", () => ({ drainIntakeRefreshJobs: vi.fn() }));
 
 // Batch C. The tasks' own coordination is covered by
 // server/opportunities/scheduledRefresh.test.ts; here only registration, cadence
@@ -71,6 +79,7 @@ const ALWAYS_ON = [
   INGESTION_DRAIN_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
+  INTAKE_REFRESH_DRAIN_TASK_NAME,
   DISCOVERY_TASK_NAME,
 ];
 
@@ -105,6 +114,7 @@ function taskByName(name: string, env: Record<string, string | undefined> = {}) 
 
 beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockReset();
+  vi.mocked(drainIntakeRefreshJobs).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
   vi.mocked(runScheduledRankingRefresh).mockReset();
   vi.mocked(runScheduledDiscovery).mockReset();
@@ -156,6 +166,33 @@ describe("buildScheduledTasks", () => {
 
     expect(task.intervalMs).toBe(30_000);
     expect(taskByName(INGESTION_DRAIN_TASK_NAME).intervalMs).toBe(DEFAULT_INGESTION_DRAIN_INTERVAL_MS);
+  });
+
+  it("drains candidate refresh requests and hands the fit batch the model client", async () => {
+    // The task that makes the intake 202 real, and the carrier of the OpenAI client:
+    // scoring the vacancies a refresh just created moved here with the fan-out.
+    vi.mocked(drainIntakeRefreshJobs).mockResolvedValue({ processed: 2, stoppedOnDeadline: false });
+
+    const task = taskByName(INTAKE_REFRESH_DRAIN_TASK_NAME, {});
+    expect(task.intervalMs).toBe(DEFAULT_INTAKE_REFRESH_DRAIN_INTERVAL_MS);
+
+    expect(await task.run()).toEqual({ processed: 2, stoppedOnDeadline: false });
+    expect(vi.mocked(drainIntakeRefreshJobs)).toHaveBeenCalledWith(client, { deps: { openai } });
+  });
+
+  it("lets the refresh drain be bounded without editing code", async () => {
+    vi.mocked(drainIntakeRefreshJobs).mockResolvedValue({ processed: 0, stoppedOnDeadline: false });
+
+    await taskByName(INTAKE_REFRESH_DRAIN_TASK_NAME, {
+      SCHEDULER_INTAKE_REFRESH_MAX_JOBS: "2",
+      SCHEDULER_INTAKE_REFRESH_DEADLINE_MS: "90000",
+    }).run();
+
+    expect(vi.mocked(drainIntakeRefreshJobs)).toHaveBeenCalledWith(client, {
+      deps: { openai },
+      maxJobs: 2,
+      deadlineMs: 90_000,
+    });
   });
 
   it("lets each cadence be retuned without editing code", () => {

@@ -62,14 +62,48 @@ export interface LiveDiscoveryResult {
 
 export type DiscoverLiveJobsOutcome =
   | { kind: "success"; result: LiveDiscoveryResult }
+  /** Accepted and still running when the client's polling budget ran out. */
+  | { kind: "pending"; message: string }
   | { kind: "error"; message: string };
+
+/**
+ * The server's monitor payload for GET /api/intake/discover: the candidate's latest
+ * refresh row, reduced to what the button needs.
+ */
+export interface IntakeRefreshStatus {
+  status: "idle" | "pending" | "leased" | "done" | "failed";
+  running: boolean;
+  result: LiveDiscoveryResult | null;
+  lastError: string | null;
+  updatedAt: string | null;
+}
 
 export interface DiscoverLiveJobsDeps {
   fetchImpl?: typeof fetch;
   getAccessToken?: () => Promise<string | null>;
+  /** Injected in tests so polling does not actually wait. */
+  sleep?: (ms: number) => Promise<void>;
+  /** How many monitor reads before reporting the work as still running. */
+  maxPolls?: number;
+  /** Delay between monitor reads, in milliseconds. */
+  pollIntervalMs?: number;
 }
 
+
+const DISCOVER_ENDPOINT = "/api/intake/discover";
 const DISCOVERY_FAILED = "Could not fetch new jobs. Please try again.";
+
+/**
+ * Shown when the work is accepted but has not settled inside the polling budget. The
+ * drain runs on the scheduler's cadence, so a couple of minutes is a normal wait rather
+ * than a fault - the copy says so instead of implying a failure.
+ */
+const DISCOVERY_PENDING =
+  "Your job search is running in the background. New jobs will appear as soon as it finishes.";
+
+/** Poll cadence and ceiling: three seconds apart, up to two minutes of watching. */
+const DEFAULT_POLL_INTERVAL_MS = 3_000;
+const DEFAULT_MAX_POLLS = 40;
 
 /**
  * Never throws — every outcome resolves to one shape the panel can render,
@@ -78,6 +112,9 @@ const DISCOVERY_FAILED = "Could not fetch new jobs. Please try again.";
 export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise<DiscoverLiveJobsOutcome> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const getAccessToken = deps.getAccessToken ?? defaultGetAccessToken;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const maxPolls = deps.maxPolls ?? DEFAULT_MAX_POLLS;
+  const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   let accessToken: string | null;
   try {
@@ -90,11 +127,16 @@ export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise
     return { kind: "error", message: SESSION_EXPIRED };
   }
 
+  const authHeader = { Authorization: `Bearer ${accessToken}` };
+
+  // 1. QUEUE THE WORK. The server answers 202 with a queued status: it no longer holds
+  //    the request open for a sequential fan-out that can take minutes, so the POST's
+  //    own body cannot be the answer.
   let response: Response;
   try {
-    response = await fetchImpl("/api/intake/discover", {
+    response = await fetchImpl(DISCOVER_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      headers: { "Content-Type": "application/json", ...authHeader },
     });
   } catch {
     return { kind: "error", message: "Network error contacting the server." };
@@ -109,18 +151,60 @@ export async function discoverLiveJobs(deps: DiscoverLiveJobsDeps = {}): Promise
   }
 
   if (!response.ok) {
-    // The server's own copy is used where it says something actionable (a
-    // switched-off source, say) rather than a generic failure.
+    // The server's own copy is used where it says something actionable (an unknown
+    // source, say) rather than a generic failure.
     const serverMessage = await readServerError(response);
     return { kind: "error", message: serverMessage ?? DISCOVERY_FAILED };
   }
 
-  try {
-    return { kind: "success", result: (await response.json()) as LiveDiscoveryResult };
-  } catch {
+  // 2. MONITOR THE BACKGROUND WORK. The drain runs on the scheduler's cadence, so
+  //    "accepted" has to be turned into "what was found" by asking.
+  for (let attempt = 0; attempt <= maxPolls; attempt += 1) {
+    // The FIRST read happens immediately: a fast drain can finish before the browser has
+    // even painted the spinner, and waiting three seconds to discover that is pointless.
+    if (attempt > 0) {
+      await sleep(pollIntervalMs);
+    }
+
+    let status: IntakeRefreshStatus;
+    try {
+      const statusResponse = await fetchImpl(DISCOVER_ENDPOINT, { headers: authHeader });
+
+      if (statusResponse.status === 401) {
+        return { kind: "error", message: SESSION_EXPIRED };
+      }
+
+      if (!statusResponse.ok) {
+        return { kind: "error", message: DISCOVERY_FAILED };
+      }
+
+      status = (await statusResponse.json()) as IntakeRefreshStatus;
+    } catch {
+      return { kind: "error", message: "Network error contacting the server." };
+    }
+
+    if (status.running) {
+      continue;
+    }
+
+    if (status.status === "failed") {
+      return { kind: "error", message: status.lastError ?? DISCOVERY_FAILED };
+    }
+
+    if (status.result) {
+      return { kind: "success", result: status.result };
+    }
+
+    // Settled with nothing to show: idle, or a finished row with no stored summary.
     return { kind: "error", message: DISCOVERY_FAILED };
   }
+
+  // Still running when the polling budget ran out. Honest rather than a failure: the work
+  // is queued and will finish, and calling it an error would tell the candidate to retry
+  // something already in flight.
+  return { kind: "pending", message: DISCOVERY_PENDING };
 }
+
 
 async function readServerError(response: Response): Promise<string | null> {
   try {

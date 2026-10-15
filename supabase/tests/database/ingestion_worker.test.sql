@@ -2,6 +2,16 @@ begin;
 create extension if not exists pgtap with schema extensions;
 select plan(9);
 
+-- ISOLATION. claim_ingestion_job() is a GLOBAL lease over the whole table: it orders by
+-- created_at and claims the oldest claimable row, regardless of which fixture made it. A
+-- pending or stale-leased row left by a developer's local database or a worker run is
+-- therefore claimed before this fixture's own row, and assertions 3-8 fail even though the
+-- RPC is correct — the suite was assuming an empty ingestion_jobs. A full `supabase test db`
+-- guarantees that by resetting first; running this file alone does not. Clearing the queue
+-- inside this transaction makes the suite own the table for its duration, and the rollback
+-- restores whatever was here, so it neither depends on nor destroys the caller's rows.
+delete from ingestion_jobs;
+
 insert into source_policies (source_code, authentication_method, policy_version)
 values ('greenhouse', 'none', 'r2-v1')
 on conflict (source_code) do nothing;

@@ -174,23 +174,91 @@ describe("describeRefreshResult", () => {
 });
 
 describe("discoverLiveJobs", () => {
-  it("posts to the intake endpoint, not the queue-draining one", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, DISCOVERY_RESULT));
+  const noSleep = async () => {};
 
-    await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+  /** The 202 the POST answers with now that the fan-out left the request path. */
+  function queued(): Response {
+    return jsonResponse(202, { status: "queued", enqueued: true, alreadyRunning: false, jobId: "job-1" });
+  }
 
-    expect(fetchImpl).toHaveBeenCalledWith("/api/intake/discover", {
+  /** One poll of the monitor. running defaults to false so a settled state is explicit. */
+  function monitor(over: Record<string, unknown> = {}): Response {
+    return jsonResponse(200, { status: "done", running: false, result: null, lastError: null, updatedAt: null, ...over });
+  }
+
+  function fetchQueue(...responses: Response[]) {
+    const fetchImpl = vi.fn();
+    for (const response of responses) {
+      fetchImpl.mockResolvedValueOnce(response);
+    }
+    return fetchImpl;
+  }
+
+  it("queues with a POST and then monitors with GET, instead of awaiting the fan-out", async () => {
+    // THE CONTRACT CHANGE. The POST used to hold the connection open for a sequential
+    // fan-out that can take minutes; it now returns 202 and the work is watched.
+    const fetchImpl = fetchQueue(queued(), monitor({ result: DISCOVERY_RESULT }));
+
+    await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(1, "/api/intake/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer token-123" },
     });
+    expect(fetchImpl).toHaveBeenNthCalledWith(2, "/api/intake/discover", {
+      headers: { Authorization: "Bearer token-123" },
+    });
   });
 
-  it("returns the parsed result, including the ids of what was created", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, DISCOVERY_RESULT));
+  it("returns the stored result once the monitor reports the job done", async () => {
+    const fetchImpl = fetchQueue(queued(), monitor({ status: "done", result: DISCOVERY_RESULT }));
 
-    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
 
     expect(outcome).toEqual({ kind: "success", result: DISCOVERY_RESULT });
+  });
+
+  it("keeps polling while the job is leased and stops as soon as it settles", async () => {
+    const fetchImpl = fetchQueue(
+      queued(),
+      monitor({ status: "leased", running: true }),
+      monitor({ status: "leased", running: true }),
+      monitor({ status: "done", result: DISCOVERY_RESULT }),
+    );
+
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
+
+    expect(outcome).toEqual({ kind: "success", result: DISCOVERY_RESULT });
+    // POST + three polls; the loop must not keep asking after the job settled.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("reports a failed background refresh with the reason the drain recorded", async () => {
+    const fetchImpl = fetchQueue(queued(), monitor({ status: "failed", lastError: "jooble is down" }));
+
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
+
+    expect(outcome).toEqual({ kind: "error", message: "jooble is down" });
+  });
+
+  it("gives up gracefully when the work is still running, rather than calling it a failure", async () => {
+    // A bounded poll, not an infinite spinner. The work is queued and will finish, so
+    // reporting an error would tell the candidate to retry work already in flight.
+    const fetchImpl = vi.fn(async () => monitor({ status: "pending", running: true }));
+
+    const outcome = await discoverLiveJobs({
+      fetchImpl: fetchImpl as never,
+      getAccessToken: token,
+      sleep: noSleep,
+      maxPolls: 2,
+    });
+
+    expect(outcome.kind).toBe("pending");
+    if (outcome.kind === "pending") {
+      expect(outcome.message).toMatch(/background/i);
+    }
+    // maxPolls bounds the polling: the initial POST plus maxPolls + 1 monitor reads.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
   it("makes no request at all without a session", async () => {
@@ -203,40 +271,40 @@ describe("discoverLiveJobs", () => {
   });
 
   it("maps 401 to a re-authenticate message", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: "Unauthorized" }));
+    const fetchImpl = fetchQueue(jsonResponse(401, { error: "Unauthorized" }));
 
-    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
 
     expect(outcome).toEqual({ kind: "error", message: "Your session has expired. Please sign in again." });
   });
 
   it("surfaces the server's own message when it says something actionable", async () => {
-    // A switched-off source is a 409 with a real explanation; replacing it with
+    // A typo in sourceCode is a 400 with the registered list; replacing it with
     // "something went wrong" would hide the only useful part.
-    const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(409, { error: 'Intake is not permitted for source "remotive": its kill_switch is on' }),
+    const fetchImpl = fetchQueue(
+      jsonResponse(400, { error: "Unknown intake source. Registered: remotive." }),
     );
 
-    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
 
     expect(outcome.kind).toBe("error");
     if (outcome.kind === "error") {
-      expect(outcome.message).toContain("kill_switch is on");
+      expect(outcome.message).toContain("Unknown intake source");
     }
   });
 
   it("falls back to its own copy when the server sends no usable message", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(500, {}));
+    const fetchImpl = fetchQueue(jsonResponse(500, {}));
 
-    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
 
     expect(outcome).toEqual({ kind: "error", message: "Could not fetch new jobs. Please try again." });
   });
 
   it("names the rate limit rather than reporting a failure", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(429, { error: "Too many" }));
+    const fetchImpl = fetchQueue(jsonResponse(429, { error: "Too many" }));
 
-    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token });
+    const outcome = await discoverLiveJobs({ fetchImpl: fetchImpl as never, getAccessToken: token, sleep: noSleep });
 
     expect(outcome.kind).toBe("error");
     if (outcome.kind === "error") {

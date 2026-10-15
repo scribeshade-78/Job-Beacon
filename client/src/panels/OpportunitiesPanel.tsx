@@ -495,17 +495,20 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   }
 
   /**
-   * Fetches live jobs server-side, then re-reads the list so they appear
-   * without a page reload.
+   * Queues a live job refresh, watches it settle, then re-reads the list.
    *
-   * This calls /api/intake/discover, which runs the same on-demand intake as
-   * the discover_live_jobs MCP tool. It previously called
-   * /api/opportunities/refresh, which drains an ingestion queue nothing ever
-   * fills — the button span and did nothing, which is exactly what it looked
-   * like.
+   * THE WORK IS NO LONGER DONE IN THIS REQUEST. /api/intake/discover answers 202 and a
+   * scheduler drain does the fan-out, because a sequential multi-source fetch can take
+   * minutes and anything in front of the server kills a held-open request first.
+   * discoverLiveJobs owns the queue-then-poll sequence; this function only decides what
+   * to show once it resolves.
    *
-   * The progress notice is cleared once the toast has the result, so the two
-   * cannot disagree on screen.
+   * It previously called /api/opportunities/refresh, which drained an ingestion queue
+   * nothing ever filled — the button span and did nothing, which is exactly what it
+   * looked like.
+   *
+   * The progress notice is cleared once the toast has the result, so the two cannot
+   * disagree on screen.
    */
   async function handleRefresh() {
     setRefreshing(true);
@@ -518,6 +521,16 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
       if (outcome.kind === "error") {
         setRefreshNotice({ tone: "error", text: outcome.message });
         showToast({ title: outcome.message, tone: "error" });
+        return;
+      }
+
+      if (outcome.kind === "pending") {
+        // ACCEPTED, NOT FINISHED. The background refresh is still running; the old
+        // synchronous route would have held this request open until it finished or a
+        // proxy killed it. An info notice is the honest state — a spinner that never
+        // resolves, or a "no new jobs" that is not yet known to be true, would not be.
+        setRefreshNotice({ tone: "info", text: outcome.message });
+        showToast({ title: "Job search running in the background.", tone: "default" });
         return;
       }
 

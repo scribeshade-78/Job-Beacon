@@ -120,28 +120,6 @@ import {
   AGENT_RATE_LIMIT_WINDOW_MS,
 } from "../shared/agent.js";
 
-/**
- * Task A2: how much fit analysis one "Fetch latest jobs" press may trigger.
- *
- * Each analysis is two model calls (JD extraction, then the fit itself), so the
- * bound is what keeps a candidate's button from becoming an unbounded spend —
- * the same reasoning as MAX_BULK_APPLY_VACANCIES and the per-batch caps the
- * other workers already have. A run that creates more than this leaves the rest
- * queued; the response says how many, and the UI says so too rather than
- * implying every new job was scored.
- */
-const MAX_FIT_ANALYSES_PER_DISCOVERY = 5;
-
-/**
- * Wall-clock ceiling for that batch.
- *
- * The count bound alone is not enough for a request-scoped batch: five
- * analyses at roughly ten seconds each is close to a minute of a held-open
- * HTTP request. Analyses already started are never abandoned — this stops the
- * batch from starting more — so the response reports what was scored and what
- * was left queued rather than pretending the work finished.
- */
-const FIT_ANALYSIS_BUDGET_MS = 45_000;
 import { enqueueIngestionBatch, readIngestionQueueStatus } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
@@ -166,8 +144,7 @@ import {
   listPendingFollowUps,
   sendFollowUpDraft,
 } from "./mailbox/followUpReview.js";
-import { IntakePolicyError, runIntake, runIntakeAcrossSources } from "./intake/intake.js";
-import { loadIntakeQueryContext } from "./intake/queryContext.js";
+import { enqueueIntakeRefresh, readLatestIntakeRefresh } from "./intake/refreshQueue.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
 import {
@@ -856,14 +833,28 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // Task A1: the "Fetch latest jobs" button's real backend.
   //
-  // WHY THIS EXISTS SEPARATELY FROM /api/opportunities/refresh. That route
-  // drains the ingestion_jobs QUEUE, and nothing in this repository enqueues
-  // jobs — there is no scheduler ("no deployment/scheduling infrastructure
-  // exists yet in this repo", per runner.ts). So the button span the spinner,
-  // ran a batch over an empty queue, and changed nothing, every single time.
-  // This route runs discovery ON DEMAND instead, through the same runIntake
-  // the discover_live_jobs MCP tool calls, so the button and the agent use one
-  // implementation.
+  // IT QUEUES AND RETURNS 202. IT DOES NOT FAN OUT, AND THAT IS THE POINT.
+  // The fan-out is sequential by design — Jooble's free plan is a 500-request
+  // LIFETIME budget and every page spends one — so its duration scales with the
+  // number of sources and their latency. A request held open for minutes is
+  // killed by whatever sits in front of this process first (browser, proxy or
+  // gateway), and the candidate is told the fetch failed while it carries on and
+  // succeeds. 202 says only what is true: accepted, not yet done.
+  //
+  // WHAT REPLACED THE INLINE WORK. runIntakeAcrossSources now runs in the
+  // scheduler's drain of intake_refresh_jobs (server/intake/refreshQueue.ts),
+  // which reads the candidate's CURRENT profile when the job runs rather than the
+  // profile they had when they pressed the button. The post-discovery fit batch that
+  // used to follow the fan-out is no longer on the request path either; re-homing it in
+  // the drain is a separate step, so new vacancies currently wait for the ordinary fit
+  // queue (whose FIFO claim can leave them behind a backlog).
+  //
+  // WHAT STAYS ON THE REQUEST PATH. Source validation still answers a typo with a
+  // 400 instead of queueing a job that can only fail, and the rate limiter still
+  // bounds how often one candidate can spend third-party quota. There is no
+  // policy check here any more: source_policies is enforced by runIntake when the
+  // job drains, and reporting it as a request error would be a lie about work
+  // that has already been accepted.
   //
   // Shares the refresh rate limiter rather than getting its own: both are
   // "go and hit a third party for me" actions, and a candidate should have one
@@ -899,139 +890,64 @@ export function createApp(options: CreateAppOptions = {}) {
     try {
       const client = resolveServiceClient();
 
-      // The candidate's own search context, read with the service-role client
-      // and scoped to the verified token's user id. It is what lets the
-      // credentialed aggregators be asked anything at all: Jooble needs
-      // keywords and a location, Adzuna needs an ISO country. Remotive ignores
-      // all three, so a candidate with an empty profile still gets results from
-      // it — and the sources that cannot run are reported as skips with reasons
-      // rather than silently contributing nothing.
-      const queryContext = await loadIntakeQueryContext(client, request.user!.id);
+      // THE ROW STORES ONLY WHAT THE REQUEST KNOWS — which sources, an explicit search,
+      // a row cap. Keywords, location and markets are deliberately NOT copied: the drain
+      // reads the candidate's CURRENT profile, so a refresh reflects who they are when
+      // it runs rather than who they were when they pressed the button.
+      const queued = await enqueueIntakeRefresh(client, request.user!.id, {
+        // An empty list is the stored meaning of "every registered source" (see the
+        // migration), not an allow-list that matches nothing.
+        sourceCodes: requestedSource ? [requestedSource] : [],
+        search,
+        limit,
+      });
 
-      // Fan-out. Each source is isolated inside runIntakeAcrossSources, so one
-      // missing a source_policies row or being down cannot cost the candidate
-      // the sources that work.
-      const result = await runIntakeAcrossSources(
-        client,
-        {
-          sourceCodes: requestedSource ? [requestedSource] : undefined,
-          search,
-          limit,
-          keywords: queryContext.keywords,
-          location: queryContext.location,
-          country: queryContext.country,
-          // ONE FETCH PER MARKET. Without this the fan-out still receives a single
-          // country and every source stays on its single-fetch path, which is exactly
-          // why the routing layer was unreachable before this line existed.
-          countries: queryContext.countries,
-        },
-        {},
-      );
-      const newVacancyIds = result.newVacancyIds;
-
-      // Task A2: score the new vacancies NOW, targeted at their own ids.
-      //
-      // Without this they carry a NULL priority_score and sort below every
-      // scored row, so "fetch latest jobs" produced jobs the candidate could
-      // not find. Draining the ordinary queue would not have fixed it either:
-      // that claim is FIFO, so a batch of any size would have worked through
-      // the existing backlog and never reached these.
-      //
-      // Best-effort by design. A scoring failure must not fail the fetch — the
-      // vacancies are already ingested and visible, and the fit queue will pick
-      // them up on the next scheduled drain. Same "AI step isolated from
-      // ingestion" stance the ingestion worker takes towards scoreVacancy.
-      let fit: { analyzed: number; failed: number; stoppedOnDeadline: boolean; error?: string } | null = null;
-
-      if (newVacancyIds.length > 0) {
-        try {
-          const fitResult = await runFitAnalysisBatch(
-            client,
-            { openai: resolveOpenAIClient() },
-            {
-              vacancyIds: newVacancyIds,
-              maxPerBatch: MAX_FIT_ANALYSES_PER_DISCOVERY,
-              deadlineMs: FIT_ANALYSIS_BUDGET_MS,
-            },
-          );
-
-          fit = {
-            analyzed: fitResult.analyzed,
-            failed: fitResult.failed,
-            stoppedOnDeadline: fitResult.stoppedOnDeadline === true,
-          };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error("Post-discovery fit analysis failed:", message);
-          fit = { analyzed: 0, failed: 0, stoppedOnDeadline: false, error: message };
-        }
-      }
-
-      // Structured, one line per discovery.
-      //
-      // This route previously logged NOTHING on success, which is exactly why
-      // "I clicked Fetch latest jobs and nothing happened" could not be
-      // diagnosed from the server side: a run that legitimately created zero
-      // vacancies left no trace at all, so "the intake ran and found nothing
-      // new" and "the request never arrived" looked identical in the logs.
+      // Structured, one line per accepted press. A press that legitimately queues
+      // nothing new is as important to be able to see as one that fails.
       console.log(
-        `[intake:discover] candidate=${request.user!.id} sources=${result.sources.length} ` +
-          `failed=${result.failedSources} received=${result.received} ingested=${result.ingested} ` +
-          `created=${result.created} updated=${result.updated} ` +
-          `fitAnalyzed=${fit?.analyzed ?? 0} fitFailed=${fit?.failed ?? 0} durationMs=${result.durationMs} ` +
-          `perSource=${result.sources
-            .map((source) =>
-              source.status === "failed" ? `${source.sourceCode}:failed(${source.error})` : `${source.sourceCode}:+${source.created}`,
-            )
-            .join(",")}`,
+        `[intake:discover] candidate=${request.user!.id} enqueued=${queued.enqueued} ` +
+          `alreadyRunning=${queued.alreadyRunning} jobId=${queued.jobId ?? "-"} ` +
+          `source=${requestedSource || "all"}`,
       );
 
       response.set("Cache-Control", "no-store");
-      response.status(200).json({
-        // AGGREGATE TOTALS AT THE TOP LEVEL, per-source detail in `sources`.
-        // The per-source entries are not optional decoration: `attribution` is a
-        // per-source legal obligation (Remotive's terms require their name to
-        // travel with their data), so collapsing several sources into one scalar
-        // attribution would silently drop it. A failed source keeps its entry too
-        // — otherwise "3 sources, 2 misconfigured" is indistinguishable from
-        // "1 source, working fine".
-        received: result.received,
-        ingested: result.ingested,
-        created: result.created,
-        updated: result.updated,
-        // The client marks these rows as new; without the ids it can only say
-        // "something changed" while the list looks identical.
-        newVacancyIds,
-        /**
-         * How many of those were scored before this response, and whether the
-         * budget ran out first. The client uses this to decide what still needs
-         * hoisting: a scored vacancy ranks on its own, an unscored one would
-         * otherwise be invisible.
-         */
-        fitAnalyzed: fit?.analyzed ?? 0,
-        fitPending: Math.max((fit === null ? 0 : newVacancyIds.length - fit.analyzed), 0),
-        fitStoppedOnDeadline: fit?.stoppedOnDeadline ?? false,
-        fitError: fit?.error ?? null,
-        skippedByAdapter: result.skippedByAdapter,
-        trustStatusCounts: result.trustStatusCounts,
-        durationMs: result.durationMs,
-        failedSources: result.failedSources,
-        sources: result.sources,
+      response.status(202).json({
+        // 202, not 200: accepted for processing, not finished. alreadyRunning is a
+        // successful answer too — the partial unique index allows one active refresh
+        // per candidate, so a double-tap must not read as a failure.
+        status: "queued",
+        enqueued: queued.enqueued,
+        alreadyRunning: queued.alreadyRunning,
+        jobId: queued.jobId,
       });
     } catch (error) {
-      // Defensive: runIntakeAcrossSources converts a per-source failure into a
-      // `status: "failed"` entry rather than throwing, so this now only catches
-      // something that went wrong outside any single source.
-      if (error instanceof IntakePolicyError) {
-        // 409, not 500: the request is fine, the source is switched off.
-        console.warn(`[intake:discover] refused by source policy: ${error.message}`);
-        response.status(409).json({ error: error.message });
-        return;
-      }
-
       const message = error instanceof Error ? error.message : String(error);
-      console.error("Live discovery failed:", message);
+      console.error("Live discovery enqueue failed:", message);
       response.status(500).json({ error: "Could not fetch new jobs. Please try again." });
+    }
+  });
+
+  // The MONITOR half of trigger-and-monitor, paired with the 202 above.
+  //
+  // WITHOUT THIS THE 202 IS A DEAD END. The request is accepted and the candidate has no
+  // way to learn whether the background refresh finished, failed, or is still going, so
+  // the button can only spin forever or claim a success it cannot see. This answers with
+  // the candidate's LATEST row - status, and, once it is done, the same summary the old
+  // synchronous response carried, so the UI renders what was actually found.
+  //
+  // NO RATE LIMITER, matching the read-only monitor on /api/opportunities/refresh: this
+  // is not a "go and hit a third party" action, it is one indexed row read. It still
+  // requires a session, and the candidate id comes from the verified token rather than
+  // from the request, so one candidate cannot read another's refresh.
+  app.get("/api/intake/discover", requireAuth, async (request: AuthenticatedRequest, response) => {
+    try {
+      const status = await readLatestIntakeRefresh(resolveServiceClient(), request.user!.id);
+      response.set("Cache-Control", "no-store");
+      response.status(200).json(status);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Intake refresh status failed:", message);
+      response.status(500).json({ error: "Failed to read refresh status" });
     }
   });
 

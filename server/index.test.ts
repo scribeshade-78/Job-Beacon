@@ -14,7 +14,6 @@ import { runRankingRefresh } from "./opportunities/rankingRefresh.js";
 import { enqueueIngestionBatch, readIngestionQueueStatus, runIngestionBatch } from "./ingestion/runner.js";
 import { bulkApplyToVacancies, MAX_BULK_APPLY_VACANCIES } from "./applications/bulkApply.js";
 import { loadQueueCapability } from "./applications/queueCapability.js";
-import { IntakePolicyError } from "./intake/intake.js";
 import {
   approveAttempt,
   approveOwnedAttempt,
@@ -182,11 +181,11 @@ vi.mock("./applications/attemptReview.js", async () => {
   };
 });
 
-// POST /api/intake/discover — internals covered by server/intake/intake.test.ts;
+// POST /api/intake/discover — internals covered by server/intake/refreshQueue.test.ts;
 // here only auth-gating, source resolution and response wiring.
-vi.mock("./intake/intake.js", async () => {
-  const actual = await vi.importActual<typeof import("./intake/intake.js")>("./intake/intake.js");
-  return { ...actual, runIntake: vi.fn(), runIntakeAcrossSources: vi.fn() };
+vi.mock("./intake/refreshQueue.js", async () => {
+  const actual = await vi.importActual<typeof import("./intake/refreshQueue.js")>("./intake/refreshQueue.js");
+  return { ...actual, enqueueIntakeRefresh: vi.fn(), readLatestIntakeRefresh: vi.fn() };
 });
 
 // Task C2's follow-up routes — internals covered by
@@ -210,7 +209,11 @@ import {
   sendFollowUpDraft,
 } from "./mailbox/followUpReview.js";
 
-import { runIntake, runIntakeAcrossSources } from "./intake/intake.js";
+import {
+  enqueueIntakeRefresh,
+  readLatestIntakeRefresh,
+  type IntakeRefreshStoredResult,
+} from "./intake/refreshQueue.js";
 
 let baseUrl: string;
 let server: ReturnType<typeof app.listen>;
@@ -2871,148 +2874,121 @@ describe("POST /api/candidate/follow-ups/:id/dismiss", () => {
 });
 
 describe("POST /api/intake/discover", () => {
-  const mockFanOut = vi.mocked(runIntakeAcrossSources);
+  const mockEnqueue = vi.mocked(enqueueIntakeRefresh);
   const verifier = async (token: string) =>
     token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
 
-  const okSource = {
-    sourceCode: "remotive",
-    displayName: "Remotive (public remote-job API)",
-    attribution: "Job data from Remotive (https://remotive.com), delayed by 24 hours.",
-    status: "ok" as const,
-    search: null,
-    received: 16,
-    ingested: 3,
-    created: 2,
-    updated: 1,
-    skippedByAdapter: 0,
-    newVacancyIds: ["new-1", "new-2"],
-    trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
-    durationMs: 1234,
-  };
-
-  const fanOutResult = {
-    sources: [okSource],
-    received: 16,
-    ingested: 3,
-    created: 2,
-    updated: 1,
-    skippedByAdapter: 0,
-    newVacancyIds: ["new-1", "new-2"],
-    trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
-    durationMs: 1234,
-    failedSources: 0,
-  };
+  const queued = { enqueued: true, alreadyRunning: false, jobId: "job-1" };
 
   beforeEach(() => {
-    mockFanOut.mockReset();
-    mockFanOut.mockResolvedValue(fanOutResult as never);
+    mockEnqueue.mockReset();
+    mockEnqueue.mockResolvedValue(queued);
   });
 
-  /**
-   * The route reads the candidate's intake context — selected roles, preferences
-   * and the confirmed location fact — BEFORE it fans out, so these cases need a
-   * client that can answer those reads even though they mock the fan-out itself.
-   *
-   * Empty answers are the correct default rather than a convenience: every field
-   * of that context is optional by design, and "the candidate has stated
-   * nothing" is a real state that must still fan out over the sources needing no
-   * context at all.
-   */
-  function makeIntakeContextClient(over: Record<string, { data: unknown }> = {}) {
-    const defaults: Record<string, { data: unknown }> = {
-      candidate_selected_roles: { data: [] },
-      extracted_facts: { data: [] },
-      fact_confirmations: { data: [] },
-      // No row is the normal state for a candidate who never opened the
-      // preferences form, and the loader reads this one with maybeSingle().
-      candidate_preferences: { data: null },
-    };
-
-    function builderFor(table: string) {
-      const result = over[table] ?? defaults[table] ?? { data: [] };
-      const builder: Record<string, unknown> = {};
-      const chain = () => builder;
-
-      for (const method of ["select", "eq", "in", "order", "limit"]) {
-        builder[method] = chain;
-      }
-
-      builder.maybeSingle = () => Promise.resolve(result);
-      builder.then = (resolve: (value: unknown) => unknown) => resolve(result);
-
-      return builder;
-    }
-
-    return { from: (table: string) => builderFor(table) } as never;
-  }
-
-  it("returns 401 without a token, and fetches nothing", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+  it("returns 401 without a token, and queues nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, { method: "POST" });
 
       expect(response.status).toBe(401);
-      expect(mockFanOut).not.toHaveBeenCalled();
+      expect(mockEnqueue).not.toHaveBeenCalled();
     });
   });
 
   it("returns 401 for a token that does not verify", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer expired" },
       });
 
       expect(response.status).toBe(401);
-      expect(mockFanOut).not.toHaveBeenCalled();
+      expect(mockEnqueue).not.toHaveBeenCalled();
     });
   });
 
-  it("returns 200 with the counts and the ids of what was created", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+  it("accepts the work with 202 and a queued status instead of holding the request open", async () => {
+    // THE TIMEOUT TRAP THIS CLOSES. The fan-out is sequential by design (Jooble's free
+    // plan is a LIFETIME 500-request budget), so the old route held the HTTP request open
+    // for the whole run. Whatever sat in front of this process - browser, proxy or
+    // gateway - killed it first, and the candidate was told the fetch failed while it
+    // carried on and succeeded. 202 says only what is true: accepted, not yet done.
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
-        received: 16,
-        ingested: 3,
-        // 3 written, 2 of them new — the distinction the toast depends on.
-        created: 2,
-        updated: 1,
-        newVacancyIds: ["new-1", "new-2"],
-        failedSources: 0,
-        // The per-source detail carries attribution, which is a per-source legal
-        // obligation and cannot be collapsed into a single top-level scalar.
-        sources: [
-          { sourceCode: "remotive", status: "ok", created: 2, updated: 1 },
-        ],
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        status: "queued",
+        enqueued: true,
+        alreadyRunning: false,
+        jobId: "job-1",
       });
     });
   });
 
-  it("fans out over every registered source when none is named", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+  it("queues under the verified session's id and names every source when none is named", async () => {
+    // IDENTITY COMES ONLY FROM THE JWT SUBJECT. A body-supplied candidate id is never
+    // read, so one candidate cannot make the server work for another. The empty source
+    // list is the stored meaning of "every registered source" (see the migration), which
+    // is what the button - which sends no body - actually wants.
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      // No sourceCodes means "all of them". The old route defaulted to the only
-      // registered adapter and 400'd as soon as a second existed, because the
-      // client sends no body — which is the fragility this removes.
-      expect(mockFanOut).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ sourceCodes: undefined }),
-        expect.anything(),
-      );
+      expect(mockEnqueue).toHaveBeenCalledWith(expect.anything(), "cand-1", {
+        sourceCodes: [],
+        search: undefined,
+        limit: undefined,
+      });
     });
   });
 
-  it("returns 400 for a source that is not registered, without calling intake", async () => {
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+  it("scopes the queued job to a named source and passes the search and row cap through", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceCode: "remotive", search: "data engineer", limit: 25 }),
+      });
+
+      expect(response.status).toBe(202);
+      expect(mockEnqueue).toHaveBeenCalledWith(expect.anything(), "cand-1", {
+        sourceCodes: ["remotive"],
+        search: "data engineer",
+        limit: 25,
+      });
+    });
+  });
+
+  it("reports an already-running refresh without failing the press", async () => {
+    // The partial unique index allows one active refresh per candidate. A second press is
+    // a normal outcome, not a 500: the caller is told one is already on its way.
+    mockEnqueue.mockResolvedValueOnce({ enqueued: false, alreadyRunning: true, jobId: null });
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        method: "POST",
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        status: "queued",
+        enqueued: false,
+        alreadyRunning: true,
+        jobId: null,
+      });
+    });
+  });
+
+  it("returns 400 for a source that is not registered, without queueing", async () => {
+    // A typo still fails loudly: silently fanning out over everything would answer a
+    // different question than the one asked.
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
         method: "POST",
         headers: { Authorization: "Bearer candidate-token", "Content-Type": "application/json" },
@@ -3020,89 +2996,135 @@ describe("POST /api/intake/discover", () => {
       });
 
       expect(response.status).toBe(400);
-      expect(mockFanOut).not.toHaveBeenCalled();
+      expect(mockEnqueue).not.toHaveBeenCalled();
     });
   });
+});
 
-  const failedJooble = {
-    sourceCode: "jooble",
-    displayName: "Jooble",
-    attribution: "",
-    status: "failed" as const,
-    error: "Intake is not permitted for source \"jooble\": its kill_switch is on",
-    search: null,
-    received: 0,
-    ingested: 0,
-    created: 0,
-    updated: 0,
+describe("GET /api/intake/discover", () => {
+  const mockStatus = vi.mocked(readLatestIntakeRefresh);
+  const verifier = async (token: string) =>
+    token === "candidate-token" ? { id: "cand-1", email: "c@example.com", aal: "aal1" as const } : null;
+
+  const stored: IntakeRefreshStoredResult = {
+    sources: [
+      {
+        sourceCode: "remotive",
+        market: null,
+        displayName: "Remotive (public remote-job API)",
+        attribution: "Job data from Remotive (https://remotive.com), delayed by 24 hours.",
+        status: "ok",
+        search: null,
+        received: 16,
+        ingested: 3,
+        created: 2,
+        updated: 1,
+        skippedByAdapter: 0,
+        newVacancyIds: ["new-1", "new-2"],
+        trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
+        durationMs: 1234,
+      },
+    ],
+    received: 16,
+    ingested: 3,
+    created: 2,
+    updated: 1,
+    newVacancyIds: ["new-1", "new-2"],
     skippedByAdapter: 0,
-    newVacancyIds: [],
-    trustStatusCounts: {},
-    durationMs: 5,
+    trustStatusCounts: { VERIFIED_INCOMPLETE: 3 },
+    durationMs: 1234,
+    failedSources: 0,
+    fitAnalyzed: 2,
+    fitPending: 0,
+    fitStoppedOnDeadline: false,
+    fitError: null,
   };
 
-  it("returns 200 and reports a skipped source instead of failing the whole request", async () => {
-    mockFanOut.mockResolvedValueOnce({
-      ...fanOutResult,
-      failedSources: 1,
-      sources: [okSource, failedJooble],
-    } as never);
+  beforeEach(() => {
+    mockStatus.mockReset();
+  });
 
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+  it("returns 401 without a token, and reads nothing", async () => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
-        method: "POST",
-        headers: { Authorization: "Bearer candidate-token" },
+        headers: { Authorization: "Bearer expired" },
       });
 
-      // PARTIAL SUCCESS. A source refused by policy (kill_switch on, no
-      // source_policies row) or simply down must not cost the candidate the
-      // sources that work — the whole point of the fan-out.
-      expect(response.status).toBe(200);
-
-      const body = (await response.json()) as {
-        failedSources: number;
-        created: number;
-        sources: Array<{ sourceCode: string; status: string; error?: string }>;
-      };
-      expect(body.failedSources).toBe(1);
-      expect(body.created).toBe(2);
-      expect(body.sources).toHaveLength(2);
-      expect(body.sources[1]).toMatchObject({ sourceCode: "jooble", status: "failed" });
-      // The reason travels, so the candidate is not told only that something
-      // silently did not happen.
-      expect(body.sources[1]!.error).toContain("kill_switch");
+      expect(response.status).toBe(401);
+      expect(mockStatus).not.toHaveBeenCalled();
     });
   });
 
-  it("still returns 200 when every source failed, so the UI can say so plainly", async () => {
-    mockFanOut.mockResolvedValueOnce({
-      sources: [failedJooble],
-      received: 0,
-      ingested: 0,
-      created: 0,
-      updated: 0,
-      skippedByAdapter: 0,
-      newVacancyIds: [],
-      trustStatusCounts: {},
-      durationMs: 5,
-      failedSources: 1,
-    } as never);
+  it("reports a finished refresh with the summary the UI renders", async () => {
+    // THE MONITOR HALF. Without it the 202 is a dead end: the request is accepted and
+    // the candidate has no way to learn what the background refresh found.
+    mockStatus.mockResolvedValueOnce({
+      status: "done",
+      running: false,
+      result: stored,
+      lastError: null,
+      updatedAt: "2026-10-15T12:00:00.000Z",
+    });
 
-    await withTestServer({ verifyAccessToken: verifier, serviceClient: makeIntakeContextClient() }, async (testBaseUrl) => {
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
-        method: "POST",
         headers: { Authorization: "Bearer candidate-token" },
       });
 
-      // A 200 with failedSources === sources.length is deliberate: the request
-      // itself succeeded and the per-source outcome is the data. The client
-      // turns this into "Couldn't reach Jooble. Nothing was fetched." rather
-      // than a calm "no new jobs", which would hide a total outage.
       expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        status: "done",
+        running: false,
+        result: stored,
+        lastError: null,
+        updatedAt: "2026-10-15T12:00:00.000Z",
+      });
+      expect(mockStatus).toHaveBeenCalledWith(expect.anything(), "cand-1");
+    });
+  });
 
-      const body = (await response.json()) as { failedSources: number; sources: unknown[]; created: number };
-      expect(body.failedSources).toBe(body.sources.length);
-      expect(body.created).toBe(0);
+  it("reports an in-flight refresh as running so the button can keep waiting", async () => {
+    mockStatus.mockResolvedValueOnce({ status: "leased", running: true, result: null, lastError: null, updatedAt: null });
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ status: "leased", running: true, result: null });
+    });
+  });
+
+  it("answers idle when the candidate has never refreshed, rather than failing", async () => {
+    mockStatus.mockResolvedValueOnce({ status: "idle", running: false, result: null, lastError: null, updatedAt: null });
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        status: "idle",
+        running: false,
+        result: null,
+        lastError: null,
+        updatedAt: null,
+      });
+    });
+  });
+
+  it("returns 500 with a generic message when the read fails", async () => {
+    mockStatus.mockRejectedValueOnce(new Error("db down"));
+
+    await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
+      const response = await fetch(`${testBaseUrl}/api/intake/discover`, {
+        headers: { Authorization: "Bearer candidate-token" },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Failed to read refresh status" });
     });
   });
 });
