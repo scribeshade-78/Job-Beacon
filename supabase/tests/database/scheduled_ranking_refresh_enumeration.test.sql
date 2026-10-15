@@ -123,8 +123,27 @@ select is(
 );
 
 -- 7. Deterministic ordering across ticks.
+--
+-- SCOPED TO THIS FILE'S OWN FIXTURES, and it has to be: the enumeration is
+-- global, so the assertion above is only true while the database holds no other
+-- candidate who needs a refresh. It began failing the moment a real candidate
+-- had a selected role and no qualifier generation yet — which is the ordinary
+-- state of a candidate between selecting a role and the ranking schedule
+-- reaching them, not an error state. The property under test is the ORDER, not
+-- the absence of other candidates, so the outer filter narrows to the six
+-- fixtures. The filter is a plain WHERE over the function's output and does not
+-- re-sort, so the function's own ordering is still what is being asserted.
 select is(
-  (select array_agg(candidate_id::text) from public.list_candidates_needing_ranking_refresh(20)),
+  (select array_agg(candidate_id::text)
+     from public.list_candidates_needing_ranking_refresh(20)
+     where candidate_id in (
+       '11111111-1111-1111-1111-111111111111',
+       '22222222-2222-2222-2222-222222222222',
+       '33333333-3333-3333-3333-333333333333',
+       '44444444-4444-4444-4444-444444444444',
+       '55555555-5555-5555-5555-555555555555',
+       '66666666-6666-6666-6666-666666666666'
+     )),
   array['11111111-1111-1111-1111-111111111111', '66666666-6666-6666-6666-666666666666'],
   'the result is ordered by candidate_id, so a capped tick resumes deterministically'
 );
