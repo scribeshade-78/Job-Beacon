@@ -22,6 +22,99 @@ export interface AdzunaCredentials {
   appKey: string;
 }
 
+export class AdzunaPayloadError extends Error {
+  constructor(detail: string) {
+    super(`Adzuna returned a payload this adapter cannot read: ${detail}`);
+    this.name = "AdzunaPayloadError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Non-empty, trimmed, or null. Used for every string this mapper trusts. */
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** Only a real finite number is a salary; an explicit null is not one. */
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Adzuna's own explanation, when it sends one, read best-effort.
+ *
+ * "HTTP 401" alone sends an operator to the Adzuna dashboard with nothing to search
+ * for, while the body names the actual fault ("invalid app_key"). A non-JSON error body
+ * is not itself worth a different failure, so this returns an empty suffix rather than
+ * throwing over the original problem.
+ */
+async function describeAdzunaError(response: Response): Promise<string> {
+  try {
+    const body = asRecord(await response.json());
+    const detail = asString(body.exception) ?? asString(body.error) ?? asString(body.message);
+    return detail ? `: ${detail}` : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Maps ONE Adzuna result, or returns null when the row cannot be identified or linked.
+ *
+ * SKIPPING IS THE POINT. vacancies.source_vacancy_id, authoritative_url and raw_title
+ * are NOT NULL, so a row missing any of them is a failed insert or a garbage vacancy —
+ * not something to repair with "Unknown". The caller filters the nulls out.
+ */
+export function mapAdzunaResult(result: AdzunaResult, countryCode: string): DiscoveredVacancy | null {
+  const rawId = result.id;
+  const sourceVacancyId =
+    typeof rawId === "string" || typeof rawId === "number" ? String(rawId).trim() : "";
+  const authoritativeUrl = asString(result.redirect_url);
+  const rawTitle = asString(result.title);
+
+  if (!sourceVacancyId || !authoritativeUrl || !rawTitle) {
+    return null;
+  }
+
+  // SALARY IS "KNOWN" ONLY WHEN A NUMBER IS PRESENT. The old check was
+  // `!== undefined`, which is true for an explicit null — marking a row as an annual
+  // estimate while every salary field stayed null.
+  const salaryMin = asNumber(result.salary_min);
+  const salaryMax = asNumber(result.salary_max);
+  const hasSalary = salaryMin !== null || salaryMax !== null;
+
+  const area = Array.isArray(result.location?.area) ? result.location.area : [];
+
+  return {
+    sourceVacancyId,
+    authoritativeUrl,
+    rawTitle,
+    companyName: asString(result.company?.display_name) ?? "Unknown",
+    companyDomain: null,
+    country: countryCode.toUpperCase(),
+    // REGION FROM area[1], THE SAME STRUCTURED ARRAY THE CITY ALREADY TRUSTS.
+    // area is ["India","Tamil Nadu","Bangalore"] on real payloads; leaving region null
+    // while the state sat one slot away was a mapping gap, not a source limitation.
+    // display_name is still never decomposed — that would be guessing.
+    region: asString(area[1]),
+    city: asString(area[2]),
+    remoteType: null,
+    currency: null,
+    salaryMin,
+    salaryMax,
+    salaryInterval: hasSalary ? "year" : null,
+    // Adzuna's overview page doesn't document whether salary_min/max is
+    // employer-disclosed or Adzuna's own estimate for a given listing — treated
+    // conservatively as "estimated" rather than assumed disclosed.
+    salarySource: hasSalary ? "estimated" : null,
+    publishedAt: asString(result.created),
+    raw: result,
+  };
+}
+
 interface AdzunaResult {
   id: string;
   title: string;
@@ -35,10 +128,6 @@ interface AdzunaResult {
   salary_max?: number;
   created?: string;
   redirect_url: string;
-}
-
-interface AdzunaSearchResponse {
-  results: AdzunaResult[];
 }
 
 export async function discoverAdzuna(
@@ -62,46 +151,32 @@ export async function discoverAdzuna(
   );
 
   if (!response.ok) {
-    throw new Error(`Adzuna discovery failed for country "${countryCode}": HTTP ${response.status}`);
+    throw new Error(
+      `Adzuna discovery failed for country "${countryCode}": HTTP ${response.status}${await describeAdzunaError(response)}`,
+    );
   }
 
-  const body = (await response.json()) as AdzunaSearchResponse;
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new AdzunaPayloadError("the response body was not JSON");
+  }
 
-  return body.results.map((result) => ({
-    sourceVacancyId: result.id,
-    authoritativeUrl: result.redirect_url,
-    rawTitle: result.title,
-    companyName: result.company?.display_name ?? "Unknown",
-    companyDomain: null,
-    country: countryCode.toUpperCase(),
-    region: null,
-    // CITY FROM location.area[2], WHICH IS STRUCTURED - NOT from display_name, which
-    // is not. display_name is free text ("London, South East England") and is still
-    // never decomposed, because that would be guessing.
-    //
-    // ?? null IS LOAD-BEARING: some rows carry area ["India"] with no third element,
-    // and inventing one from display_name would put a guess into a column a filter
-    // matches on.
-    //
-    // KNOWN GRANULARITY CAVEAT, stated rather than hidden: area[2] is the city for
-    // some markets ("Bangalore") and a county or district for others -
-    // "Lancashire", "Sedgwick County" and "Tiruvallur" were all observed live. The
-    // Cities filter will therefore offer some administrative areas alongside cities.
-    // The alternative is display_name's first comma segment, which reads closer to a
-    // locality but is exactly the free-text decomposition this mapper refuses.
-    city: result.location?.area?.[2] ?? null,
-    remoteType: null,
-    currency: null,
-    salaryMin: result.salary_min ?? null,
-    salaryMax: result.salary_max ?? null,
-    salaryInterval: result.salary_min !== undefined || result.salary_max !== undefined ? "year" : null,
-    // Adzuna's overview page doesn't document whether salary_min/max is
-    // employer-disclosed or Adzuna's own estimate for a given listing —
-    // treated conservatively as "estimated" rather than assumed disclosed.
-    salarySource: result.salary_min !== undefined || result.salary_max !== undefined ? "estimated" : null,
-    publishedAt: result.created ?? null,
-    raw: result,
-  }));
+  const results = asRecord(payload).results;
+
+  // A MALFORMED BODY IS NAMED, NOT A STACK TRACE. `body.results.map` on a missing key
+  // used to throw "Cannot read properties of undefined (reading 'map')", which the
+  // worker stored verbatim as the source's health error — naming our own code instead
+  // of the provider's payload.
+  if (!Array.isArray(results)) {
+    throw new AdzunaPayloadError("the response had no results array");
+  }
+
+  // UNMAPPABLE ROWS ARE SKIPPED, NOT REPAIRED — see mapAdzunaResult.
+  return (results as AdzunaResult[])
+    .map((result) => mapAdzunaResult(result, countryCode))
+    .filter((vacancy): vacancy is DiscoveredVacancy => vacancy !== null);
 }
 
 const ADZUNA_SOURCE_CODE = "adzuna" as const;

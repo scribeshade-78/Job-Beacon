@@ -186,3 +186,108 @@ describe("Adzuna structured location (captured from real 200s)", () => {
     expect(row.country).toBe("GB");
   });
 });
+
+/**
+ * Phase 8 — payload hardening.
+ *
+ * The mapper above was written against the DOCUMENTED shape and a couple of real
+ * 200s. These cover the shapes a live aggregator actually produces: a body whose
+ * `results` key is missing entirely, a body whose `results` is not an array, rows
+ * that cannot be identified or linked, and a non-2xx whose body explains why.
+ */
+describe("Adzuna payload hardening", () => {
+  function page(results: unknown[]) {
+    return (async () => ({ ok: true, status: 200, json: async () => ({ results }) })) as unknown as typeof fetch;
+  }
+
+  it("throws a payload error, not an unchecked TypeError, when results is not an array", async () => {
+    // Previously: `body.results.map` on a missing key threw "Cannot read properties
+    // of undefined (reading 'map')" — a stack trace that names our own code rather
+    // than the provider's payload, and which the ingestion worker records verbatim
+    // as the source's health error.
+    await expect(discoverAdzuna("gb", {}, credentials, fixtureFetch(200, {}))).rejects.toThrow(/results/i);
+    await expect(
+      discoverAdzuna("gb", {}, credentials, fixtureFetch(200, { results: "nope" })),
+    ).rejects.toThrow(/results/i);
+  });
+
+  it("skips a row that cannot be identified or linked instead of writing undefined into NOT NULL columns", async () => {
+    // vacancies.source_vacancy_id / authoritative_url / raw_title are NOT NULL, so a
+    // row without them is either a failed insert or a garbage vacancy. The other
+    // adapters skip and move on; this one must too.
+    const rows = await discoverAdzuna(
+      "gb",
+      {},
+      credentials,
+      page([
+        { id: "1", title: "Engineer", redirect_url: "https://adzuna.test/1" },
+        { title: "No id", redirect_url: "https://adzuna.test/2" },
+        { id: "3", title: "No url" },
+        { id: "4", redirect_url: "https://adzuna.test/4" },
+        { id: 5, title: "Numeric id", redirect_url: "https://adzuna.test/5" },
+      ]),
+    );
+
+    expect(rows.map((row) => row.sourceVacancyId)).toEqual(["1", "5"]);
+    expect(rows.every((row) => typeof row.authoritativeUrl === "string" && row.authoritativeUrl !== "")).toBe(true);
+  });
+
+  it("reads region from location.area[1] - the same structured array the city already trusts", async () => {
+    // area is ["India","Tamil Nadu","Bangalore"] on real payloads. city already comes
+    // from area[2]; leaving region null while the state sits one slot away is a
+    // mapping gap, not a source limitation.
+    const [row] = await discoverAdzuna(
+      "in",
+      { resultsPerPage: 1 },
+      credentials,
+      page([
+        {
+          id: "1",
+          title: "Engineer",
+          redirect_url: "https://adzuna.test/1",
+          location: { display_name: "Bangalore, Karnataka", area: ["India", "Tamil Nadu", "Bangalore"] },
+        },
+      ]),
+    );
+
+    expect(row.region).toBe("Tamil Nadu");
+    expect(row.city).toBe("Bangalore");
+  });
+
+  it("returns a null region rather than inventing one when area is short", async () => {
+    const [row] = await discoverAdzuna(
+      "in",
+      {},
+      credentials,
+      page([
+        { id: "1", title: "Engineer", redirect_url: "https://adzuna.test/1", location: { area: ["India"] } },
+      ]),
+    );
+
+    expect(row.region).toBeNull();
+  });
+
+  it("does not claim an annual salary when the provider sent an explicit null", async () => {
+    // `salary_min: null` is PRESENT, so a `!== undefined` check marked the row as an
+    // annual estimate while every salary field stayed null — a vacancy advertised as
+    // "salary known" with no salary on it.
+    const rows = await discoverAdzuna(
+      "gb",
+      {},
+      credentials,
+      page([{ id: "1", title: "Engineer", redirect_url: "https://adzuna.test/1", salary_min: null, salary_max: null }]),
+    );
+
+    expect(rows[0].salaryMin).toBeNull();
+    expect(rows[0].salaryInterval).toBeNull();
+    expect(rows[0].salarySource).toBeNull();
+  });
+
+  it("surfaces the provider's own error detail on a non-2xx response", async () => {
+    // Adzuna answers a bad key with { exception: ... }. "HTTP 401" alone sends the
+    // operator to the Adzuna dashboard with nothing to search for.
+    await expect(
+      discoverAdzuna("gb", {}, credentials, fixtureFetch(401, { exception: "invalid app_key" })),
+    ).rejects.toThrow(/invalid app_key/);
+  });
+});
