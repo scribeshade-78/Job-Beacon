@@ -1174,16 +1174,21 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
               Sorted by {SORT_FIELDS_BY_ID[sort].label}
               {rankingCurrent ? " · ranked by your preferences" : ""}
             </>
-            {/* Three buckets, because they are three different claims. The old
-                line reported VERIFIED_INCOMPLETE as "verified", which is the
-                same overstatement the badge made. */}
+            {/* Three buckets, because they are three different claims. The old line reported
+                VERIFIED_INCOMPLETE as "verified", which is the same overstatement the badge
+                made.
+                AND THE COUNT IS PAGE-SCOPED, so the line now says which page. It describes the
+                LOADED rows only: "Best match" orders scored rows first and the newest rows
+                after them, so a first page can be entirely unverified aggregator postings
+                while the corpus holds hundreds of verified listings it has not reached yet.
+                A bare "0 verified" reads as a claim about the whole feed, and it is not one -
+                which is exactly how this was mistaken for a broken metric. */}
+            <> · of {visibleOpportunities.length} loaded:</>
             {partiallyVerifiedCount > 0 && (
-              <> · {verifiedCount} verified, {partiallyVerifiedCount} partly verified</>
+              <> {verifiedCount} verified, {partiallyVerifiedCount} partly verified</>
             )}
-            {partiallyVerifiedCount === 0 && unverifiedCount > 0 && (
-              <> · {verifiedCount} verified</>
-            )}
-            {unverifiedCount > 0 && <> · {unverifiedCount} unverified</>}
+            {partiallyVerifiedCount === 0 && <> {verifiedCount} verified</>}
+            {unverifiedCount > 0 && <>, {unverifiedCount} unverified</>}
             {/* The old "showing N of M loaded" line is gone with the client-side
                 filter it described. The one thing that now narrows the loaded
                 rows is the target-role filter below the header, and the count to

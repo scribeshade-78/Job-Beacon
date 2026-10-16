@@ -498,3 +498,21 @@ describe("OpportunitiesPanel — actionable blocker prompt", () => {
     expect(screen.queryByRole("button", { name: "See plans" })).toBeNull();
   });
 });
+
+describe("OpportunitiesPanel trust counts", () => {
+  it("says the trust counts describe the LOADED page, not the whole feed", async () => {
+    // THE DEFECT. "0 verified" with no scope reads as a claim about the feed, and on a real
+    // corpus it is badly wrong: 736 verified listings can exist while the loaded page holds
+    // none, because "Best match" orders scored rows first and the newest rows after them, and
+    // the only scored rows were freshly ingested aggregator postings. The arithmetic was
+    // right - it counts the loaded rows - but the sentence did not say so.
+    renderPanel();
+
+    const summary = await screen.findByText(/Sorted by/);
+    const text = summary.textContent ?? "";
+
+    expect(text).toContain("1 loaded");
+    expect(text).toMatch(/0 verified/);
+    expect(text).toMatch(/1 unverified/);
+  });
+});
