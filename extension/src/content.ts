@@ -23,6 +23,7 @@ import type { CandidateProfile, FillReport } from "./lib/types.js";
 import { classifySubmissionEvidence, readAttemptId, type EvidenceInput } from "./lib/loop.js";
 import { detectSite } from "./lib/sites.js";
 import { automationIdOf, describingText } from "./lib/fieldMatching.js";
+import { hasStep, readErrorBanner, waitForStepSettled } from "./lib/workdaySteps.js";
 import { isOverlayNode, mountOverlay, shouldMountOverlay, type OverlayHandle } from "./lib/overlay.js";
 
 /**
@@ -525,13 +526,40 @@ async function armFromUrl(): Promise<void> {
     armedLeaseToken = payload.leaseToken;
 
     if (payload.fill?.profile) {
+      // OBSERVATION ONLY. These hooks wait and read; nothing here clicks anything, and the
+      // fill-and-stop invariant above is untouched. See workdaySteps.ts.
+      //
+      // THE SETTLE WAIT IS GATED ON THE WORKDAY STEP EXISTING. waitForStepSettled reports a
+      // timeout when no step container ever appears, so running it unconditionally would impose
+      // a 30-second stall on Greenhouse and Lever, which have no steps to wait for.
+      const settlement = hasStep(document)
+        ? await waitForStepSettled(document)
+        : ({ kind: "ready" } as const);
+
+      // Read AFTER settling: the banner is what Workday rendered for this step, and reading
+      // before the spinner cleared would read the previous step's message.
+      const validationMessage = readErrorBanner(document);
+
       const report = fillForm({ profile: payload.fill.profile });
-      overlay?.setStatus(
+
+      const filled =
         report.filled.length > 0
           ? "Filled " + report.filled.join(", ") + ". Review every answer, then submit."
-          : "Nothing was filled on this page. Complete it yourself, then submit.",
-        report.filled.length > 0 ? "ok" : "error",
-      );
+          : "Nothing was filled on this page. Complete it yourself, then submit.";
+
+      // THE VALIDATION MESSAGE COMES FIRST WHEN THERE IS ONE. It is the reason the step was
+      // rejected and the one thing the candidate has to act on, so it must not be buried behind
+      // a summary of what we filled - or, worse, be replaced by "Filled ... Review every answer",
+      // which reads like the step is fine.
+      const parts = [
+        validationMessage === null ? null : "Workday says: " + validationMessage,
+        settlement.kind === "timeout"
+          ? "This step was still loading, so it may not be fully filled."
+          : null,
+        filled,
+      ].filter((part): part is string => part !== null);
+
+      overlay?.setStatus(parts.join(" "), report.filled.length > 0 ? "ok" : "error");
     } else {
       overlay?.setStatus("Nothing to fill. Review the form, then submit.", "idle");
     }

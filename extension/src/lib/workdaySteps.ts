@@ -48,7 +48,10 @@ export function isVisible(element: Element | null): boolean {
  */
 export function readErrorBanner(doc: Document): string | null {
   const banner = doc.querySelector(WORKDAY.errorBanner);
-  if (!isVisible(banner)) return null;
+  // The explicit null test is what NARROWS the type. isVisible accepts null, so relying on it
+  // alone leaves banner as Element | null and the querySelector below fails to compile - which
+  // is how this file shipped without a typecheck until the wiring change exposed it.
+  if (banner === null || !isVisible(banner)) return null;
   const message = banner.querySelector(WORKDAY.errorMessage);
   const text = (message?.textContent ?? banner.textContent ?? "").trim();
   return text === "" ? "Workday rejected this step without saying why." : text;
