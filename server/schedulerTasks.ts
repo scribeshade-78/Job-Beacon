@@ -3,6 +3,7 @@ import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { readFitAnalysisBatchLimit } from "./opportunities/batchLimit.js";
 import { reconcileFitAnalyses } from "./opportunities/reconcile.js";
+import { recoverAcceptedAttempts } from "./applications/evidenceRecovery.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import {
@@ -88,6 +89,18 @@ export const DEFAULT_ANTI_GHOSTING_INTERVAL_MS = 24 * 60 * 60_000;
 
 export const FIT_TASK_NAME = "fit-analysis";
 export const FIT_RECONCILE_TASK_NAME = "fit-reconcile";
+export const APPLICATION_RECOVERY_TASK_NAME = "application-recovery";
+
+/**
+ * How often accepted-but-unrecorded submissions are reconciled.
+ *
+ * A REPAIR CADENCE, NOT A LATENCY BUDGET. When the portal accepts a submission and the receipt
+ * write then fails, the attempt stays in 'submitting' — a state claim_application_attempt
+ * deliberately cannot reclaim, because retrying could send a SECOND real application. Nothing
+ * else finishes that row, so this schedule is the only thing that turns it into "Applied".
+ * Thirty minutes is ample for work that has already happened and is at no risk while it waits.
+ */
+export const DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS = 30 * 60_000;
 export const RANKING_REFRESH_TASK_NAME = "ranking-refresh";
 export const ANTI_GHOSTING_TASK_NAME = "anti-ghosting";
 export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
@@ -535,6 +548,46 @@ export function buildScheduledTasks(
             : {}),
         });
         return { ...result };
+      },
+    },
+
+    /**
+     * THE ACCEPTANCE-EVIDENCE REPAIR PASS — the only thing that finishes a stuck submission.
+     *
+     * WHAT IT REPAIRS. worker.ts crosses a durable submission boundary before calling the
+     * adapter, then writes the receipt and the final status. If either write fails after the
+     * portal accepted the application, the attempt stays in 'submitting', which
+     * claim_application_attempt cannot reclaim — deliberately, since a retry could be a SECOND
+     * real application. Nothing else resolves that row: without this schedule the candidate
+     * never sees "Applied" and no operator is ever told.
+     *
+     * SAFE TO SCHEDULE BECAUSE IT CANNOT SUBMIT. recoverAcceptedAttempts has no adapter import
+     * and makes no network call. It finalizes only an attempt that already has a trustworthy
+     * confirmation stored, and its update is conditional on the status it read, so a concurrent
+     * writer makes it match zero rows. Running it twice is harmless.
+     *
+     * PLACED LAST: it has no ordering dependency on any other task, and every task here shares a
+     * tick, so putting a DB-only repair ahead of the network work would delay the things a
+     * candidate notices for no reason.
+     */
+    {
+      name: APPLICATION_RECOVERY_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_APPLICATION_RECOVERY_INTERVAL_MS",
+        DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS,
+        env,
+      ),
+      run: async () => {
+        // dryRun is deliberately not exposed here: an unattended pass that only reports would
+        // let a stuck row stay stuck while the log said it was being handled. Unset leaves
+        // evidenceRecovery's own DEFAULT_RECOVERY_LIMIT.
+        const result = await recoverAcceptedAttempts(client, {
+          limit: env.APPLICATION_RECOVERY_LIMIT
+            ? Number.parseInt(env.APPLICATION_RECOVERY_LIMIT, 10)
+            : undefined,
+        });
+
+        return { considered: result.considered, finalized: result.finalized, skipped: result.skipped };
       },
     },
 

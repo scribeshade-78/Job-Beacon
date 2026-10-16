@@ -3,6 +3,7 @@ import type OpenAI from "openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
 import { reconcileFitAnalyses } from "./opportunities/reconcile.js";
+import { recoverAcceptedAttempts } from "./applications/evidenceRecovery.js";
 import { runFollowUpSweep } from "./mailbox/antiGhosting.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
@@ -27,6 +28,8 @@ import {
   INTAKE_REFRESH_DRAIN_TASK_NAME,
   KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
+  APPLICATION_RECOVERY_TASK_NAME,
+  DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
   parseDisabledTasks,
@@ -38,6 +41,10 @@ vi.mock("./opportunities/runner.js", () => ({ runFitAnalysisBatch: vi.fn() }));
 // covered by server/opportunities/reconcile.test.ts; here only registration,
 // cadence, ordering and what the scheduler hands it.
 vi.mock("./opportunities/reconcile.js", () => ({ reconcileFitAnalyses: vi.fn() }));
+// The acceptance-evidence repair pass. Its own logic - which statuses it may touch, how a
+// concurrent writer is handled - is covered by server/applications/evidenceRecovery.test.ts;
+// here only registration, cadence and what the scheduler hands it.
+vi.mock("./applications/evidenceRecovery.js", () => ({ recoverAcceptedAttempts: vi.fn() }));
 vi.mock("./mailbox/poll.js", () => ({ runMailboxPollingBatch: vi.fn() }));
 vi.mock("./mailbox/classifyBatch.js", () => ({ runMessageClassificationBatch: vi.fn() }));
 vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() }));
@@ -97,6 +104,7 @@ const ALWAYS_ON = [
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
+  APPLICATION_RECOVERY_TASK_NAME,
 ];
 
 // The constants are imported for real rather than restubbed: the whole point of
@@ -131,6 +139,7 @@ function taskByName(name: string, env: Record<string, string | undefined> = {}) 
 beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockReset();
   vi.mocked(reconcileFitAnalyses).mockReset();
+  vi.mocked(recoverAcceptedAttempts).mockReset();
   vi.mocked(drainIntakeRefreshJobs).mockReset();
   vi.mocked(enqueueIngestionBatch).mockReset();
   vi.mocked(runFollowUpSweep).mockReset();
@@ -138,6 +147,9 @@ beforeEach(() => {
   vi.mocked(runFitAnalysisBatch).mockResolvedValue({ ...fitResult });
   vi.mocked(reconcileFitAnalyses).mockResolvedValue({
     candidates: 0, vacancies: 0, scanned: 0, enqueued: 0, skipped: 0, truncated: false,
+  });
+  vi.mocked(recoverAcceptedAttempts).mockResolvedValue({
+    dryRun: false, considered: 0, finalized: 0, skipped: 0, outcomes: [],
   });
   vi.mocked(runFollowUpSweep).mockResolvedValue({ ...sweepResult });
 });
@@ -535,6 +547,49 @@ describe("the fit-reconcile task", () => {
     expect(await taskByName(FIT_RECONCILE_TASK_NAME, {}).run()).toEqual({
       candidates: 2, vacancies: 743, scanned: 1486, enqueued: 500, skipped: 986, truncated: true,
     });
+  });
+});
+
+describe("the application-recovery task", () => {
+  it("is scheduled, so a stuck submission is finished without a human", () => {
+    // An attempt whose portal submission succeeded but whose receipt write failed sits in
+    // 'submitting', which the claim predicate cannot reclaim — deliberately, because a retry
+    // could be a SECOND real application. This pass is the only thing that finishes such a row,
+    // so unscheduled means the candidate never sees "Applied" and no operator is told.
+    expect(DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS).toBe(1_800_000);
+    expect(taskByName(APPLICATION_RECOVERY_TASK_NAME, {}).intervalMs).toBe(
+      DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS,
+    );
+    expect(
+      taskByName(APPLICATION_RECOVERY_TASK_NAME, { SCHEDULER_APPLICATION_RECOVERY_INTERVAL_MS: "60000" })
+        .intervalMs,
+    ).toBe(60_000);
+  });
+
+  it("passes the documented limit through, leaving the module's default when unset", async () => {
+    await taskByName(APPLICATION_RECOVERY_TASK_NAME, { APPLICATION_RECOVERY_LIMIT: "7" }).run();
+
+    expect(vi.mocked(recoverAcceptedAttempts)).toHaveBeenCalledWith(client, { limit: 7 });
+
+    await taskByName(APPLICATION_RECOVERY_TASK_NAME, {}).run();
+
+    expect(vi.mocked(recoverAcceptedAttempts)).toHaveBeenCalledWith(client, { limit: undefined });
+  });
+
+  it("reports what it finalized and skipped, so a stuck row is visible in the log", async () => {
+    vi.mocked(recoverAcceptedAttempts).mockResolvedValue({
+      dryRun: false, considered: 3, finalized: 2, skipped: 1, outcomes: [],
+    });
+
+    expect(await taskByName(APPLICATION_RECOVERY_TASK_NAME, {}).run()).toEqual({
+      considered: 3, finalized: 2, skipped: 1,
+    });
+  });
+
+  it("never asks recovery to dry-run, which would leave a stuck row looking handled", async () => {
+    await taskByName(APPLICATION_RECOVERY_TASK_NAME, {}).run();
+
+    expect(vi.mocked(recoverAcceptedAttempts).mock.calls[0]?.[1]).not.toMatchObject({ dryRun: true });
   });
 });
 
