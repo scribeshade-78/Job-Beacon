@@ -7,6 +7,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks",
+    "hooks:install": "git config core.hooksPath .githooks",
     "dev": "concurrently --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:scheduler\"",
     "dev:client": "vite --config vite.config.ts",
     "dev:server": "node --env-file-if-exists=.env --import=tsx --watch-path=./server --watch-path=./shared server/index.ts",

@@ -1,0 +1,28 @@
+#!/bin/sh
+# MECHANICAL COMMIT GATE - a red build cannot be committed, by construction.
+#
+# WHY THIS EXISTS. Twice this project committed a RED TYPECHECK while the test suite was green:
+# vitest strips types, so a type error is invisible to it. Both times a human had to notice. A
+# rule that depends on being remembered is not a rule.
+#
+# WHAT RUNS HERE vs ON PUSH. A full suite on every commit is ~4 minutes, which is how teams end up
+# typing --no-verify and losing the gate entirely. So this hook runs the FAST deterministic checks
+# - the typecheck that would have caught both incidents, plus the tests related to what is staged.
+# The full suite runs in pre-push, where a few minutes is a fair price.
+#
+# NO HUSKY DEPENDENCY: core.hooksPath is pointed at this version-controlled directory by the
+# "prepare" script, so a fresh clone gets the gate from npm install alone.
+set -e
+
+echo "[gate] npm run typecheck"
+npm run typecheck
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|tsx)$' || true)
+
+if [ -n "$staged" ]; then
+  echo "[gate] vitest related (staged files)"
+  # shellcheck disable=SC2086
+  npx vitest related --run $staged
+else
+  echo "[gate] no staged TypeScript files, skipping related tests"
+fi

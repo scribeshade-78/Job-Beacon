@@ -1,0 +1,12 @@
+#!/bin/sh
+# THE FULL GATE - runs before anything leaves this machine.
+#
+# This is the check that would have stopped 8edbb3f: a green suite hiding a failing build. It runs
+# BOTH, because on this project each has hidden a defect from the other.
+set -e
+
+echo "[gate] npm run typecheck"
+npm run typecheck
+
+echo "[gate] full vitest suite"
+npx vitest run
