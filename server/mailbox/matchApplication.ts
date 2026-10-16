@@ -34,6 +34,21 @@ export const MATCH_REVIEW_THRESHOLD = 0.6;
 /** Two candidates whose scores are within this of each other, both above auto, is not a confident link. */
 export const MATCH_AMBIGUITY_MARGIN = 0.1;
 
+/**
+ * How many INDEPENDENT reasons an auto-link needs, after the sender domain is set aside.
+ *
+ * CONFIDENCE IS A SUM, AND A SUM OF WEAK SIGNALS IS NOT EVIDENCE. sender_domain_match is worth
+ * 0.5 and company_name_exact 0.35, which add to exactly 0.85 - the auto threshold - so a spoofed
+ * From header plus a company name anyone could guess used to bind an application with no human in
+ * the loop. That is the arithmetic of the historical .co.uk false positive, and it survived the
+ * public-suffix fix because the fix corrected WHICH domain matched, not what a domain is worth.
+ *
+ * A SENDER DOMAIN IS NOT INDEPENDENT EVIDENCE OF PROVENANCE. It is a header the sender writes.
+ * Requiring two reasons that are not it means an auto-link needs something the attacker must know
+ * ABOUT THE APPLICATION - an id, a role, a company - beyond the identity they can assert.
+ */
+export const MIN_INDEPENDENT_REASONS_FOR_AUTO = 2;
+
 export const MATCH_REASONS = [
   "job_id_exact",
   "sender_domain_match",
@@ -235,6 +250,20 @@ export const ATS_RELAY_DOMAINS: ReadonlySet<string> = new Set([
 export const RELAY_COMPANY_EXACT_WEIGHT = 0.65;
 
 /**
+ * What an exact ATS job id is worth.
+ *
+ * IT USED TO BE 0.95, WHICH AUTO-LINKED ON ITS OWN, AND THAT WAS WRONG: THE JOB ID IS PUBLIC.
+ * It is displayed on the employer's own job board, so anyone who can see the posting can put it
+ * in an email. An exact id therefore proves WHICH job this mail is about and nothing at all about
+ * WHO sent it - and treating it as near-certain turned a public string into an auto-link.
+ *
+ * 0.70 CLEARS THE 0.60 REVIEW FLOOR AND STOPS SHORT OF THE 0.85 AUTO THRESHOLD, which is the same
+ * shape the relay weight uses: enough to put the message in front of a human, not enough to bind
+ * it without corroboration.
+ */
+export const JOB_ID_EXACT_WEIGHT = 0.7;
+
+/**
  * Whether this sender is an ATS vendor relaying an employer's mail.
  *
  * Matched on the REGISTRABLE domain, so a tenant or regional subdomain is recognised as the same
@@ -261,7 +290,7 @@ function scoreOne(input: MatchInput, app: CandidateApplication): ScoredApplicati
 
   const jobId = normalizeText(input.jobId);
   if (jobId && jobId === normalizeText(app.sourceVacancyId)) {
-    confidence += 0.95;
+    confidence += JOB_ID_EXACT_WEIGHT;
     reasons.push("job_id_exact");
   }
 
@@ -323,6 +352,16 @@ export function scoreApplicationMatch(input: MatchInput, apps: CandidateApplicat
 
   if (best.confidence < MATCH_AUTO_THRESHOLD) {
     return { kind: "review", candidates: scored.filter((s) => s.confidence >= MATCH_REVIEW_THRESHOLD) };
+  }
+
+  // A SENDER DOMAIN DOES NOT COUNT TOWARD INDEPENDENCE - see MIN_INDEPENDENT_REASONS_FOR_AUTO.
+  const independent = best.reasons.filter((reason) => reason !== "sender_domain_match");
+
+  if (independent.length < MIN_INDEPENDENT_REASONS_FOR_AUTO) {
+    return {
+      kind: "review",
+      candidates: scored.filter((s) => s.confidence >= MATCH_REVIEW_THRESHOLD),
+    };
   }
 
   const runnerUp = scored[1];

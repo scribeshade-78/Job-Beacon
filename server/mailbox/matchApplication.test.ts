@@ -81,14 +81,19 @@ describe("scoreApplicationMatch", () => {
     expect(scoreApplicationMatch(input(), [app()])).toEqual({ kind: "none" });
   });
 
-  it("auto-links on an exact ATS job id alone (0.95)", () => {
+  it("does NOT auto-link on an exact ATS job id alone", () => {
+    // THE JOB ID IS PUBLIC: it is printed on the employer's own job board, so anyone who can see
+    // the posting can put it in an email. It proves WHICH job this mail concerns and nothing at
+    // all about who sent it. 0.70 clears the 0.60 review floor and stops short of 0.85, so the
+    // message reaches a human instead of binding an application.
     const result = scoreApplicationMatch(input({ jobId: "gh-4021" }), [app()]);
-    expect(result).toEqual({
-      kind: "auto",
-      attemptId: "attempt-1",
-      confidence: 0.95,
-      reasons: ["job_id_exact"],
-    });
+
+    expect(result.kind).toBe("review");
+
+    if (result.kind === "review") {
+      expect(result.candidates[0]!.confidence).toBeCloseTo(0.7);
+      expect(result.candidates[0]!.reasons).toEqual(["job_id_exact"]);
+    }
   });
 
   it("auto-links on sender domain + exact company + exact role", () => {
@@ -139,11 +144,14 @@ describe("scoreApplicationMatch", () => {
       input({ sender: "x@acme.com", company: "Acme Corp" }),
       [app()],
     );
-    // domain 0.5 + company exact 0.35 = 0.85 — NOT also + fuzzy 0.20
-    expect(result.kind).toBe("auto");
-    if (result.kind === "auto") {
-      expect(result.confidence).toBeCloseTo(0.85);
-      expect(result.reasons).toEqual(["sender_domain_match", "company_name_exact"]);
+    // domain 0.5 + company exact 0.35 = 0.85 — NOT also + fuzzy 0.20. The ARITHMETIC is
+    // unchanged and still asserted below; what changed is that 0.85 with only ONE independent
+    // reason no longer binds. A sender domain is a header the sender writes, so it cannot be the
+    // corroboration that carries a link over the line.
+    expect(result.kind).toBe("review");
+    if (result.kind === "review") {
+      expect(result.candidates[0]!.confidence).toBeCloseTo(0.85);
+      expect(result.candidates[0]!.reasons).toEqual(["sender_domain_match", "company_name_exact"]);
     }
   });
 
@@ -176,10 +184,12 @@ describe("scoreApplicationMatch", () => {
   });
 
   it("is ambiguous when two applications score above auto within the margin", () => {
-    const result = scoreApplicationMatch(input({ jobId: "GH-4021" }), [
-      app({ attemptId: "a1", sourceVacancyId: "GH-4021" }),
-      app({ attemptId: "a2", sourceVacancyId: "gh-4021" }),
-    ]);
+    // The ambiguity rule only runs for candidacies that REACH auto, so this input now needs two
+    // independent reasons: the job id alone lands in review and never gets here.
+    const result = scoreApplicationMatch(
+      input({ jobId: "GH-4021", sender: "x@acme.com", company: "Acme Corp" }),
+      [app({ attemptId: "a1" }), app({ attemptId: "a2" })],
+    );
     expect(result.kind).toBe("ambiguous");
     if (result.kind === "ambiguous") {
       expect(result.candidates.map((c) => c.attemptId).sort()).toEqual(["a1", "a2"]);
@@ -205,10 +215,10 @@ describe("scoreApplicationMatch", () => {
       app({ attemptId: "match" }),
       app({ attemptId: "nomatch", sourceVacancyId: "ZZ-9", companyName: null, companyDomain: null, careerDomain: null, roleTitle: null }),
     ]);
-    expect(result.kind).toBe("auto");
-    if (result.kind === "auto") {
-      expect(result.attemptId).toBe("match");
-    }
+    // The point of this test is the ZERO-SIGNAL application, not the winner's verdict: whatever
+    // the outcome, the app that matched nothing must never be the link target.
+    expect(result.kind).not.toBe("auto");
+    expect(JSON.stringify(result)).not.toContain("nomatch");
   });
 });
 
@@ -311,14 +321,14 @@ describe("scoreApplicationMatch — ATS relay senders", () => {
     expect(result.kind).toBe("auto");
   });
 
-  it("leaves an ordinary employer domain on the old arithmetic", () => {
-    // The relay path must not have quietly become the default.
+  it("leaves an ordinary employer domain on the old arithmetic, but no longer auto-links", () => {
+    // The relay path must not have quietly become the default: the SCORE is still 0.85.
     const result = scoreApplicationMatch(input({ sender: "recruiting@acme.com", company: "Acme Corp" }), [app()]);
 
-    expect(result.kind).toBe("auto");
-    if (result.kind === "auto") {
-      expect(result.confidence).toBeCloseTo(0.85);
-      expect(result.reasons).toEqual(["sender_domain_match", "company_name_exact"]);
+    expect(result.kind).toBe("review");
+    if (result.kind === "review") {
+      expect(result.candidates[0]!.confidence).toBeCloseTo(0.85);
+      expect(result.candidates[0]!.reasons).toEqual(["sender_domain_match", "company_name_exact"]);
     }
   });
 });
