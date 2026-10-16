@@ -83,8 +83,47 @@ export function retryAfterSecondsFrom(response: Response): number | null {
 }
 
 /**
+ * The two 4xx statuses that do NOT establish non-acceptance.
+ *
+ * 408 is a SERVER-side timeout: it is a 4xx, so a naive "any 4xx is a rejection" rule would
+ * call it established, but the request may well have been processed.
+ *
+ * 409 CONFLICT commonly means the application already exists — the opposite of "nothing was
+ * accepted" — so treating it as established would be exactly backwards.
+ */
+const AMBIGUOUS_4XX_STATUSES = new Set([408, 409]);
+
+/**
+ * Whether this status PROVES the portal did not accept the submission.
+ *
+ * THE DUPLICATE-SUBMISSION BOUNDARY. worker.ts only returns an attempt to the retry queue when
+ * this is true; otherwise the attempt keeps its unreclaimable 'submitting' state. So a wrong
+ * true here is a second real application to an employer, while a wrong false merely costs
+ * manual verification.
+ *
+ * A 5xx IS ALWAYS AMBIGUOUS. The request reached the portal; the portal may have recorded the
+ * application and then failed while answering. 502 and 504 in particular are gateway and
+ * timeout errors raised by infrastructure in front of an application that may already exist.
+ *
+ * Everything else in the 4xx range is the form refusing what we sent before anything was
+ * recorded — the one case where retrying (429, with Retry-After) or giving up (4xx) is safe.
+ * Nothing outside that range establishes anything.
+ */
+function establishesNonAcceptance(status: number): boolean {
+  if (status < 400 || status >= 500) {
+    return false;
+  }
+
+  return !AMBIGUOUS_4XX_STATUSES.has(status);
+}
+
+/**
  * Classifies a non-2xx ATS response. 429 and 5xx are retryable; every other 4xx
  * is a validation rejection and is terminal for this attempt.
+ *
+ * nonAcceptanceEstablished is set separately and more narrowly than retryable, because the two
+ * answer different questions: retryable says another attempt might succeed, while the flag says
+ * nothing was accepted. Only the second is a licence to send again.
  */
 export function atsHttpFailure(
   response: Response,
@@ -101,5 +140,6 @@ export function atsHttpFailure(
     reasonCode,
     status: response.status,
     retryAfterSeconds,
+    nonAcceptanceEstablished: establishesNonAcceptance(response.status),
   });
 }
