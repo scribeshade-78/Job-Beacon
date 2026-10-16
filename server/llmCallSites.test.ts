@@ -28,7 +28,10 @@ function sourceFiles(dir: string, found: string[] = []): string[] {
   return found;
 }
 
-describe("LLM call sites", () => {
+// EXPLICIT TIMEOUT, because this scan is I/O over the whole server tree and the 5s default is
+// too tight under full-suite parallel load - it passed in isolation and timed out at 15.7s in the
+// full run. The work is real and bounded, so it gets a budget rather than a shortcut.
+describe("LLM call sites", { timeout: 60_000 }, () => {
   it("bounds max_tokens on every chat.completions.create call", () => {
     const offenders: string[] = [];
 
