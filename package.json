@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:scheduler\"",
     "dev:client": "vite --config vite.config.ts",
-    "dev:server": "node --env-file-if-exists=.env --import=tsx --watch server/index.ts",
+    "dev:server": "node --env-file-if-exists=.env --import=tsx --watch-path=./server --watch-path=./shared server/index.ts",
     "worker:applications": "node --env-file-if-exists=.env --import=tsx server/applications/cli.ts",
     "worker:daemon": "node --env-file-if-exists=.env --import=tsx server/applications/daemon.ts",
     "worker:recover-accepted": "node --env-file-if-exists=.env --import=tsx server/applications/recoverCli.ts",
