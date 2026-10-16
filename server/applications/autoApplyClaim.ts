@@ -91,6 +91,10 @@ async function consumeSubmission(
     .from("application_attempts")
     .update({
       status: "submitting",
+      // Back to the default as the human-paced lease is consumed: from here the row is in the
+      // unreclaimable 'submitting' state, and leaving it marked 'extension' would keep a stale
+      // marker on an attempt no executor may hold again. See 20261017120000.
+      leased_by: "worker",
       submission_started_at: now.toISOString(),
       updated_at: now.toISOString(),
     })

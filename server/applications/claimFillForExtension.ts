@@ -151,6 +151,11 @@ export async function claimFillForExtension(
     .from("application_attempts")
     .update({
       status: "leased",
+      // THE MARK THAT KEEPS THE UNATTENDED WORKER OFF THIS ROW. A human is about to read and
+      // submit a real form, which takes as long as it takes; claim_application_attempt refuses
+      // leased_by = 'extension' at every age, so no 15-minute clock can hand this attempt to the
+      // server worker while the browser is still filling it. See 20261017120000.
+      leased_by: "extension",
       lease_token: leaseToken,
       leased_until: leasedUntil,
       updated_at: stamp.toISOString(),
