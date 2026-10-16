@@ -153,6 +153,10 @@ export async function pollOneMailboxConnection(
             subject: metadata.subject,
             received_at: metadata.receivedAt,
             raw_payload: metadata.raw,
+            // SPF/DKIM PROVENANCE, captured here because matching runs in a later batch and the
+            // header is gone by then. NULL passes through as NULL: the matcher reads absence as
+            // UNKNOWN, never as a pass.
+            auth_results: metadata.authResults,
           },
           { onConflict: "mailbox_connection_id,provider_message_id" },
         )

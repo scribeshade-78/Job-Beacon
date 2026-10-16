@@ -4,6 +4,11 @@ import { scoreApplicationMatch, type CandidateApplication, type MatchInput } fro
 interface MessageRow {
   id: string;
   sender: string | null;
+  /**
+   * The receiving provider's raw Authentication-Results verdict, persisted at poll time
+   * (see 20261019120000_messages_auth_results.sql). NULL means UNKNOWN, never passed.
+   */
+  auth_results: string | null;
   mailbox_connections: { candidate_id: string } | null;
   response_classifications: Array<{
     extracted_company: string | null;
@@ -51,7 +56,7 @@ export type SingleMessageLinkOutcome =
  */
 export async function matchOneClassifiedMessage(
   client: SupabaseClient,
-  message: { id: string; sender: string | null },
+  message: { id: string; sender: string | null; authResults?: string | null },
   classification: ClassifiedMessageEntities,
   apps: CandidateApplication[],
 ): Promise<SingleMessageLinkOutcome> {
@@ -60,6 +65,9 @@ export async function matchOneClassifiedMessage(
     company: classification.extracted_company,
     role: classification.extracted_role,
     jobId: classification.extracted_job_id,
+    // Absent for a caller that has no provider verdict (the raw .eml ingest path) — that is
+    // UNKNOWN, and authVerdict only ever acts on an explicit failure.
+    authResults: message.authResults,
   };
 
   const match = scoreApplicationMatch(input, apps);
@@ -172,7 +180,7 @@ export async function runApplicationMatchBatch(
   const { data, error } = await client
     .from("messages")
     .select(
-      "id, sender, mailbox_connections!inner (candidate_id), response_classifications!inner (extracted_company, extracted_role, extracted_job_id)",
+      "id, sender, auth_results, mailbox_connections!inner (candidate_id), response_classifications!inner (extracted_company, extracted_role, extracted_job_id)",
     )
     .is("application_attempt_id", null)
     .order("received_at", { ascending: true, nullsFirst: false })
@@ -210,7 +218,7 @@ export async function runApplicationMatchBatch(
 
       const match = await matchOneClassifiedMessage(
         client,
-        { id: row.id, sender: row.sender },
+        { id: row.id, sender: row.sender, authResults: row.auth_results },
         classification,
         apps,
       );
