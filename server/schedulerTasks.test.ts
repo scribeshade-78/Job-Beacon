@@ -453,13 +453,27 @@ describe("the fit-analysis task", () => {
     );
   });
 
-  it("omits the batch limit when it is not configured, leaving the runner's default", async () => {
+  it("passes the resolved default when the limit is not configured", async () => {
+    // Named explicitly rather than left undefined for the runner to resolve, so the throttle
+    // the scheduler hands over is visible in the call and asserted here.
     await taskByName(FIT_TASK_NAME, {}).run();
 
     expect(vi.mocked(runFitAnalysisBatch)).toHaveBeenCalledWith(
       client,
       { openai },
-      { maxPerBatch: undefined },
+      { maxPerBatch: 50 },
+    );
+  });
+
+  it("clamps an oversized limit, so no environment can uncap the paid drain", async () => {
+    // Every analysis is a model call. Without the ceiling, FIT_ANALYSIS_BATCH_LIMIT=100000
+    // would spend a hundred thousand of them in one tick while looking configured.
+    await taskByName(FIT_TASK_NAME, { FIT_ANALYSIS_BATCH_LIMIT: "100000" }).run();
+
+    expect(vi.mocked(runFitAnalysisBatch)).toHaveBeenCalledWith(
+      client,
+      { openai },
+      { maxPerBatch: 200 },
     );
   });
 

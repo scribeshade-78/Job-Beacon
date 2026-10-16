@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type OpenAI from "openai";
 import { runFitAnalysisBatch } from "./opportunities/runner.js";
+import { readFitAnalysisBatchLimit } from "./opportunities/batchLimit.js";
 import { reconcileFitAnalyses } from "./opportunities/reconcile.js";
 import { drainIngestionJobs, enqueueIngestionBatch } from "./ingestion/runner.js";
 import { drainIntakeRefreshJobs } from "./intake/refreshQueue.js";
@@ -377,13 +378,13 @@ export function buildScheduledTasks(
       name: FIT_TASK_NAME,
       intervalMs: readEnvInt("SCHEDULER_FIT_INTERVAL_MS", DEFAULT_FIT_INTERVAL_MS, env),
       run: async () => {
-        // FIT_ANALYSIS_BATCH_LIMIT is the knob npm run worker:fit already
-        // documents; reused rather than shadowed by a second name.
-        const maxPerBatch = env.FIT_ANALYSIS_BATCH_LIMIT
-          ? Number.parseInt(env.FIT_ANALYSIS_BATCH_LIMIT, 10)
-          : undefined;
-
-        const result = await runFitAnalysisBatch(client, { openai }, { maxPerBatch });
+        // The limit comes from ONE reader shared with npm run worker:fit, and it is CLAMPED
+        // there: every analysis is a paid model call, so a configured value above the ceiling
+        // is reduced rather than honoured. An unconfigured deployment gets the default rather
+        // than an uncapped drain.
+        const result = await runFitAnalysisBatch(client, { openai }, {
+          maxPerBatch: readFitAnalysisBatchLimit(env),
+        });
 
         return {
           claimed: result.claimed,

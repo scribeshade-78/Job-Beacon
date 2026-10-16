@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AnalyzeFitDeps } from "./analyzeFit.js";
 import { runOneFitAnalysisJob } from "./fitWorker.js";
+import { DEFAULT_FIT_ANALYSIS_BATCH_LIMIT } from "./batchLimit.js";
 
 /**
  * Response Intelligence Phase 2.1 — single-pass batch entrypoint: drains
@@ -10,7 +11,11 @@ import { runOneFitAnalysisJob } from "./fitWorker.js";
  * scope stance as the application and ingestion workers.
  */
 
-const DEFAULT_MAX_PER_BATCH = 50;
+/**
+ * The fallback when a caller passes no limit. Deliberately the same constant the environment
+ * reader uses, so "unset" cannot mean two different numbers in two places.
+ */
+const DEFAULT_MAX_PER_BATCH = DEFAULT_FIT_ANALYSIS_BATCH_LIMIT;
 
 export interface RunFitAnalysisBatchOptions {
   maxPerBatch?: number;

@@ -1,6 +1,7 @@
 import { createSupabaseServiceRoleClient } from "../supabaseServiceRole.js";
 import { createOpenAIClient } from "../resumes/openaiClient.js";
 import { runFitAnalysisBatch } from "./runner.js";
+import { readFitAnalysisBatchLimit } from "./batchLimit.js";
 import { reconcileFitAnalyses } from "./reconcile.js";
 
 /**
@@ -34,11 +35,11 @@ async function main() {
 
   const openai = createOpenAIClient();
 
-  const maxPerBatch = process.env.FIT_ANALYSIS_BATCH_LIMIT
-    ? Number.parseInt(process.env.FIT_ANALYSIS_BATCH_LIMIT, 10)
-    : undefined;
-
-  const result = await runFitAnalysisBatch(client, { openai }, { maxPerBatch });
+  // The SAME reader the scheduled task uses, including its ceiling: a manual run must not be
+  // able to spend more per tick than the unattended one.
+  const result = await runFitAnalysisBatch(client, { openai }, {
+    maxPerBatch: readFitAnalysisBatchLimit(),
+  });
 
   console.log("[opportunities:fit] batch complete", result);
 }
