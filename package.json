@@ -34,6 +34,7 @@
     "preview": "vite preview --config vite.config.ts",
     "start": "node dist/server/server/index.js",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:db": "vitest run --config vitest.db.config.ts",
     "build:extension": "node extension/build.mjs"
   },
   "dependencies": {
