@@ -14,13 +14,34 @@ import { decryptMailboxSecret, encryptMailboxSecret } from "./tokenCrypto.js";
 
 const PROVIDER = "gmail";
 
-export function startMailboxConnect(
+/**
+ * NOW ASYNC AND NOW TAKES A CLIENT, because the handshake needs durable state.
+ *
+ * A SIGNED STATE ALONE IS A BEARER TOKEN. Anyone who captures the value — browser history, a
+ * Referer leak, a shared URL — could replay it for its whole TTL. Persisting the nonce is what
+ * makes the callback able to CONSUME it, and the verifier rides along because it must survive the
+ * same round trip.
+ */
+export async function startMailboxConnect(
+  client: SupabaseClient,
   candidateId: string,
   config: GoogleOAuthConfig,
   stateSecret: string,
-): { authorizeUrl: string } {
-  const state = createOAuthState(stateSecret, candidateId);
-  return { authorizeUrl: buildGoogleAuthorizeUrl(config, state) };
+): Promise<{ authorizeUrl: string }> {
+  const created = createOAuthState(stateSecret, candidateId);
+
+  const { error } = await client.from("oauth_state").insert({
+    nonce: created.nonce,
+    candidate_id: candidateId,
+    code_verifier: created.codeVerifier,
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return { authorizeUrl: buildGoogleAuthorizeUrl(config, created.state, created.codeChallenge) };
 }
 
 export class InvalidOAuthStateError extends Error {}
@@ -47,7 +68,28 @@ export async function completeMailboxConnect(
     throw new InvalidOAuthStateError("Invalid or expired OAuth state.");
   }
 
-  const tokens = await exchangeGoogleAuthCode(config, input.code, fetchImpl);
+  // ATOMIC CONSUMPTION. DELETE ... RETURNING keyed on the nonce: the callback that matches the row
+  // is the one that proceeds, and a REPLAYED nonce deletes nothing. Checking "have I seen this
+  // nonce" and then marking it used would leave a window between the two, which is exactly the
+  // race the row-level delete removes.
+  const { data: consumed, error: consumeError } = await client
+    .from("oauth_state")
+    .delete()
+    .eq("nonce", verified.nonce)
+    .eq("candidate_id", verified.candidateId)
+    .select("code_verifier")
+    .maybeSingle();
+
+  if (consumeError) {
+    throw consumeError;
+  }
+
+  if (!consumed) {
+    throw new InvalidOAuthStateError("This authorization link has already been used.");
+  }
+
+  const consumedRow = consumed as { code_verifier: string };
+  const tokens = await exchangeGoogleAuthCode(config, input.code, fetchImpl, consumedRow.code_verifier);
   const emailAddress = await fetchGoogleEmailAddress(tokens.accessToken, fetchImpl);
 
   const bundle: StoredMailboxTokenBundle = {

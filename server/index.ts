@@ -1991,7 +1991,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // R6.1: starts the Gmail connect handshake — mints a signed `state` and
   // hands back the Google consent URL for the client to navigate to.
-  app.post("/api/mailbox/connect/start", requireAuth, (request: AuthenticatedRequest, response) => {
+  app.post("/api/mailbox/connect/start", requireAuth, async (request: AuthenticatedRequest, response) => {
     // Task H2: a deployment with no Google credentials is a configuration state,
     // not a server fault, and the two deserve different answers. 503 with the
     // reader's own reason tells the caller what to fix; the 500 this used to
@@ -2007,7 +2007,10 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     try {
-      const { authorizeUrl } = startMailboxConnect(
+      // AWAITED, AND WITH A CLIENT: the handshake now persists its nonce and PKCE verifier in
+      // oauth_state before redirecting, which is what makes the callback able to CONSUME them.
+      const { authorizeUrl } = await startMailboxConnect(
+        resolveServiceClient(),
         request.user!.id,
         resolveGoogleOAuthConfig(),
         resolveMailboxOAuthStateSecret(),

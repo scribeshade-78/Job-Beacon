@@ -39,7 +39,7 @@ describe("readGoogleOAuthConfig", () => {
 
 describe("buildGoogleAuthorizeUrl", () => {
   it("includes the requested scopes, offline access, forced consent, and state", () => {
-    const url = new URL(buildGoogleAuthorizeUrl(CONFIG, "signed-state"));
+    const url = new URL(buildGoogleAuthorizeUrl(CONFIG, "signed-state", "test-challenge"));
 
     expect(url.searchParams.get("client_id")).toBe("client-id");
     expect(url.searchParams.get("redirect_uri")).toBe(CONFIG.redirectUri);

@@ -47,22 +47,37 @@ function makeClient(overrides: {
   selectResult?: { data: unknown; error: unknown };
   updateResult?: { error: unknown };
   upsertResult?: { error: unknown };
+  insertResult?: { error: unknown };
+  /** What the atomic oauth_state consumption returns. Null simulates a REPLAYED nonce. */
+  consumeResult?: { data: unknown; error: unknown };
 } = {}) {
   const upsert = vi.fn(async (_payload: unknown, _options: unknown) => overrides.upsertResult ?? { error: null });
+  // THE HANDSHAKE'S TWO NEW CHAINS. startMailboxConnect inserts the nonce and PKCE verifier;
+  // completeMailboxConnect consumes them with a delete chain. Defaults model the HAPPY path - a
+  // row is consumed - so a test asserting replay rejection passes consumeResult with null data.
+  const insert = vi.fn(async (_payload: unknown) => overrides.insertResult ?? { error: null });
+  const consumeMaybeSingle = vi.fn(
+    async () => overrides.consumeResult ?? { data: { code_verifier: "test-verifier" }, error: null },
+  );
+  const consumeSelect = vi.fn(() => ({ maybeSingle: consumeMaybeSingle }));
+  const consumeEqInner = vi.fn(() => ({ select: consumeSelect }));
+  const consumeEqOuter = vi.fn(() => ({ eq: consumeEqInner }));
+  const deleteFn = vi.fn(() => ({ eq: consumeEqOuter }));
   const updateEq = vi.fn(async () => overrides.updateResult ?? { error: null });
   const update = vi.fn(() => ({ eq: updateEq }));
   const maybeSingle = vi.fn(async () => overrides.selectResult ?? { data: null, error: null });
   const selectEq = vi.fn(() => ({ maybeSingle }));
   const select = vi.fn(() => ({ eq: selectEq }));
-  const from = vi.fn(() => ({ upsert, update, select }));
+  const from = vi.fn(() => ({ upsert, update, select, insert, delete: deleteFn }));
   const client = { from } as unknown as SupabaseClient;
 
-  return { client, from, upsert, update, updateEq, select, selectEq, maybeSingle };
+  return { client, from, upsert, update, updateEq, select, selectEq, maybeSingle, insert, deleteFn, consumeMaybeSingle };
 }
 
 describe("startMailboxConnect", () => {
-  it("returns an authorize URL carrying a state that verifies back to the candidate", () => {
-    const { authorizeUrl } = startMailboxConnect("candidate-1", CONFIG, STATE_SECRET);
+  it("returns an authorize URL carrying a state that verifies back to the candidate", async () => {
+    const { client } = makeClient({ upsertResult: { error: null } });
+    const { authorizeUrl } = await startMailboxConnect(client, "candidate-1", CONFIG, STATE_SECRET);
     const url = new URL(authorizeUrl);
     expect(url.searchParams.get("state")).toBeTruthy();
   });
@@ -83,9 +98,11 @@ describe("completeMailboxConnect", () => {
   it("upserts a connected row keyed on (candidate_id, provider) with an encrypted secret", async () => {
     const { client, from, upsert } = makeClient({ upsertResult: { error: null } });
     const fetchImpl = makeGoogleFetch();
-    const state = createOAuthState(STATE_SECRET, "candidate-1");
+    const created = createOAuthState(STATE_SECRET, "candidate-1");
 
-    const result = await completeMailboxConnect(client, CONFIG, STATE_SECRET, KEY, { code: "auth-code", state }, fetchImpl);
+    const result = await completeMailboxConnect(
+      client, CONFIG, STATE_SECRET, KEY, { code: "auth-code", state: created.state }, fetchImpl,
+    );
 
     expect(result).toEqual({ candidateId: "candidate-1" });
     expect(from).toHaveBeenCalledWith("mailbox_connections");
@@ -108,10 +125,12 @@ describe("completeMailboxConnect", () => {
   it("rethrows a database error from the upsert", async () => {
     const { client } = makeClient({ upsertResult: { error: new Error("db down") } });
     const fetchImpl = makeGoogleFetch();
-    const state = createOAuthState(STATE_SECRET, "candidate-1");
+    const created = createOAuthState(STATE_SECRET, "candidate-1");
 
     await expect(
-      completeMailboxConnect(client, CONFIG, STATE_SECRET, KEY, { code: "auth-code", state }, fetchImpl),
+      completeMailboxConnect(
+        client, CONFIG, STATE_SECRET, KEY, { code: "auth-code", state: created.state }, fetchImpl,
+      ),
     ).rejects.toThrow("db down");
   });
 });

@@ -53,7 +53,11 @@ export const GOOGLE_MAILBOX_SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
 ] as const;
 
-export function buildGoogleAuthorizeUrl(config: GoogleOAuthConfig, state: string): string {
+export function buildGoogleAuthorizeUrl(
+  config: GoogleOAuthConfig,
+  state: string,
+  codeChallenge: string,
+): string {
   const url = new URL(AUTHORIZE_URL);
   url.searchParams.set("client_id", config.clientId);
   url.searchParams.set("redirect_uri", config.redirectUri);
@@ -62,6 +66,10 @@ export function buildGoogleAuthorizeUrl(config: GoogleOAuthConfig, state: string
   url.searchParams.set("access_type", "offline"); // required for a refresh_token
   url.searchParams.set("prompt", "consent"); // forces a fresh refresh_token on every connect, not just the first-ever grant
   url.searchParams.set("state", state);
+  // PKCE, RFC 7636. Without these an intercepted authorization code can be exchanged by whoever
+  // took it; with them the exchange needs the verifier, which never leaves this server.
+  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
 
   return url.toString();
 }
@@ -86,6 +94,7 @@ export async function exchangeGoogleAuthCode(
   config: GoogleOAuthConfig,
   code: string,
   fetchImpl: FetchImpl = fetch,
+  codeVerifier?: string,
 ): Promise<GoogleTokenBundle> {
   const response = await fetchImpl(TOKEN_URL, {
     method: "POST",
@@ -96,6 +105,9 @@ export async function exchangeGoogleAuthCode(
       client_secret: config.clientSecret,
       redirect_uri: config.redirectUri,
       grant_type: "authorization_code",
+      // PROOF OF POSSESSION. The verifier is the half that never left our server, so a stolen
+      // authorization code is useless without it.
+      ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
     }),
   });
 
