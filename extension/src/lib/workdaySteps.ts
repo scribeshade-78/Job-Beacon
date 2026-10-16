@@ -17,12 +17,22 @@
  */
 
 export const WORKDAY = {
-  step: '[data-automation-id="workday-application-step"]',
-  errorBanner: '[data-automation-id="errorBanner"]',
-  errorMessage: '[data-automation-id="errorMessage"]',
-  loading: '[data-automation-id="page-loading"]',
-  next: '[data-automation-id="bottom-navigation-next"]',
-  submit: '[data-automation-id="bottom-navigation-submit"]',
+  // TWO ATTRIBUTE SETS PER CONTROL, comma-separated (querySelector accepts a selector list
+  // natively, so this costs no code). We were given two DIFFERENT structures claiming to be
+  // Workday's: an early one using bottom-navigation-* / errorBanner / page-loading, and a later,
+  // more detailed one using navigation-* / errorSummary / page-loading-indicator. Neither is a
+  // raw capture - both carry editorial HTML comments and placeholder class names - so neither
+  // can be called verified, and picking one would just be preferring a guess.
+  //
+  // TOLERATING BOTH IS THE HONEST ENGINEERING ANSWER: it is strictly more robust than betting
+  // on either, and it costs one string per control. The unverified-assumption caveat in this
+  // file's header still stands for every value below.
+  step: '[data-automation-id="workday-application-step"], [data-automation-id="application-page"]',
+  errorBanner: '[data-automation-id="errorBanner"], [data-automation-id="errorSummary"]',
+  errorMessage: '[data-automation-id="errorMessage"], [data-automation-id="error-message"]',
+  loading: '[data-automation-id="page-loading"], [data-automation-id="page-loading-indicator"]',
+  next: '[data-automation-id="bottom-navigation-next"], [data-automation-id="navigation-next"]',
+  submit: '[data-automation-id="bottom-navigation-submit"], [data-automation-id="navigation-submit"]',
 } as const;
 
 /** How long a step gets to finish loading before we stop waiting and say so. */
@@ -35,6 +45,14 @@ export const STEP_POLL_MS = 250;
 export function isVisible(element: Element | null): boolean {
   if (element === null) return false;
   if (element.hasAttribute("hidden")) return false;
+
+  // AN EXPLICIT display:none TEST. Workday keeps its loading indicator in the DOM permanently
+  // and toggles it with an inline style.display, so "is the spinner up" is really "is it
+  // displayed". A zero-sized rect already answers that in a real browser, but relying on layout
+  // alone makes the rule impossible to exercise where getBoundingClientRect is synthetic.
+  const style = element.getAttribute("style") ?? "";
+  if (/display\s*:\s*none/i.test(style)) return false;
+
   const rect = element.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 }
@@ -76,8 +94,12 @@ export function hasStep(doc: Document): boolean {
 export function navigationKind(button: Element): "next" | "submit" | "unknown" {
   const automationId = (button.getAttribute("data-automation-id") ?? "").toLowerCase().trim();
 
-  if (automationId === "bottom-navigation-submit") return "submit";
-  if (automationId === "bottom-navigation-next") return "next";
+  if (automationId === "bottom-navigation-submit" || automationId === "navigation-submit") return "submit";
+  if (automationId === "bottom-navigation-next" || automationId === "navigation-next") return "next";
+
+  // navigation-back lands here as "unknown", which is correct and load-bearing: it is a control
+  // that moves the flow, but treating it as "next" would walk the candidate BACKWARDS through
+  // their own application.
 
   const label = (button.textContent ?? button.getAttribute("aria-label") ?? "").trim();
   if (/^(submit|submit application|send application|send)$/i.test(label)) return "submit";

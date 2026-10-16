@@ -119,9 +119,54 @@ describe("navigationKind - next is reversible, submit is not", () => {
     expect(navigationKind(document.querySelector("button")!)).toBe("unknown");
   });
 
-  it("selects the exact automation ids we depend on", () => {
-    expect(WORKDAY.next).toBe('[data-automation-id="bottom-navigation-next"]');
-    expect(WORKDAY.submit).toBe('[data-automation-id="bottom-navigation-submit"]');
+  it("accepts BOTH id sets we were given, because neither is a verified capture", () => {
+    expect(WORKDAY.next).toContain("bottom-navigation-next");
+    expect(WORKDAY.next).toContain("navigation-next");
+    expect(WORKDAY.submit).toContain("bottom-navigation-submit");
+    expect(WORKDAY.submit).toContain("navigation-submit");
+    expect(WORKDAY.loading).toContain("page-loading-indicator");
+    expect(WORKDAY.errorBanner).toContain("errorSummary");
+    expect(WORKDAY.step).toContain("application-page");
+  });
+
+  it("reads the second capture's navigation ids", () => {
+    document.body.innerHTML = '<button data-automation-id="navigation-next">Save and Continue</button>';
+    expect(navigationKind(document.querySelector("button")!)).toBe("next");
+
+    document.body.innerHTML = '<button data-automation-id="navigation-submit">Submit Application</button>';
+    expect(navigationKind(document.querySelector("button")!)).toBe("submit");
+  });
+
+  it("treats Back as unknown, never as next - it moves the flow BACKWARDS", () => {
+    document.body.innerHTML = '<button data-automation-id="navigation-back">Back</button>';
+    expect(navigationKind(document.querySelector("button")!)).toBe("unknown");
+  });
+
+  it("reads the second capture's error summary and its message", () => {
+    document.body.innerHTML =
+      STEP +
+      '<div data-automation-id="errorSummary" role="alert"><ul><li data-automation-id="error-message">1 Error: Please enter a valid phone number.</li></ul></div>';
+
+    expect(readErrorBanner(document)).toBe("1 Error: Please enter a valid phone number.");
+  });
+
+  it("treats a display:none loading indicator as NOT loading", () => {
+    // Workday keeps the indicator in the DOM permanently and toggles style.display, so "is the
+    // spinner up" is really "is it displayed" - and the indicator being PRESENT means nothing.
+    document.body.innerHTML =
+      STEP + '<div data-automation-id="page-loading-indicator" style="display: none;"><svg></svg></div>';
+
+    expect(isLoading(document)).toBe(false);
+  });
+
+  it("treats a displayed loading indicator as loading", () => {
+    document.body.innerHTML = STEP + '<div data-automation-id="page-loading-indicator"><svg></svg></div>';
+    expect(isLoading(document)).toBe(true);
+  });
+
+  it("recognises the second capture's page frame as a step", () => {
+    document.body.innerHTML = '<div data-automation-id="application-page"></div>';
+    expect(hasStep(document)).toBe(true);
   });
 });
 
