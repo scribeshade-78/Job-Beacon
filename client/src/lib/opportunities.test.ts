@@ -254,8 +254,12 @@ describe("listOpportunities — query shape", () => {
     // so one ORDER BY serves both states and no earlier read chooses it.
     expect(recorded.orders[0]).toEqual(["matched_qualifier_count", { ascending: false, nullsFirst: false }]);
     expect(recorded.orders[1]).toEqual(["priority_score", { ascending: false, nullsFirst: false }]);
-    expect(recorded.orders[2]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
-    expect(recorded.orders[3]).toEqual(["id", { ascending: true, nullsFirst: false }]);
+    // TRUST BEFORE RECENCY. Only scored rows carry a priority, so the unscored corpus falls
+    // through to this key - and when it was recency, freshly ingested UNDER_REVIEW aggregator
+    // postings took the first page while the VERIFIED corpus waited behind them.
+    expect(recorded.orders[2]).toEqual(["trust_rank", { ascending: true, nullsFirst: false }]);
+    expect(recorded.orders[3]).toEqual(["last_seen_at", { ascending: false, nullsFirst: false }]);
+    expect(recorded.orders[4]).toEqual(["id", { ascending: true, nullsFirst: false }]);
   });
 
   it("requests the default page when no options are given", async () => {

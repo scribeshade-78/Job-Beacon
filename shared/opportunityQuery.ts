@@ -193,9 +193,17 @@ export const VACANCY_SORTS: readonly SortSpec[] = [
     label: "Best match",
     orderBy: [
       { column: "priority_score", ascending: false, nullsFirst: false },
+      // TRUST BEFORE RECENCY. Only scored rows carry a priority, so the whole unscored corpus
+      // falls through to this key: when it was recency, the postings a discovery run had just
+      // ingested - all UNDER_REVIEW aggregator rows - took the first page while hundreds of
+      // VERIFIED postings waited behind them. Equal priority now falls back to trust, and
+      // recency only separates listings of the SAME trust. trust_rank is 0 VERIFIED,
+      // 1 VERIFIED_INCOMPLETE, 2 UNDER_REVIEW (20261016140000); trust_status itself cannot be
+      // ordered directly, because alphabetically VERIFIED_INCOMPLETE precedes VERIFIED.
+      { column: "trust_rank", ascending: true, nullsFirst: false },
       { column: "last_seen_at", ascending: false, nullsFirst: false },
       // Deterministic final tie-break: without it "Load more" can repeat or skip
-      // a row whose score and last_seen_at are equal. The ranked view prepends
+      // a row whose score, trust and last_seen_at are all equal. The ranked view prepends
       // matched_qualifier_count ahead of this when ranking is current.
       { column: "id", ascending: true, nullsFirst: false },
     ],

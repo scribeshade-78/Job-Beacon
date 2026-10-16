@@ -210,6 +210,7 @@ describe("applyOpportunitySort", () => {
     expect(calls).toEqual([
       "order:matched_qualifier_count:desc",
       "order:priority_score:desc",
+      "order:trust_rank:asc",
       "order:last_seen_at:desc",
       "order:id:asc",
     ]);
@@ -244,6 +245,7 @@ describe("applyOpportunitySort", () => {
       expect(calls).toEqual([
         "order:matched_qualifier_count:desc",
         "order:priority_score:desc",
+        "order:trust_rank:asc",
         "order:last_seen_at:desc",
         "order:id:asc",
       ]);
