@@ -143,6 +143,21 @@ export function parseAgentChatRequest(body: unknown): ParsedAgentChatRequest {
 const UNPREPARABLE_ACTION_MESSAGE =
   "I could not prepare that action. Try naming the job you mean, or ask me to list your matches first.";
 
+
+/**
+ * The output ceiling for this call.
+ *
+ * WITHOUT IT THE SDK ASKS FOR THE MODEL'S MAXIMUM — 131072 tokens for the configured alias —
+ * and the provider refuses a request whose max_tokens exceeds the account's remaining credit:
+ * "402 ... You requested up to 131072 tokens, but can only afford 1519". That fails BEFORE any
+ * inference, so an uncapped call is an availability bug rather than a cost one. Measured on
+ * this account: uncapped fails, max_tokens 64 succeeds. See fitPrompt.ts's
+ * FIT_MAX_OUTPUT_TOKENS for the full reasoning.
+ *
+ * WHY 1024: a conversational reply, plus any tool-call arguments
+ */
+const AGENT_CHAT_MAX_OUTPUT_TOKENS = 1024;
+
 export async function answerAgentChat(
   client: Pick<SupabaseClient, "from">,
   openaiClient: Pick<OpenAI, "chat">,
@@ -172,6 +187,7 @@ export async function answerAgentChat(
       // chat assistant rather than promising work it cannot do.
       tools: agentToolDescriptors(capability),
       tool_choice: "auto",
+      max_tokens: AGENT_CHAT_MAX_OUTPUT_TOKENS,
     });
 
     const rawCalls = readAgentToolCalls(completion);

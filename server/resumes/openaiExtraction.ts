@@ -216,6 +216,21 @@ export function isValidRawExtractionResult(value: unknown): value is RawExtracti
  * so a test can inject a minimal fake without constructing a real OpenAI
  * instance.
  */
+
+/**
+ * The output ceiling for this call.
+ *
+ * WITHOUT IT THE SDK ASKS FOR THE MODEL'S MAXIMUM — 131072 tokens for the configured alias —
+ * and the provider refuses a request whose max_tokens exceeds the account's remaining credit:
+ * "402 ... You requested up to 131072 tokens, but can only afford 1519". That fails BEFORE any
+ * inference, so an uncapped call is an availability bug rather than a cost one. Measured on
+ * this account: uncapped fails, max_tokens 64 succeeds. See fitPrompt.ts's
+ * FIT_MAX_OUTPUT_TOKENS for the full reasoning.
+ *
+ * WHY 2048: a whole resume becomes a JSON fact list, the largest payload of these five
+ */
+const EXTRACTION_MAX_OUTPUT_TOKENS = 2048;
+
 export async function runResumeFactExtraction(
   openaiClient: Pick<OpenAI, "chat">,
   resumeText: string,
@@ -228,6 +243,7 @@ export async function runResumeFactExtraction(
       { role: "user", content: resumeText },
     ],
     response_format: EXTRACTION_RESPONSE_FORMAT,
+    max_tokens: EXTRACTION_MAX_OUTPUT_TOKENS,
   });
 
   const content = completion.choices[0]?.message?.content;

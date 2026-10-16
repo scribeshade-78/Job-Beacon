@@ -265,6 +265,21 @@ function renderInput(input: InterviewPrepInput): string {
  * injection shape as analyzeTechnicalFit — so a test injects a minimal fake
  * without constructing a real OpenAI instance.
  */
+
+/**
+ * The output ceiling for this call.
+ *
+ * WITHOUT IT THE SDK ASKS FOR THE MODEL'S MAXIMUM — 131072 tokens for the configured alias —
+ * and the provider refuses a request whose max_tokens exceeds the account's remaining credit:
+ * "402 ... You requested up to 131072 tokens, but can only afford 1519". That fails BEFORE any
+ * inference, so an uncapped call is an availability bug rather than a cost one. Measured on
+ * this account: uncapped fails, max_tokens 64 succeeds. See fitPrompt.ts's
+ * FIT_MAX_OUTPUT_TOKENS for the full reasoning.
+ *
+ * WHY 2048: a structured prep document with several questions and talking points
+ */
+const INTERVIEW_PREP_MAX_OUTPUT_TOKENS = 2048;
+
 export async function generateInterviewPrep(
   openaiClient: Pick<OpenAI, "chat">,
   input: InterviewPrepInput,
@@ -280,6 +295,7 @@ export async function generateInterviewPrep(
       { role: "user", content: renderInput(input) },
     ],
     response_format: INTERVIEW_PREP_RESPONSE_FORMAT,
+    max_tokens: INTERVIEW_PREP_MAX_OUTPUT_TOKENS,
   });
 
   const content = completion.choices[0]?.message?.content;

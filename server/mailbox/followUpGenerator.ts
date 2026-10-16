@@ -209,6 +209,21 @@ export interface FollowUpInput {
  * gone, MalformedFollowUpError on unusable output, and the shared gate's
  * UncitedClaimError / FabricatedContentError on uncited or invented citations.
  */
+
+/**
+ * The output ceiling for this call.
+ *
+ * WITHOUT IT THE SDK ASKS FOR THE MODEL'S MAXIMUM — 131072 tokens for the configured alias —
+ * and the provider refuses a request whose max_tokens exceeds the account's remaining credit:
+ * "402 ... You requested up to 131072 tokens, but can only afford 1519". That fails BEFORE any
+ * inference, so an uncapped call is an availability bug rather than a cost one. Measured on
+ * this account: uncapped fails, max_tokens 64 succeeds. See fitPrompt.ts's
+ * FIT_MAX_OUTPUT_TOKENS for the full reasoning.
+ *
+ * WHY 1024: one short email: a subject and a few paragraphs
+ */
+const FOLLOW_UP_MAX_OUTPUT_TOKENS = 1024;
+
 export async function generateFollowUpDraft(
   client: SupabaseClient,
   deps: FollowUpDeps,
@@ -262,6 +277,7 @@ export async function generateFollowUpDraft(
       { role: "user", content: renderFollowUpInput(payload.facts, applicationFacts) },
     ],
     response_format: { type: "json_object" },
+    max_tokens: FOLLOW_UP_MAX_OUTPUT_TOKENS,
   });
 
   const content = completion.choices[0]?.message?.content;
