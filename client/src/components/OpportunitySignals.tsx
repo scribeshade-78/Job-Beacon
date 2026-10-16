@@ -17,6 +17,32 @@ import type {
 
 const MAX_MISSING_SKILLS_SHOWN = 5;
 const MAX_TOP_REASONS_SHOWN = 3;
+const MAX_RISKS_SHOWN = 3;
+
+/**
+ * Candidate-facing names for the §11.2 dimensions.
+ *
+ * The keys are internal identifiers (core_technical_skills), so they are never rendered raw.
+ * An unknown key still gets a readable label rather than being hidden: a dimension added
+ * server-side must appear, even before this map catches up.
+ */
+const FIT_DIMENSION_LABELS: Record<string, string> = {
+  core_technical_skills: "Core technical skills",
+  cloud_alignment: "Cloud alignment",
+  engineering_responsibilities: "Engineering responsibilities",
+  scale_performance_evidence: "Scale and performance",
+  seniority: "Seniority",
+  domain: "Domain",
+};
+
+function dimensionLabel(key: string): string {
+  const known = FIT_DIMENSION_LABELS[key];
+  if (known) {
+    return known;
+  }
+
+  return key.replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase());
+}
 
 function priorityBadge(fit: OpportunityFitAnalysis): { label: string; className: string } {
   if (fit.eligibilityCapped) {
@@ -102,6 +128,19 @@ export function FitSection({
         </div>
       )}
 
+      {fit.risks.length > 0 && (
+        <div>
+          {variant === "detail" && (
+            <p className="text-xs font-semibold text-black">Worth checking</p>
+          )}
+          <ul className="list-disc list-inside text-xs text-ios-text-secondary space-y-0.5">
+            {fit.risks.slice(0, MAX_RISKS_SHOWN).map((risk, i) => (
+              <li key={`${risk}-${i}`}>{risk}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {fit.topReasons.length > 0 && (
         <div>
           {variant === "detail" && (
@@ -112,6 +151,31 @@ export function FitSection({
               <li key={`${reason}-${i}`}>{reason}</li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/*
+        THE BREAKDOWN, DETAIL VARIANT ONLY. The six rationales are reference material - a card
+        that carried them would be six paragraphs per listing, and the list is where a candidate
+        compares postings rather than studies one. Nothing here is computed on the client: this
+        is the model's own reasoning, which used to be stored and then discarded.
+      */}
+      {variant === "detail" && fit.technicalFitComponents !== null && (
+        <div>
+          <p className="text-xs font-semibold text-black">How the score was reached</p>
+          <dl className="mt-1 space-y-1">
+            {fit.technicalFitComponents.map((component) => (
+              <div key={component.key}>
+                <dt className="text-xs text-ios-text-secondary">{dimensionLabel(component.key)}</dt>
+                <dd className="text-xs text-ios-text-secondary">
+                  <span className="font-medium text-black">{component.score}</span>
+                  {component.rationale !== "" && (
+                    <span className="block">{component.rationale}</span>
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
         </div>
       )}
     </div>

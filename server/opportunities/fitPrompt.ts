@@ -1,5 +1,10 @@
 import type OpenAI from "openai";
 import { sanitizeUntrustedContent, wrapUntrustedContent } from "../security/sanitize.js";
+import { FIT_DIMENSIONS, type FitDimension } from "../../shared/fitDimensions.js";
+
+// Re-exported so every existing importer of fitPrompt.ts keeps working; the list itself lives
+// in shared/ because the client renders the same six dimensions in the same order.
+export { FIT_DIMENSIONS, type FitDimension } from "../../shared/fitDimensions.js";
 
 /**
  * Response Intelligence Phase 2.1 — Technical Fit analysis (Opportunity
@@ -61,16 +66,7 @@ export const DEFAULT_FIT_MODEL = "~deepseek/deepseek-flash-latest";
  */
 export const FIT_MAX_OUTPUT_TOKENS = 2048;
 
-export const FIT_DIMENSIONS = [
-  "core_technical_skills",
-  "cloud_alignment",
-  "engineering_responsibilities",
-  "scale_performance_evidence",
-  "seniority",
-  "domain",
-] as const;
 
-export type FitDimension = (typeof FIT_DIMENSIONS)[number];
 
 export interface FitComponent {
   score: number;

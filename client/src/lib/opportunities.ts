@@ -125,6 +125,73 @@ export interface OpportunityReasonEntry {
  * The candidate-facing slice of a fit_analyses row (Phase 2.1) plus the
  * Phase 2.2 weighted §12.1 priority score computed on read.
  */
+/** One §11.2 dimension of a technical-fit score, with the model's rationale for it. */
+export interface OpportunityFitComponent {
+  key: string;
+  score: number;
+  rationale: string;
+}
+
+/**
+ * Orders the jsonb breakdown by the canonical dimension order, appending anything unknown.
+ *
+ * jsonb DOES NOT PRESERVE KEY ORDER, so without this the six dimensions would read in a
+ * different order on each render. The canonical list is a preference, NOT a filter: a dimension
+ * added server-side is appended rather than dropped, because a dimension the client silently
+ * omits is one the candidate is never told about.
+ *
+ * Returns NULL, not [], when the payload is absent or malformed. An empty breakdown and no
+ * breakdown are different claims: rendering six zeroes would invent a judgement the model never
+ * made, which is worse than showing nothing.
+ */
+function normalizeFitComponents(value: unknown): OpportunityFitComponent[] | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const remaining = new Map<string, OpportunityFitComponent>();
+
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw !== "object" || raw === null) {
+      continue;
+    }
+
+    const component = raw as { score?: unknown; rationale?: unknown };
+
+    // A component without a usable number is dropped rather than coerced: 0 would read as a
+    // real "no fit" judgement.
+    if (typeof component.score !== "number" || !Number.isFinite(component.score)) {
+      continue;
+    }
+
+    remaining.set(key, {
+      key,
+      score: component.score,
+      rationale: typeof component.rationale === "string" ? component.rationale : "",
+    });
+  }
+
+  if (remaining.size === 0) {
+    return null;
+  }
+
+  const ordered: OpportunityFitComponent[] = [];
+
+  for (const key of FIT_DIMENSIONS) {
+    const found = remaining.get(key);
+    if (found) {
+      ordered.push(found);
+      remaining.delete(key);
+    }
+  }
+
+  for (const leftover of remaining.values()) {
+    ordered.push(leftover);
+  }
+
+  return ordered;
+}
+
 export interface OpportunityFitAnalysis {
   priority: PriorityScore;
   technicalFitScore: number | null;
@@ -133,6 +200,14 @@ export interface OpportunityFitAnalysis {
   hardBlockers: OpportunityReasonEntry[];
   missingEvidence: string[];
   topReasons: string[];
+  /** Advisory concerns the model raised: work authorisation, an unstated tool, a shift pattern. */
+  risks: string[];
+  /**
+   * The per-dimension breakdown behind technicalFitScore, in canonical order. Null when the
+   * posting carried no JD text, in which case there is no breakdown to show rather than an
+   * all-zero one.
+   */
+  technicalFitComponents: OpportunityFitComponent[] | null;
   jdTextAvailable: boolean;
 }
 
@@ -215,6 +290,10 @@ interface OpportunityRow {
   hard_blockers: OpportunityReasonEntry[] | null;
   missing_evidence: string[] | null;
   top_reasons: string[] | null;
+  /** Advisory concerns the model raised. Never null in the table; null when no fit row exists. */
+  risks: string[] | null;
+  /** { dimension: { score, rationale } }. NULL when there was no JD text to analyse. */
+  technical_fit_components: Record<string, { score: number; rationale: string }> | null;
   jd_text_available: boolean | null;
 
   /** Phase 2.3b stored §12.1 score. Null until the fit worker has scored this pair. */
@@ -230,6 +309,7 @@ interface OpportunityRow {
   evidence_state: "current" | "pending";
 }
 
+import { FIT_DIMENSIONS } from "../../../shared/fitDimensions";
 import type { SortId } from "../../../shared/opportunityQuery";
 import type { SearchPreferences } from "../../../shared/searchPreferences";
 import {
@@ -364,6 +444,10 @@ const VIEW_COLUMNS = [
   "hard_blockers",
   "missing_evidence",
   "top_reasons",
+  // The model's REASONING, not just its score (20261016120000). Selected from the ranked view,
+  // which passes them through from the base view.
+  "risks",
+  "technical_fit_components",
   "jd_text_available",
   "priority_score",
   "priority_uncapped_score",
@@ -397,6 +481,8 @@ function buildFitAnalysis(row: OpportunityRow): OpportunityFitAnalysis | null {
     hardBlockers: row.hard_blockers ?? [],
     missingEvidence: row.missing_evidence ?? [],
     topReasons: row.top_reasons ?? [],
+    risks: row.risks ?? [],
+    technicalFitComponents: normalizeFitComponents(row.technical_fit_components),
     jdTextAvailable: row.jd_text_available,
   };
 }
