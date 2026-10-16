@@ -33,6 +33,13 @@ export const DISCOVERY_REPORT_FAILURE_MARKER = "[usage] discovery-surface report
 /** Told once, after this many consecutive failures - not on the first blip. */
 export const FAILURES_BEFORE_NOTICE = 3;
 
+/**
+ * Statuses that are an ANSWER rather than a failure: the server did exactly what it should and
+ * the client must not retry, count or report them. 429 is the discovery allowance being spent,
+ * which the feed already surfaces as a normal state.
+ */
+const EXPECTED_REPORT_STATUSES = new Set([429]);
+
 let consecutiveFailures = 0;
 let noticeShown = false;
 
@@ -51,6 +58,7 @@ export async function reportDiscoverySurfaces(
   }
 
   let lastReason = "unknown";
+  let lastStatus: number | null = null;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -77,12 +85,35 @@ export async function reportDiscoverySurfaces(
         return;
       }
 
+      lastStatus = response.status;
+
       // Read the body so the reason is specific rather than "not ok".
       const detail = await response.text().catch(() => "");
       lastReason = "HTTP " + response.status + (detail ? " " + detail.slice(0, 200) : "");
+
+      // RETRY ONLY WHAT A SECOND ATTEMPT COULD CHANGE. A 4xx is the server rejecting the
+      // request as sent: the same request gets the same answer, so the retry below is pure
+      // amplification against our own API. A 5xx might differ, and a thrown error definitely
+      // might, so those keep their second attempt.
+      if (response.status >= 400 && response.status < 500) {
+        break;
+      }
     } catch (error) {
+      lastStatus = null;
       lastReason = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  // A QUOTA LIMIT IS A STATE, NOT AN OUTAGE.
+  //
+  // Discovery is an allowance a candidate can legitimately spend, and the server answers a
+  // spent one correctly: 429 with the code and the reset time. Counting that as a failure made
+  // the client retry a condition no retry can change, and after FAILURES_BEFORE_NOTICE it told
+  // the candidate "we're already retrying" - which was false, and described an accounting
+  // outage where there was only an exhausted quota. Nothing is logged and nothing is shown:
+  // the allowance is already visible in the UI, and the honest place to explain it is there.
+  if (lastStatus !== null && EXPECTED_REPORT_STATUSES.has(lastStatus)) {
+    return;
   }
 
   consecutiveFailures += 1;
