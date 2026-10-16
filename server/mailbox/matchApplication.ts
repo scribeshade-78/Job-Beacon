@@ -72,6 +72,48 @@ export interface MatchInput {
   company: string | null;
   role: string | null;
   jobId: string | null;
+  /**
+   * The receiving provider's raw Authentication-Results header.
+   *
+   * OPTIONAL, AND ABSENT MEANS UNKNOWN. Every existing caller and test omits it, and every message
+   * polled before the column existed leaves it null - so treating an absent value as a pass would
+   * silently downgrade every one of them to "trusted". It is the only input here that speaks to
+   * WHO SENT THIS rather than to string similarity.
+   */
+  authResults?: string | null;
+}
+
+export type AuthVerdict = "pass" | "fail" | "unknown";
+
+/**
+ * Read the receiving provider's verdict on the sending domain.
+ *
+ * FAIL IS CHECKED BEFORE PASS, AND ANY FAILURE WINS. A header routinely carries several verdicts -
+ * "spf=pass; dkim=fail" - and the message is only as trustworthy as its weakest one. Checking
+ * pass first would let a single satisfied mechanism vouch for a message another mechanism rejected.
+ *
+ * UNKNOWN IS NOT PASS. An empty header, a provider that sends none, a message polled before the
+ * column existed: all unknown, and none of them may be read as a pass.
+ *
+ * tempprror and permerror are deliberately counted as failures: they mean the check could not be
+ * completed, and "we could not verify" must not be rounded up to "verified".
+ */
+export function authVerdict(authResults: string | null | undefined): AuthVerdict {
+  if (typeof authResults !== "string" || authResults.trim() === "") {
+    return "unknown";
+  }
+
+  const text = authResults.toLowerCase();
+
+  if (/\b(spf|dkim|dmarc)\s*=\s*(fail|softfail|temperror|permerror|policy)\b/.test(text)) {
+    return "fail";
+  }
+
+  if (/\b(spf|dkim|dmarc)\s*=\s*pass\b/.test(text)) {
+    return "pass";
+  }
+
+  return "unknown";
 }
 
 export interface CandidateApplication {
@@ -358,6 +400,20 @@ export function scoreApplicationMatch(input: MatchInput, apps: CandidateApplicat
   const independent = best.reasons.filter((reason) => reason !== "sender_domain_match");
 
   if (independent.length < MIN_INDEPENDENT_REASONS_FOR_AUTO) {
+    return {
+      kind: "review",
+      candidates: scored.filter((s) => s.confidence >= MATCH_REVIEW_THRESHOLD),
+    };
+  }
+
+  // PROVENANCE OVERRIDES SIMILARITY. A high score built from a company name, a role and a job id
+  // can be assembled by anyone who can read a public job board; a failed SPF/DKIM verdict says the
+  // sending domain could not be vouched for by the provider that received it. When those disagree,
+  // the human decides - the score is not an argument against evidence about who sent the message.
+  //
+  // This runs BEFORE the ambiguity check on purpose: a failed verdict is disqualifying regardless
+  // of how the field looks.
+  if (authVerdict(input.authResults) === "fail") {
     return {
       kind: "review",
       candidates: scored.filter((s) => s.confidence >= MATCH_REVIEW_THRESHOLD),
