@@ -22,6 +22,7 @@
 import type { CandidateProfile, FillReport } from "./lib/types.js";
 import { classifySubmissionEvidence, readAttemptId, type EvidenceInput } from "./lib/loop.js";
 import { detectSite } from "./lib/sites.js";
+import { automationIdOf, describingText } from "./lib/fieldMatching.js";
 import { isOverlayNode, mountOverlay, shouldMountOverlay, type OverlayHandle } from "./lib/overlay.js";
 
 /**
@@ -139,28 +140,6 @@ function isFillable(element: Element): element is HTMLInputElement | HTMLTextAre
     return false;
   }
   return true;
-}
-
-/** All the text a human would use to identify this field, lower-cased. */
-function describingText(element: Element): string {
-  const parts: string[] = [];
-  const id = element.getAttribute("id");
-  const name = element.getAttribute("name");
-  const placeholder = element.getAttribute("placeholder");
-  const aria = element.getAttribute("aria-label");
-  if (id) parts.push(id);
-  if (name) parts.push(name);
-  if (placeholder) parts.push(placeholder);
-  if (aria) parts.push(aria);
-
-  if (id) {
-    const label = document.querySelector('label[for="' + CSS.escape(id) + '"]');
-    if (label?.textContent) parts.push(label.textContent);
-  }
-  const wrapping = element.closest("label");
-  if (wrapping?.textContent) parts.push(wrapping.textContent);
-
-  return parts.join(" ").toLowerCase();
 }
 
 /**
@@ -289,6 +268,14 @@ function fillForm(request: FillRequest): FillReport {
       const ac = (el.getAttribute("autocomplete") ?? "").toLowerCase().trim();
       return spec.autocomplete.includes(ac);
     });
+    // THE SITE'S OWN AUTOMATION HOOK, second only to the standards-based one. Tested against
+    // the attribute ALONE rather than the concatenated blob, so a deliberate token cannot be
+    // diluted by a step container's instructional prose - which is exactly the Workday shape.
+    const byAutomationId = inputs.find((el) => {
+      if (claimed.has(el)) return false;
+      const automationId = automationIdOf(el);
+      return automationId !== "" && spec.patterns.some((pattern) => pattern.test(automationId));
+    });
     const byType = spec.types?.length
       ? inputs.find((el) => !claimed.has(el) && el instanceof HTMLInputElement && spec.types!.includes(el.type))
       : undefined;
@@ -298,7 +285,7 @@ function fillForm(request: FillRequest): FillReport {
       return spec.patterns.some((pattern) => pattern.test(text));
     });
 
-    const target = byAutocomplete ?? byType ?? byText;
+    const target = byAutocomplete ?? byAutomationId ?? byType ?? byText;
 
     if (!target) {
       report.skipped.push({ field: spec.label, reason: "No matching field on this page." });
