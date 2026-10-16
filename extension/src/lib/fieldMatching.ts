@@ -57,5 +57,36 @@ export function describingText(element: Element): string {
   const wrapping = element.closest("label");
   if (wrapping?.textContent) parts.push(wrapping.textContent);
 
+  // A LABEL THAT IS NEITHER AN ANCESTOR NOR REFERENCED BY ID is invisible to both signals above.
+  // The shape that motivated this puts a bare label as a SIBLING of its input, inside the field's
+  // own wrapper:
+  //
+  //   <div data-automation-id="formField-legalNameSection_firstName">
+  //     <label>First Name</label>
+  //     <input data-automation-id="legalNameSection_firstName" />
+  //   </div>
+  //
+  // With no for attribute label[for] finds nothing, and closest("label") finds nothing, so the
+  // words the candidate can actually read never reach this string at all - the field is then
+  // identifiable ONLY by its automation id, and anything we cannot read is a field we may
+  // silently skip.
+  //
+  // BOUNDED ON PURPOSE: three levels, first label only. An unbounded walk would pull in an
+  // unrelated section's label, which is precisely how a filler matches the wrong field.
+  if (wrapping === null) {
+    let ancestor: Element | null = element.parentElement;
+
+    for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
+      const nearby = ancestor.querySelector("label");
+
+      if (nearby?.textContent) {
+        parts.push(nearby.textContent);
+        break;
+      }
+
+      ancestor = ancestor.parentElement;
+    }
+  }
+
   return parts.join(" ").toLowerCase();
 }
