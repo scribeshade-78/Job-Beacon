@@ -152,6 +152,29 @@ interface ResumeRowForExtraction {
  * candidate's setup, and before this the schema could not tell them apart at
  * all. Every terminal path below writes one of 'parsed' or 'failed'.
  */
+
+/**
+ * Whether the model call was REJECTED rather than failing transiently.
+ *
+ * The provider answers a request it will not serve with a 4xx before any inference: an exhausted
+ * credit balance (402), a bad key (401), a model it does not host. None of those improve on a
+ * retry, so none of them may be reported to the candidate as "please try again".
+ *
+ * The status field is the OpenAI SDK own field; the message check is the fallback for an error
+ * that crossed a boundary without it, which is how the 402 reached this catch block.
+ */
+function isProviderRejection(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+
+  if (typeof status === "number" && status >= 400 && status < 500) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : "";
+
+  return /\b4\d\d\b/.test(message);
+}
+
 export async function extractResumeFacts(
   serviceClient: SupabaseClient,
   openaiClient: Pick<OpenAI, "chat">,
@@ -250,6 +273,26 @@ async function runExtraction(
     if (error instanceof MalformedExtractionError) {
       return { kind: "malformed_extraction", message: "Could not validate the extracted facts. Please try again." };
     }
+
+    // A REJECTED REQUEST IS NOT A TRANSIENT ONE, and "please try again" is advice the candidate
+    // cannot act on. The provider answers a request it will not serve with a 4xx BEFORE any
+    // inference — an exhausted balance (402), a bad key (401), an unsupported model — and every
+    // one of those returns the same answer on every retry. This is exactly how the uncapped
+    // max_tokens bug presented itself: an infinite "try again" over a request that could never
+    // succeed even once.
+    //
+    // The error kind is reused deliberately, so the route switch needs no new case (an unmatched
+    // kind would send no response at all and the request would hang). What changes is the message
+    // the candidate reads and the parse-failure reason the operator sees.
+    if (isProviderRejection(error)) {
+      await markResumeParseFailed(serviceClient, resume.id, "extraction_service_failed");
+      return {
+        kind: "error",
+        message:
+          "Fact extraction is unavailable right now, so this resume has not been processed. It is saved — there is no need to upload it again.",
+      };
+    }
+
     return { kind: "error", message: "Could not extract facts from this resume right now. Please try again." };
   }
 
