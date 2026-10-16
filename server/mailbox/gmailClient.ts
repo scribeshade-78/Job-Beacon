@@ -55,6 +55,10 @@ export interface GmailMessageMetadata {
   receivedAt: string | null;
   /** Gmail's response verbatim — stored as-is in messages.raw_payload, same "no invented shape" precedent as vacancy_evidence.payload. */
   raw: unknown;
+  /**
+   * Raw Authentication-Results header, or null. NULL IS UNKNOWN, NOT PASSED.
+   */
+  authResults: string | null;
 }
 
 function findHeader(headers: Array<{ name: string; value: string }> | undefined, name: string): string | null {
@@ -70,6 +74,10 @@ export async function fetchMessageMetadata(
   url.searchParams.set("format", "metadata");
   url.searchParams.append("metadataHeaders", "From");
   url.searchParams.append("metadataHeaders", "Subject");
+  // SPF/DKIM PROVENANCE. The receiving provider's own verdict on who sent this. It is the only
+  // signal in the whole matcher that speaks to PROVENANCE rather than to string similarity -
+  // company names, roles and job ids are all public or guessable.
+  url.searchParams.append("metadataHeaders", "Authentication-Results");
 
   const response = await fetchImpl(url.toString(), {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -89,6 +97,9 @@ export async function fetchMessageMetadata(
     id: body.id,
     sender: findHeader(body.payload?.headers, "From"),
     subject: findHeader(body.payload?.headers, "Subject"),
+    // Absent for a provider that does not send one, and for every message polled before this
+    // existed. The caller must treat null as UNKNOWN, never as a pass.
+    authResults: findHeader(body.payload?.headers, "Authentication-Results"),
     // internalDate is epoch milliseconds as a string (Gmail API's own convention).
     receivedAt: body.internalDate ? new Date(Number(body.internalDate)).toISOString() : null,
     raw: body,

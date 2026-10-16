@@ -57,6 +57,9 @@ describe("fetchMessageMetadata", () => {
       id: "msg-1",
       sender: "recruiter@example.com",
       subject: "Re: Backend Engineer",
+      // The mock sends no Authentication-Results header, so this is null - which the matcher must read
+      // as UNKNOWN and never as a pass. Asserting the null here is what pins that contract.
+      authResults: null,
       receivedAt: new Date(1700000000000).toISOString(),
       raw: expect.objectContaining({ id: "msg-1" }),
     });
