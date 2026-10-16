@@ -24,6 +24,7 @@ import { classifySubmissionEvidence, readAttemptId, type EvidenceInput } from ".
 import { detectSite } from "./lib/sites.js";
 import { automationIdOf, describingText } from "./lib/fieldMatching.js";
 import { hasStep, readErrorBanner, waitForStepSettled } from "./lib/workdaySteps.js";
+import { FILLABLE_SELECTOR, findEmptyMandatoryFields, isDropdownTrigger } from "./lib/mandatoryFields.js";
 import { isOverlayNode, mountOverlay, shouldMountOverlay, type OverlayHandle } from "./lib/overlay.js";
 
 /**
@@ -253,6 +254,20 @@ function fillForm(request: FillRequest): FillReport {
   const report: FillReport = { filled: [], skipped: [] };
   const inputs = Array.from(document.querySelectorAll("input, textarea")).filter(isFillable);
   const claimed = new Set<Element>();
+
+  // BUTTON-BASED DROPDOWNS ARE NOW VISIBLE, and REPORTED rather than filled. They were invisible
+  // before: a query of "input, textarea" cannot match a <button>, so a mandatory Workday
+  // dropdown was passed over with no trace in the report at all. This engine writes text through
+  // the prototype value setter and a listbox has no text value to write, so typing into one
+  // would put a string into a button - the honest move is to surface it and let the candidate
+  // choose. It is deliberately NOT part of the matching set above, so widening our vision cannot
+  // change which fields the engine fills.
+  for (const dropdown of Array.from(document.querySelectorAll(FILLABLE_SELECTOR)).filter(isDropdownTrigger)) {
+    report.skipped.push({
+      field: (dropdown.textContent ?? "").trim().slice(0, 60) || "A dropdown",
+      reason: "A dropdown on this page - please choose an option yourself.",
+    });
+  }
 
   for (const spec of FIELD_SPECS) {
     const value = (profile[spec.key] ?? "").trim();
@@ -542,6 +557,11 @@ async function armFromUrl(): Promise<void> {
 
       const report = fillForm({ profile: payload.fill.profile });
 
+      // THE SAFETY NET, RUN IMMEDIATELY AFTER THE FILL PASS. Anything still mandatory and empty
+      // is handed back to the candidate rather than left ambiguous. A dropdown is never counted
+      // here - see mandatoryFields.ts for why that limit is deliberate.
+      const stillEmpty = findEmptyMandatoryFields(document);
+
       const filled =
         report.filled.length > 0
           ? "Filled " + report.filled.join(", ") + ". Review every answer, then submit."
@@ -556,6 +576,11 @@ async function armFromUrl(): Promise<void> {
         settlement.kind === "timeout"
           ? "This step was still loading, so it may not be fully filled."
           : null,
+        stillEmpty.length === 0
+          ? null
+          : "Please fill the remaining mandatory fields (" +
+            stillEmpty.length +
+            ") before continuing. We have handed this step back to you.",
         filled,
       ].filter((part): part is string => part !== null);
 

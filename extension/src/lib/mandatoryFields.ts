@@ -31,6 +31,27 @@ const NON_TEXT_INPUT_TYPES = new Set([
   "hidden", "submit", "button", "reset", "image", "file", "checkbox", "radio", "range", "color",
 ]);
 
+/**
+ * A button-based dropdown trigger. Distinguished from a text field because this engine writes
+ * values through the prototype value setter, and a listbox has no text value to write - so these
+ * are REPORTED and handed to the candidate, never typed into.
+ */
+export function isDropdownTrigger(element: Element): boolean {
+  const tag = element.tagName.toLowerCase();
+  if (tag === "button") {
+    return (element.getAttribute("aria-haspopup") ?? "").toLowerCase() === "listbox";
+  }
+  return (element.getAttribute("role") ?? "").toLowerCase() === "combobox";
+}
+
+/** A text field the filler may write into. */
+export function isTextFillable(element: Element): boolean {
+  const tag = element.tagName.toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag !== "input") return false;
+  return !NON_TEXT_INPUT_TYPES.has((element.getAttribute("type") ?? "text").toLowerCase());
+}
+
 /** A field the filler may write into, or a dropdown trigger it may at least report. */
 export function isFillableElement(element: Element): boolean {
   const tag = element.tagName.toLowerCase();
