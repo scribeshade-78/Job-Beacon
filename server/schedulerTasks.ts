@@ -18,6 +18,7 @@ import { runApplicationMatchBatch } from "./mailbox/matchBatch.js";
 import { readGoogleOAuthConfig } from "./mailbox/oauth.js";
 import { readMailboxEncryptionKey } from "./mailbox/tokenCrypto.js";
 import { readMailboxCapability } from "./mailbox/capability.js";
+import { runOAuthStateSweep } from "./mailbox/oauthStateSweep.js";
 import { runCalendarSyncBatch } from "./calendar/sync.js";
 import { readEnvInt } from "./config/envInt.js";
 import type { ScheduledTask } from "./schedulerLoop.js";
@@ -107,6 +108,7 @@ export const MAILBOX_POLL_TASK_NAME = "mailbox-poll";
 export const MAILBOX_CLASSIFY_TASK_NAME = "mailbox-classify";
 export const MAILBOX_MATCH_TASK_NAME = "mailbox-match";
 export const CALENDAR_SYNC_TASK_NAME = "calendar-sync";
+export const OAUTH_STATE_SWEEP_TASK_NAME = "oauth-state-sweep";
 export const INGESTION_DRAIN_TASK_NAME = "ingestion-drain";
 export const INTAKE_REFRESH_DRAIN_TASK_NAME = "intake-refresh-drain";
 export const KEYLESS_INGESTION_ENQUEUE_TASK_NAME = "keyless-ingestion-enqueue";
@@ -179,6 +181,16 @@ export const DEFAULT_MAILBOX_MATCH_INTERVAL_MS = 5 * 60_000;
  * halving the request volume. Ten minutes is the compromise.
  */
 export const DEFAULT_CALENDAR_SYNC_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * How often expired oauth_state rows are swept.
+ *
+ * FIFTEEN MINUTES AGAINST A TEN-MINUTE TTL. The cadence bounds the backlog, not correctness -
+ * the purge's own one-hour grace means a row is allowed to outlive its expiry by design. Four
+ * runs an hour is one indexed DELETE each, and keeps the table near one TTL window instead of
+ * one sweeper interval.
+ */
+export const DEFAULT_OAUTH_STATE_SWEEP_INTERVAL_MS = 15 * 60_000;
 
 /**
  * Batch C — the scheduled preference-ranking refresh. DB-only over each
@@ -509,6 +521,34 @@ export function buildScheduledTasks(
           deadlineMs: readEnvInt("SCHEDULER_INGESTION_DRAIN_DEADLINE_MS", DEFAULT_INGESTION_DRAIN_DEADLINE_MS, env),
         });
         return { ...result };
+      },
+    },
+
+    /**
+     * OAUTH STATE TTL SWEEP. The only thing that stops abandoned OAuth handshake rows
+     * accumulating forever.
+     *
+     * WHY AN APP TASK AND NOT pg_cron. Hosted Supabase requires the pg_cron extension to be
+     * enabled out-of-band (a privileged dashboard action) and `create extension pg_cron` is
+     * routinely refused to the migration runner. This project's deploy preflight verifies
+     * migrations and schema shape; it cannot see whether an extension was switched on. An
+     * invisible control-plane dependency is worse than a task in a scheduler that is already
+     * deployed, restarted and logged.
+     *
+     * IT NEEDS NEITHER GOOGLE NOR THE MODEL, so it is registered unconditionally - unlike the
+     * mailbox poll and calendar sync above. It also runs before the network tasks because it
+     * is one indexed DELETE: cheap database work must never queue behind a board fetch.
+     */
+    {
+      name: OAUTH_STATE_SWEEP_TASK_NAME,
+      intervalMs: readEnvInt(
+        "SCHEDULER_OAUTH_STATE_SWEEP_INTERVAL_MS",
+        DEFAULT_OAUTH_STATE_SWEEP_INTERVAL_MS,
+        env,
+      ),
+      run: async () => {
+        const result = await runOAuthStateSweep(client);
+        return { purged: result.purged, grace: result.grace };
       },
     },
 

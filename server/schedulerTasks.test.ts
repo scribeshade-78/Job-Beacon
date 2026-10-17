@@ -32,6 +32,8 @@ import {
   DEFAULT_APPLICATION_RECOVERY_INTERVAL_MS,
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
+  DEFAULT_OAUTH_STATE_SWEEP_INTERVAL_MS,
+  OAUTH_STATE_SWEEP_TASK_NAME,
   parseDisabledTasks,
   RANKING_REFRESH_TASK_NAME,
 } from "./schedulerTasks.js";
@@ -49,6 +51,11 @@ vi.mock("./mailbox/poll.js", () => ({ runMailboxPollingBatch: vi.fn() }));
 vi.mock("./mailbox/classifyBatch.js", () => ({ runMessageClassificationBatch: vi.fn() }));
 vi.mock("./mailbox/matchBatch.js", () => ({ runApplicationMatchBatch: vi.fn() }));
 vi.mock("./calendar/sync.js", () => ({ runCalendarSyncBatch: vi.fn() }));
+// The oauth_state TTL sweep. Its own logic - the grace window, the row-count contract, the
+// failure handling - is covered by server/mailbox/oauthStateSweep.test.ts and, against a real
+// database, by server/integration/oauthStateSweep.db.integration.test.ts. Here only
+// registration, cadence and the summary the scheduler logs.
+vi.mock("./mailbox/oauthStateSweep.js", () => ({ runOAuthStateSweep: vi.fn() }));
 // The ingestion drain reaches the network through its own client. Nothing in this file
 // exercises a real fetch, so the runner is mocked rather than handed the {} client.
 vi.mock("./ingestion/runner.js", () => ({
@@ -93,7 +100,8 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
 // immediately before ingestion-drain so work queued this tick is processed this tick;
 // the drain then sits before the mailbox block deliberately — a drain that overruns its
 // deadline delays whatever follows it, and mail classification is what the candidate
-// actually notices.
+// actually notices. oauth-state-sweep sits at the head of the mailbox block because it is one
+// indexed DELETE that must never queue behind a network poll.
 const ALWAYS_ON = [
   FIT_RECONCILE_TASK_NAME,
   FIT_TASK_NAME,
@@ -101,6 +109,7 @@ const ALWAYS_ON = [
   ANTI_GHOSTING_TASK_NAME,
   KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
+  OAUTH_STATE_SWEEP_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,
@@ -393,6 +402,45 @@ describe("buildScheduledTasks", () => {
         failures: 0,
       });
     });
+  });
+});
+
+/**
+ * Phase 17 — the oauth_state TTL sweep.
+ *
+ * The sweep's own logic lives in server/mailbox/oauthStateSweep.test.ts and, against a real
+ * database, in server/integration/oauthStateSweep.db.integration.test.ts. This block asserts
+ * only what the SCHEDULER owns: that the task exists on a deployment with no credentials at
+ * all, that its cadence is configurable, and that it reports the RPC's answer rather than
+ * swallowing it.
+ */
+describe("the oauth_state TTL sweep", () => {
+  it("is registered unconditionally, because it needs neither Google nor the model", () => {
+    // NO_GOOGLE is the point: the sweep must not disappear on a deployment that never
+    // configured OAuth, because abandoned expired handshake rows can still exist there.
+    expect(buildScheduledTasks(client, openai, NO_GOOGLE).map((task) => task.name)).toContain(
+      OAUTH_STATE_SWEEP_TASK_NAME,
+    );
+  });
+
+  it("defaults to every fifteen minutes and honours the override", () => {
+    expect(DEFAULT_OAUTH_STATE_SWEEP_INTERVAL_MS).toBe(15 * 60_000);
+
+    const overridden = buildScheduledTasks(client, openai, {
+      SCHEDULER_OAUTH_STATE_SWEEP_INTERVAL_MS: "42000",
+    });
+
+    expect(overridden.find((task) => task.name === OAUTH_STATE_SWEEP_TASK_NAME)?.intervalMs).toBe(42_000);
+  });
+
+  it("reports the purged count and the grace window into the completion log", async () => {
+    const { runOAuthStateSweep } = await import("./mailbox/oauthStateSweep.js");
+    vi.mocked(runOAuthStateSweep).mockResolvedValue({ purged: 4, grace: "1 hour" });
+
+    const summary = await taskByName(OAUTH_STATE_SWEEP_TASK_NAME, {}).run();
+
+    expect(summary).toEqual({ purged: 4, grace: "1 hour" });
+    expect(vi.mocked(runOAuthStateSweep)).toHaveBeenCalledWith(client);
   });
 });
 
