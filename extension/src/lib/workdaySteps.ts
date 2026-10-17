@@ -10,29 +10,49 @@
  * sole executor - there is no server-side adapter behind it - so a wrong outcome here is
  * unrecoverable.
  *
- * THE SELECTORS ARE NAMED CONSTANTS ON PURPOSE. The values below come from a PROVIDED DOM
- * SKELETON, not from a live Workday page, and Workday does not document them. Naming them in one
- * place is what makes re-verifying them against a real page a one-line correction instead of a
- * hunt through the filler. Nothing here claims to be verified against production.
+ * THE SELECTORS ARE NAMED CONSTANTS ON PURPOSE, and they are now CAPTURED rather than inferred.
+ * The values below were read off a real Workday tenant (nvidia.wd5.myworkdayjobs.com, the My
+ * Information step) on 2026-10-17 and are pinned by
+ * extension/src/lib/__fixtures__/workday-step.html. The two guessed attribute families that used
+ * to be toleranced here matched NOTHING on that page, which is why the capture was worth doing.
  */
 
+/**
+ * The automation ids observed on the captured page, and the selectors built from them.
+ *
+ * THE OLD UNION WAS WRONG FOR EVERY CONTROL. It tolerated bottom-navigation-* / errorBanner /
+ * page-loading and navigation-* / errorSummary / page-loading-indicator; the real page uses none
+ * of them. Tolerating both was the honest answer while there was no evidence. There is evidence
+ * now, so the guesses are gone and these ids are the only values this module acts on.
+ *
+ * TWO VALUES ARE STILL UNOBSERVED, and are labelled rather than guessed:
+ *   loading  seen only transiently during a page transition; the settled step had no spinner
+ *   submit   the Review step was never reached. pageFooterSubmitButton is INFERRED from
+ *            pageFooterNextButton's naming, and navigationKind's label fallback covers it.
+ */
+const STEP_IDS = ["applyFlowPage", "applyFlowMyInfoPage"] as const;
+const ERROR_BANNER_IDS = ["errorHeading"] as const;
+const ERROR_MESSAGE_IDS = ["inputAlert"] as const;
+const LOADING_IDS = ["loading"] as const;
+const NEXT_IDS = ["pageFooterNextButton"] as const;
+const SUBMIT_IDS = ["pageFooterSubmitButton"] as const;
+
+/** querySelector accepts a selector list natively, so an array of ids costs no extra code. */
+function selectorFor(ids: readonly string[]): string {
+  return ids.map((id) => `[data-automation-id="${id}"]`).join(", ");
+}
+
+function matchesAnyId(automationId: string, ids: readonly string[]): boolean {
+  return ids.some((id) => id.toLowerCase() === automationId);
+}
+
 export const WORKDAY = {
-  // TWO ATTRIBUTE SETS PER CONTROL, comma-separated (querySelector accepts a selector list
-  // natively, so this costs no code). We were given two DIFFERENT structures claiming to be
-  // Workday's: an early one using bottom-navigation-* / errorBanner / page-loading, and a later,
-  // more detailed one using navigation-* / errorSummary / page-loading-indicator. Neither is a
-  // raw capture - both carry editorial HTML comments and placeholder class names - so neither
-  // can be called verified, and picking one would just be preferring a guess.
-  //
-  // TOLERATING BOTH IS THE HONEST ENGINEERING ANSWER: it is strictly more robust than betting
-  // on either, and it costs one string per control. The unverified-assumption caveat in this
-  // file's header still stands for every value below.
-  step: '[data-automation-id="workday-application-step"], [data-automation-id="application-page"]',
-  errorBanner: '[data-automation-id="errorBanner"], [data-automation-id="errorSummary"]',
-  errorMessage: '[data-automation-id="errorMessage"], [data-automation-id="error-message"]',
-  loading: '[data-automation-id="page-loading"], [data-automation-id="page-loading-indicator"]',
-  next: '[data-automation-id="bottom-navigation-next"], [data-automation-id="navigation-next"]',
-  submit: '[data-automation-id="bottom-navigation-submit"], [data-automation-id="navigation-submit"]',
+  step: selectorFor(STEP_IDS),
+  errorBanner: selectorFor(ERROR_BANNER_IDS),
+  errorMessage: selectorFor(ERROR_MESSAGE_IDS),
+  loading: selectorFor(LOADING_IDS),
+  next: selectorFor(NEXT_IDS),
+  submit: selectorFor(SUBMIT_IDS),
 } as const;
 
 /** How long a step gets to finish loading before we stop waiting and say so. */
@@ -94,8 +114,10 @@ export function hasStep(doc: Document): boolean {
 export function navigationKind(button: Element): "next" | "submit" | "unknown" {
   const automationId = (button.getAttribute("data-automation-id") ?? "").toLowerCase().trim();
 
-  if (automationId === "bottom-navigation-submit" || automationId === "navigation-submit") return "submit";
-  if (automationId === "bottom-navigation-next" || automationId === "navigation-next") return "next";
+  // Derived from the SAME lists the selectors are built from, so a corrected id cannot be right
+  // in one place and stale in the other.
+  if (matchesAnyId(automationId, SUBMIT_IDS)) return "submit";
+  if (matchesAnyId(automationId, NEXT_IDS)) return "next";
 
   // navigation-back lands here as "unknown", which is correct and load-bearing: it is a control
   // that moves the flow, but treating it as "next" would walk the candidate BACKWARDS through

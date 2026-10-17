@@ -23,10 +23,10 @@ import {
  * is a real code path and not a stubbed one.
  */
 
-const STEP = `<div data-automation-id="workday-application-step"><input data-automation-id="legalNameSection_firstName"></div>`;
-const LOADING = `<div data-automation-id="page-loading"><svg></svg></div>`;
-const NEXT = `<button data-automation-id="bottom-navigation-next">Save and Continue</button>`;
-const SUBMIT = `<button data-automation-id="bottom-navigation-submit">Submit Application</button>`;
+const STEP = `<div data-automation-id="applyFlowPage"><input data-automation-id="formField-legalName--firstName"></div>`;
+const LOADING = `<div data-automation-id="loading"><svg></svg></div>`;
+const NEXT = `<button data-automation-id="pageFooterNextButton">Save and Continue</button>`;
+const SUBMIT = `<button data-automation-id="pageFooterSubmitButton">Submit Application</button>`;
 
 beforeEach(() => {
   document.body.innerHTML = "";
@@ -64,19 +64,19 @@ describe("readErrorBanner", () => {
   it("returns the validation message when a banner is visible", () => {
     document.body.innerHTML =
       STEP +
-      `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Please enter a valid phone number.</span></div>`;
+      `<div data-automation-id="errorHeading"><span data-automation-id="inputAlert">Please enter a valid phone number.</span></div>`;
     expect(readErrorBanner(document)).toBe("Please enter a valid phone number.");
   });
 
   it("IGNORES a hidden banner, which is present but not a failure", () => {
     // Workday keeps the banner in the DOM. Only a VISIBLE one means the step was rejected, and
     // treating a hidden one as an error would abort every step.
-    document.body.innerHTML = STEP + `<div data-automation-id="errorBanner" hidden>stale</div>`;
+    document.body.innerHTML = STEP + `<div data-automation-id="errorHeading" hidden>stale</div>`;
     expect(readErrorBanner(document)).toBeNull();
   });
 
   it("says so rather than returning empty when the banner carries no text", () => {
-    document.body.innerHTML = STEP + `<div data-automation-id="errorBanner"></div>`;
+    document.body.innerHTML = STEP + `<div data-automation-id="errorHeading"></div>`;
     expect(readErrorBanner(document)).toBe("Workday rejected this step without saying why.");
   });
 });
@@ -119,21 +119,26 @@ describe("navigationKind - next is reversible, submit is not", () => {
     expect(navigationKind(document.querySelector("button")!)).toBe("unknown");
   });
 
-  it("accepts BOTH id sets we were given, because neither is a verified capture", () => {
-    expect(WORKDAY.next).toContain("bottom-navigation-next");
-    expect(WORKDAY.next).toContain("navigation-next");
-    expect(WORKDAY.submit).toContain("bottom-navigation-submit");
-    expect(WORKDAY.submit).toContain("navigation-submit");
-    expect(WORKDAY.loading).toContain("page-loading-indicator");
-    expect(WORKDAY.errorBanner).toContain("errorSummary");
-    expect(WORKDAY.step).toContain("application-page");
+  it("builds its selectors from the CAPTURED ids, not from the old guesses", () => {
+    // Pinned so a later "harmless" edit cannot reintroduce a value that matched nothing on the
+    // real page. The evidence itself is __fixtures__/workday-step.html, asserted separately.
+    expect(WORKDAY.step).toContain("applyFlowPage");
+    expect(WORKDAY.step).toContain("applyFlowMyInfoPage");
+    expect(WORKDAY.errorBanner).toContain("errorHeading");
+    expect(WORKDAY.errorMessage).toContain("inputAlert");
+    expect(WORKDAY.loading).toContain("loading");
+    expect(WORKDAY.next).toContain("pageFooterNextButton");
+
+    expect(WORKDAY.next).not.toContain("bottom-navigation-next");
+    expect(WORKDAY.errorBanner).not.toContain("errorSummary");
+    expect(WORKDAY.step).not.toContain("application-page");
   });
 
-  it("reads the second capture's navigation ids", () => {
-    document.body.innerHTML = '<button data-automation-id="navigation-next">Save and Continue</button>';
+  it("reads the captured footer ids", () => {
+    document.body.innerHTML = '<button data-automation-id="pageFooterNextButton">Save and Continue</button>';
     expect(navigationKind(document.querySelector("button")!)).toBe("next");
 
-    document.body.innerHTML = '<button data-automation-id="navigation-submit">Submit Application</button>';
+    document.body.innerHTML = '<button data-automation-id="pageFooterSubmitButton">Submit Application</button>';
     expect(navigationKind(document.querySelector("button")!)).toBe("submit");
   });
 
@@ -142,10 +147,10 @@ describe("navigationKind - next is reversible, submit is not", () => {
     expect(navigationKind(document.querySelector("button")!)).toBe("unknown");
   });
 
-  it("reads the second capture's error summary and its message", () => {
+  it("reads the validation panel by its captured ids", () => {
     document.body.innerHTML =
       STEP +
-      '<div data-automation-id="errorSummary" role="alert"><ul><li data-automation-id="error-message">1 Error: Please enter a valid phone number.</li></ul></div>';
+      '<div data-automation-id="errorHeading" role="alert"><p data-automation-id="inputAlert">1 Error: Please enter a valid phone number.</p></div>';
 
     expect(readErrorBanner(document)).toBe("1 Error: Please enter a valid phone number.");
   });
@@ -154,18 +159,18 @@ describe("navigationKind - next is reversible, submit is not", () => {
     // Workday keeps the indicator in the DOM permanently and toggles style.display, so "is the
     // spinner up" is really "is it displayed" - and the indicator being PRESENT means nothing.
     document.body.innerHTML =
-      STEP + '<div data-automation-id="page-loading-indicator" style="display: none;"><svg></svg></div>';
+      STEP + '<div data-automation-id="loading" style="display: none;"><svg></svg></div>';
 
     expect(isLoading(document)).toBe(false);
   });
 
   it("treats a displayed loading indicator as loading", () => {
-    document.body.innerHTML = STEP + '<div data-automation-id="page-loading-indicator"><svg></svg></div>';
+    document.body.innerHTML = STEP + '<div data-automation-id="loading"><svg></svg></div>';
     expect(isLoading(document)).toBe(true);
   });
 
-  it("recognises the second capture's page frame as a step", () => {
-    document.body.innerHTML = '<div data-automation-id="application-page"></div>';
+  it("recognises the captured step-content container as a step", () => {
+    document.body.innerHTML = '<div data-automation-id="applyFlowMyInfoPage"></div>';
     expect(hasStep(document)).toBe(true);
   });
 });
@@ -327,7 +332,7 @@ describe("waitForStepSettled — the deadline", () => {
 describe("waitForStepSettled — validation beats loading and the deadline", () => {
   it("ABORTS on a validation banner, reporting what Workday said", async () => {
     document.body.innerHTML =
-      STEP + `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Please enter a valid phone number.</span></div>`;
+      STEP + `<div data-automation-id="errorHeading"><span data-automation-id="inputAlert">Please enter a valid phone number.</span></div>`;
     const clock = drivenClock();
 
     await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({
@@ -343,7 +348,7 @@ describe("waitForStepSettled — validation beats loading and the deadline", () 
     // throw away the reason the step was rejected.
     document.body.innerHTML =
       LOADING +
-      `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Nope.</span></div>`;
+      `<div data-automation-id="errorHeading"><span data-automation-id="inputAlert">Nope.</span></div>`;
     const clock = drivenClock();
 
     await expect(waitForStepSettled(document, depsOf(clock, 2_000, 250))).resolves.toEqual({
@@ -358,7 +363,7 @@ describe("waitForStepSettled — validation beats loading and the deadline", () 
       if (poll === 4) {
         document.body.insertAdjacentHTML(
           "beforeend",
-          `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Too late, but true.</span></div>`,
+          `<div data-automation-id="errorHeading"><span data-automation-id="inputAlert">Too late, but true.</span></div>`,
         );
       }
     });
