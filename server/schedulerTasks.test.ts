@@ -759,6 +759,38 @@ describe("the Batch C scheduled refresh tasks", () => {
 
     expect(tasks.find((task) => task.name === RANKING_REFRESH_TASK_NAME)?.intervalMs).toBe(45_000);
   });
+});
 
+/**
+ * THE MODEL CLIENT IS OPTIONAL.
+ *
+ * A deployment with no provider key still has DB-only work to do, so the scheduler must start and
+ * run it rather than refusing to boot. These pin exactly which tasks disappear.
+ */
+describe("a deployment without a model client", () => {
+  it("omits every model-backed task", () => {
+    const names = buildScheduledTasks(client, null, NO_GOOGLE).map((task) => task.name);
 
+    expect(names).not.toContain(FIT_TASK_NAME);
+    expect(names).not.toContain(ANTI_GHOSTING_TASK_NAME);
+    expect(names).not.toContain(MAILBOX_CLASSIFY_TASK_NAME);
+    expect(names).not.toContain(INTAKE_REFRESH_DRAIN_TASK_NAME);
+  });
+
+  it("keeps every DB-only task, including the two sweeps added for security", () => {
+    const names = buildScheduledTasks(client, null, NO_GOOGLE).map((task) => task.name);
+
+    expect(names).toContain(RANKING_REFRESH_TASK_NAME);
+    expect(names).toContain(APPLICATION_RECOVERY_TASK_NAME);
+    expect(names).toContain(OAUTH_STATE_SWEEP_TASK_NAME);
+    expect(names).toContain(FOLLOW_UP_RECOVERY_TASK_NAME);
+  });
+
+  it("still runs mailbox polling, which does not need the model", () => {
+    // Polling's inline classification is best effort; without a key it still fetches mail and
+    // leaves the messages for the backfill batch.
+    const names = buildScheduledTasks(client, null, GOOGLE_ENV).map((task) => task.name);
+
+    expect(names).toContain(MAILBOX_POLL_TASK_NAME);
+  });
 });

@@ -245,7 +245,9 @@ export function parseDisabledTasks(raw: string | undefined): Set<string> {
  */
 function mailboxPollTask(
   client: SupabaseClient,
-  openai: Pick<OpenAI, "chat">,
+  // NULLABLE: polling does not require the model. Inline classification is best effort, so a
+  // deployment without a key still fetches mail and leaves it for the backfill batch.
+  openai: Pick<OpenAI, "chat"> | null,
   env: Record<string, string | undefined>,
 ): ScheduledTask {
   return {
@@ -257,7 +259,7 @@ function mailboxPollTask(
         readGoogleOAuthConfig(env),
         readMailboxEncryptionKey(env),
         fetch,
-        openai,
+        openai ?? undefined,
       );
 
       return {
@@ -368,13 +370,41 @@ function calendarSyncTask(client: SupabaseClient, env: Record<string, string | u
  * logs that reason once at startup. Classification and matching are deliberately
  * outside that gate because they need no Google access.
  */
+/**
+ * Stands in for a missing model client so the task array can be built unconditionally.
+ *
+ * A MODEL-BACKED TASK IS FILTERED OUT WHEN THERE IS NO CLIENT, so reaching this should be
+ * impossible. If a future task forgets to be listed in MODEL_TASK_NAMES, it fails its own tick
+ * with this message instead of quietly calling a provider with no key.
+ */
+const UNAVAILABLE_MODEL = {
+  chat: {
+    completions: {
+      create: async () => {
+        throw new Error("No model client is configured; a model-backed task should have been omitted.");
+      },
+    },
+  },
+} as unknown as Pick<OpenAI, "chat">;
+
+/** Tasks that cannot run without a model client. Omitted when one cannot be built. */
+const MODEL_TASK_NAMES: ReadonlySet<string> = new Set([
+  FIT_TASK_NAME,
+  ANTI_GHOSTING_TASK_NAME,
+  MAILBOX_CLASSIFY_TASK_NAME,
+  INTAKE_REFRESH_DRAIN_TASK_NAME,
+]);
+
 export function buildScheduledTasks(
   client: SupabaseClient,
-  openai: Pick<OpenAI, "chat">,
+  openai: Pick<OpenAI, "chat"> | null,
   env: Record<string, string | undefined> = process.env,
 ): ScheduledTask[] {
   const disabled = parseDisabledTasks(env.SCHEDULER_DISABLED_TASKS);
   const capability = readMailboxCapability(env);
+  // A missing client is a DEPLOYMENT STATE, not a reason to build nothing: the model tasks are
+  // filtered out below and every DB-only task still runs.
+  const model = openai ?? UNAVAILABLE_MODEL;
 
   const tasks: ScheduledTask[] = [
     /**
@@ -419,7 +449,7 @@ export function buildScheduledTasks(
         // there: every analysis is a paid model call, so a configured value above the ceiling
         // is reduced rather than honoured. An unconfigured deployment gets the default rather
         // than an uncapped drain.
-        const result = await runFitAnalysisBatch(client, { openai }, {
+        const result = await runFitAnalysisBatch(client, { openai: model }, {
           maxPerBatch: readFitAnalysisBatchLimit(env),
         });
 
@@ -462,7 +492,7 @@ export function buildScheduledTasks(
         // The 7-day window and the 20-draft cap come from the detector's own
         // exported defaults, not from literals repeated here, so the schedule
         // and the detector cannot disagree about what "ghosted" means.
-        const result = await runFollowUpSweep(client, { openai }, {
+        const result = await runFollowUpSweep(client, { openai: model }, {
           minAgeDays: readEnvInt("FOLLOW_UP_MIN_AGE_DAYS", DEFAULT_MIN_AGE_DAYS, env),
           limit: readEnvInt("FOLLOW_UP_SWEEP_LIMIT", DEFAULT_DRAFT_LIMIT, env),
         });
@@ -587,7 +617,7 @@ export function buildScheduledTasks(
     // Mailbox and calendar. Poll runs before classify before match, so a message
     // fetched in this tick is classified and linked in this tick.
     ...(capability.googleMail.enabled ? [mailboxPollTask(client, openai, env)] : []),
-    mailboxClassifyTask(client, openai, env),
+    mailboxClassifyTask(client, model, env),
     mailboxMatchTask(client, env),
     ...(capability.googleCalendar.enabled ? [calendarSyncTask(client, env)] : []),
 
@@ -610,7 +640,7 @@ export function buildScheduledTasks(
       ),
       run: async () => {
         const result = await drainIntakeRefreshJobs(client, {
-          deps: { openai },
+          deps: { openai: model },
           // Unset leaves the drain's own defaults (3 jobs; a lease-safe 4-minute budget).
           ...(env.SCHEDULER_INTAKE_REFRESH_MAX_JOBS
             ? { maxJobs: Number.parseInt(env.SCHEDULER_INTAKE_REFRESH_MAX_JOBS, 10) }
@@ -665,5 +695,9 @@ export function buildScheduledTasks(
 
   ];
 
-  return tasks.filter((task) => !disabled.has(task.name));
+  // NO MODEL CLIENT MEANS NO MODEL TASKS - not a scheduler that refuses to start. The DB-only
+  // work has to keep running on a deployment that has not configured a provider key.
+  const runnable = openai === null ? tasks.filter((task) => !MODEL_TASK_NAMES.has(task.name)) : tasks;
+
+  return runnable.filter((task) => !disabled.has(task.name));
 }

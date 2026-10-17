@@ -40,10 +40,10 @@ import { readEnvInt } from "./config/envInt.js";
  * nothing to do exits with code 0, not 1, and that is deliberate rather than an
  * oversight. npm run dev starts this process alongside the API and the UI under
  * "concurrently --kill-others-on-fail", which tears down the whole stack when
- * any member exits non-zero. A missing OPENROUTER_API_KEY is a reason for the
- * scheduler to stand down; it is not a reason to kill the candidate's app. The
- * message on the way out says exactly what is wrong, so the signal is the log
- * line rather than the status code.
+ * any member exits non-zero. A scheduler with no runnable task stands down;
+ * that is not a reason to kill the candidate's app. The message on the way out
+ * says exactly what is wrong, so the signal is the log line rather than the
+ * status code.
  */
 
 let shuttingDown = false;
@@ -88,20 +88,18 @@ process.on("SIGTERM", () => handleSignal("SIGTERM"));
 async function main() {
   const client = createSupabaseServiceRoleClient();
 
-  // Both scheduled tasks call the paid model endpoint, so there is no partial
-  // mode in which this scheduler is useful without a key. Constructing the
-  // client once, here, turns a missing key into one clear startup message
-  // instead of a task failing on a loop forever.
-  let openai;
+  // THE MODEL CLIENT IS OPTIONAL. Refusing to start would stop the DB-only work too - ranking
+  // refresh, application recovery, the OAuth state sweep, the follow-up send recovery - on a
+  // deployment that simply has no provider key. buildScheduledTasks omits the model-backed tasks
+  // when this is null, and the log line below says why they are absent.
+  let openai: ReturnType<typeof createOpenAIClient> | null = null;
   try {
     openai = createOpenAIClient();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(
-      "[scheduler] cannot start: " + message +
-        " Every scheduled task needs the model endpoint. Exiting without touching the API server.",
+    console.warn(
+      "[scheduler] no model client (" + message + "). Model-backed tasks are omitted; DB-only tasks still run.",
     );
-    return;
   }
 
   // Optional capabilities are reported BEFORE the task list, so an operator who

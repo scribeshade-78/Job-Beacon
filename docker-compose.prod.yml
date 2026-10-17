@@ -175,15 +175,24 @@ services:
   # would sit permanently "unhealthy" and tell an operator nothing true.
   #
   # SCHEDULER_DISABLED_TASKS IS AN OFF-LIST. The scheduler builds every task it
-  # can and removes the names listed here, so this list is what keeps the
-  # model-backed tasks (fit-analysis, anti-ghosting, mailbox-classify) and the
-  # network task (discovery) switched OFF. Enabling one later means deleting its
-  # name from this list, not editing code.
+  # can and removes the names listed here. This deployment runs DB-ONLY
+  # housekeeping: ranking refresh, application recovery, the OAuth state sweep
+  # and the follow-up send recovery. Everything that reaches the network
+  # (ingestion-drain, intake-refresh-drain, mailbox-poll, calendar-sync) or the
+  # model (fit-analysis, anti-ghosting, mailbox-classify) is listed.
   #
-  # OPENROUTER_API_KEY IS STILL REQUIRED even though every task left enabled is
-  # DB-only: scheduler.ts constructs the OpenAI client before it filters the task
-  # list. Without the key the process logs "cannot start", exits 0, and
-  # unless-stopped restarts it into the same loop — visible only in the logs.
+  # THE ENQUEUE-ONLY TASKS ARE LISTED TOO. keyless-ingestion-enqueue and
+  # fit-reconcile only fill queues that the drains above would empty, so leaving
+  # them on would grow ingestion_jobs and fit_analysis_jobs with no consumer.
+  #
+  # THE PREVIOUS LIST NAMED "discovery", WHICH IS NOT A TASK NAME. An off-list
+  # entry that matches nothing is silently inert, so the ingestion drains had
+  # been running against the comment that said they were off.
+  # server/schedulerOffList.test.ts now fails if a name here is not a real task.
+  #
+  # A MISSING OPENROUTER_API_KEY NO LONGER STOPS THIS PROCESS. The model-backed
+  # tasks are omitted when the client cannot be built, and the DB-only work
+  # keeps running.
   # ---------------------------------------------------------------------------
   scheduler:
     image: jobbeacon:latest
@@ -194,7 +203,7 @@ services:
       - .env.production
     environment:
       NODE_ENV: "production"
-      SCHEDULER_DISABLED_TASKS: "fit-analysis,anti-ghosting,mailbox-poll,mailbox-classify,mailbox-match,calendar-sync,discovery"
+      SCHEDULER_DISABLED_TASKS: "fit-reconcile,fit-analysis,anti-ghosting,keyless-ingestion-enqueue,ingestion-drain,mailbox-poll,mailbox-classify,mailbox-match,calendar-sync,intake-refresh-drain"
       SCHEDULER_RANKING_REFRESH_INTERVAL_MS: "600000"
       SCHEDULER_REFRESH_MAX_CANDIDATES_PER_TICK: "20"
       SCHEDULER_REFRESH_PER_CANDIDATE_DEADLINE_MS: "10000"
