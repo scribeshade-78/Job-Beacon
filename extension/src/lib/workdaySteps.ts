@@ -117,6 +117,15 @@ export interface SettleDeps {
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
   pollMs?: number;
+  /**
+   * The clock the deadline is measured against.
+   *
+   * INJECTABLE SO THE DEADLINE IS TESTABLE WITHOUT WAITING. sleep alone is not enough: the loop
+   * reads Date.now() directly, so a test could shorten the timeout but still had to burn real
+   * milliseconds to reach it — and could never assert HOW MANY polls the budget allowed. With
+   * this injected, a test advances time by hand and pins both the boundary and the poll count.
+   */
+  now?: () => number;
 }
 
 /**
@@ -138,9 +147,10 @@ export async function waitForStepSettled(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const timeoutMs = deps.timeoutMs ?? STEP_SETTLE_TIMEOUT_MS;
   const pollMs = deps.pollMs ?? STEP_POLL_MS;
-  const startedAt = Date.now();
+  const now = deps.now ?? (() => Date.now());
+  const startedAt = now();
 
-  while (Date.now() - startedAt < timeoutMs) {
+  while (now() - startedAt < timeoutMs) {
     await sleep(pollMs);
 
     // The error check comes FIRST. A step can show a banner while the spinner is still up, and

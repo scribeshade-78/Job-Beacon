@@ -170,30 +170,172 @@ describe("navigationKind - next is reversible, submit is not", () => {
   });
 });
 
-describe("waitForStepSettled", () => {
-  const fast = { pollMs: 1, timeoutMs: 5_000 };
+/**
+ * THE SETTLE LOOP, DRIVEN BY A CLOCK THE TEST OWNS.
+ *
+ * NO REAL TIME ANYWHERE IN THIS BLOCK. sleep is a function that advances a counter, now reads it
+ * back, and nothing ever waits — so the suite runs at the same speed on an idle laptop and a
+ * loaded CI runner. That matters because the previous version reached its timeout by actually
+ * sleeping 30ms, which proved the verdict but never the DEADLINE: how many polls the budget
+ * allowed, or whether the loop could drift past it.
+ *
+ * The clock is also the only way to express "the spinner clears on the poll just before the
+ * deadline", which is the boundary that decides whether the candidate sees "ready" or
+ * "still loading".
+ */
+interface DrivenClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  elapsed: () => number;
+  polls: () => number;
+}
 
-  it("returns ready once the spinner is gone and a step is rendered", async () => {
+function drivenClock(onPoll?: (poll: number) => void): DrivenClock {
+  let current = 0;
+  let polls = 0;
+
+  return {
+    now: () => current,
+    sleep: async (ms) => {
+      current += ms;
+      polls += 1;
+      onPoll?.(polls);
+    },
+    elapsed: () => current,
+    polls: () => polls,
+  };
+}
+
+function depsOf(clock: DrivenClock, timeoutMs: number, pollMs: number) {
+  return { sleep: clock.sleep, now: clock.now, timeoutMs, pollMs };
+}
+
+describe("waitForStepSettled — ready paths", () => {
+  it("returns ready on the FIRST poll when the step is already settled", async () => {
     document.body.innerHTML = STEP;
-    await expect(waitForStepSettled(document, fast)).resolves.toEqual({ kind: "ready" });
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "ready" });
+
+    expect(clock.polls()).toBe(1);
+    expect(clock.elapsed()).toBe(250);
   });
 
-  it("returns ready after a spinner clears", async () => {
+  it("returns ready on the poll that clears the spinner", async () => {
     document.body.innerHTML = STEP + LOADING;
-    const settle = waitForStepSettled(document, fast);
-    setTimeout(() => {
-      document.querySelector(WORKDAY.loading)?.remove();
-    }, 5);
-    await expect(settle).resolves.toEqual({ kind: "ready" });
+    const clock = drivenClock((poll) => {
+      if (poll === 3) document.querySelector(WORKDAY.loading)?.remove();
+    });
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "ready" });
+
+    // It waits exactly as long as the spinner is up, and not one poll longer.
+    expect(clock.polls()).toBe(3);
+    expect(clock.elapsed()).toBe(750);
   });
 
+  it("does not report ready when the spinner is gone but no step rendered", async () => {
+    document.body.innerHTML = `<div>nothing here</div>`;
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "timeout" });
+
+    expect(clock.polls()).toBe(4);
+  });
+});
+
+describe("waitForStepSettled — the deadline", () => {
+  it("returns TIMEOUT when the spinner never clears, having spent EXACTLY the budget", async () => {
+    // The honest unknown. The caller reports needs_verification; inventing success here is the
+    // mistake this whole machine exists to avoid.
+    document.body.innerHTML = STEP + LOADING;
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "timeout" });
+
+    // 1000 / 250 = 4 polls, ending on the deadline rather than drifting past it.
+    expect(clock.polls()).toBe(4);
+    expect(clock.elapsed()).toBe(1_000);
+  });
+
+  it("OBSERVES the DOM at exactly the deadline, so a step that settles then is still ready", async () => {
+    // The loop sleeps and THEN asks, and it only re-checks the budget at the top of the next
+    // iteration. So the last permitted observation happens at elapsed === timeoutMs. That is a
+    // deliberate boundary, not an accident: refusing a page that became ready on the final poll
+    // would discard a step Workday had finished rendering.
+    document.body.innerHTML = STEP + LOADING;
+    const clock = drivenClock((poll) => {
+      if (poll === 4) document.querySelector(WORKDAY.loading)?.remove();
+    });
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "ready" });
+    expect(clock.elapsed()).toBe(1_000);
+  });
+
+  it("never polls again once the budget is spent, even if the spinner clears afterwards", async () => {
+    document.body.innerHTML = STEP + LOADING;
+    const clock = drivenClock((poll) => {
+      if (poll === 5) document.querySelector(WORKDAY.loading)?.remove();
+    });
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({ kind: "timeout" });
+
+    // Poll 5 would have seen the cleared spinner, but the budget ended at poll 4.
+    expect(clock.polls()).toBe(4);
+  });
+
+  it("overshoots the budget by AT MOST one poll interval", async () => {
+    // The condition is checked BEFORE sleeping, so the final sleep can carry the clock past the
+    // deadline. Bounded by pollMs, and asserted rather than assumed.
+    document.body.innerHTML = STEP + LOADING;
+    const clock = drivenClock();
+
+    const timeoutMs = 1_000;
+    const pollMs = 400;
+
+    await expect(waitForStepSettled(document, depsOf(clock, timeoutMs, pollMs))).resolves.toEqual({ kind: "timeout" });
+
+    expect(clock.polls()).toBe(3);
+    expect(clock.elapsed()).toBe(1_200);
+    expect(clock.elapsed()).toBeLessThanOrEqual(timeoutMs + pollMs);
+  });
+
+  it("returns immediately with no polls when the budget is zero", async () => {
+    document.body.innerHTML = STEP;
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 0, 250))).resolves.toEqual({ kind: "timeout" });
+
+    expect(clock.polls()).toBe(0);
+    expect(clock.elapsed()).toBe(0);
+  });
+
+  it("uses the module defaults when neither timeout nor poll interval is supplied", async () => {
+    // Proves the real numbers without waiting for them: 30s at 250ms is 120 polls.
+    document.body.innerHTML = STEP + LOADING;
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, { sleep: clock.sleep, now: clock.now })).resolves.toEqual({
+      kind: "timeout",
+    });
+
+    expect(clock.elapsed()).toBe(30_000);
+    expect(clock.polls()).toBe(120);
+  });
+});
+
+describe("waitForStepSettled — validation beats loading and the deadline", () => {
   it("ABORTS on a validation banner, reporting what Workday said", async () => {
     document.body.innerHTML =
       STEP + `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Please enter a valid phone number.</span></div>`;
-    await expect(waitForStepSettled(document, fast)).resolves.toEqual({
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({
       kind: "validation_error",
       message: "Please enter a valid phone number.",
     });
+
+    expect(clock.polls()).toBe(1);
   });
 
   it("reports the error even while the spinner is still up", async () => {
@@ -202,25 +344,28 @@ describe("waitForStepSettled", () => {
     document.body.innerHTML =
       LOADING +
       `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Nope.</span></div>`;
-    await expect(waitForStepSettled(document, { pollMs: 1, timeoutMs: 2_000 })).resolves.toEqual({
+    const clock = drivenClock();
+
+    await expect(waitForStepSettled(document, depsOf(clock, 2_000, 250))).resolves.toEqual({
       kind: "validation_error",
       message: "Nope.",
     });
   });
 
-  it("returns TIMEOUT - not ready and not failed - when a spinner never clears", async () => {
-    // The honest unknown. The caller reports needs_verification; inventing success here is the
-    // mistake this whole machine exists to avoid.
+  it("lets a banner that appears on the LAST poll win over the timeout", async () => {
     document.body.innerHTML = STEP + LOADING;
-    await expect(waitForStepSettled(document, { pollMs: 1, timeoutMs: 30 })).resolves.toEqual({
-      kind: "timeout",
+    const clock = drivenClock((poll) => {
+      if (poll === 4) {
+        document.body.insertAdjacentHTML(
+          "beforeend",
+          `<div data-automation-id="errorBanner"><span data-automation-id="errorMessage">Too late, but true.</span></div>`,
+        );
+      }
     });
-  });
 
-  it("does not report ready when the spinner is gone but no step rendered", async () => {
-    document.body.innerHTML = `<div>nothing here</div>`;
-    await expect(waitForStepSettled(document, { pollMs: 1, timeoutMs: 30 })).resolves.toEqual({
-      kind: "timeout",
+    await expect(waitForStepSettled(document, depsOf(clock, 1_000, 250))).resolves.toEqual({
+      kind: "validation_error",
+      message: "Too late, but true.",
     });
   });
 });
