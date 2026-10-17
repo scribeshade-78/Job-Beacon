@@ -61,6 +61,16 @@ const ALPHABET_INDEX: Record<string, number> = (() => {
   return map;
 })();
 
+/**
+ * The environment variable holding the 32-byte HMAC key.
+ *
+ * A DEDICATED SECRET, NOT A BORROWED ONE. Neither MAILBOX_OAUTH_STATE_SECRET nor
+ * MAILBOX_TOKEN_ENCRYPTION_KEY may be reused here: a leak in one protocol must not let an
+ * attacker forge another's artefacts, and this repo already refuses that kind of fallback in
+ * server/ats/credentials.ts.
+ */
+export const REPLY_TOKEN_SECRET_ENV = "INBOUND_REPLY_TOKEN_SECRET";
+
 /** v1 = the MAC-only layout above. A future layout gets its own version rather than a new shape. */
 export const REPLY_TOKEN_VERSION = 1;
 
@@ -156,6 +166,30 @@ function macFor(attemptId: string, secret: Buffer): Buffer | null {
     .update(bytes)
     .digest()
     .subarray(0, REPLY_TOKEN_MAC_BYTES);
+}
+
+/**
+ * Reads the HMAC key, failing loudly when it is missing or the wrong size.
+ *
+ * THROWS RATHER THAN RETURNING NULL. A caller that is about to MINT must not silently produce
+ * nothing, and a caller that is about to VERIFY must decide for itself whether an unconfigured
+ * deployment is a degradation or a fault — matchBatch treats it as a degradation, because a
+ * token can only have been minted where this same secret was configured.
+ */
+export function readReplyTokenSecret(env: Record<string, string | undefined> = process.env): Buffer {
+  const raw = env[REPLY_TOKEN_SECRET_ENV];
+
+  if (!raw) {
+    throw new Error(`Missing ${REPLY_TOKEN_SECRET_ENV} — required to mint and verify reply tokens.`);
+  }
+
+  const secret = Buffer.from(raw, "base64");
+
+  if (secret.length !== 32) {
+    throw new Error(`${REPLY_TOKEN_SECRET_ENV} must decode (base64) to exactly 32 bytes for HMAC-SHA256.`);
+  }
+
+  return secret;
 }
 
 /**

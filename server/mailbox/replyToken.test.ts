@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   mintReplyAddress,
+  readReplyTokenSecret,
   REPLY_TOKEN_LENGTH,
   REPLY_TOKEN_MAX_LOCAL_PART,
+  REPLY_TOKEN_SECRET_ENV,
   verifyReplyToken,
 } from "./replyToken.js";
 
@@ -209,6 +211,34 @@ describe("header parsing", () => {
     const header = `jane.doe+NOTATOKENATALL9999999@gmail.com, ${address}`;
 
     expect(verifyReplyToken(header, [ATTEMPT], SECRET)?.attemptId).toBe(ATTEMPT);
+  });
+});
+
+describe("readReplyTokenSecret", () => {
+  it("reads a 32-byte base64 key", () => {
+    const raw = Buffer.alloc(32, 4).toString("base64");
+
+    expect(readReplyTokenSecret({ [REPLY_TOKEN_SECRET_ENV]: raw })).toEqual(Buffer.alloc(32, 4));
+  });
+
+  it("names the missing variable instead of failing obscurely later", () => {
+    expect(() => readReplyTokenSecret({})).toThrow(new RegExp(REPLY_TOKEN_SECRET_ENV));
+  });
+
+  it("refuses a key that is not exactly 32 bytes", () => {
+    expect(() =>
+      readReplyTokenSecret({ [REPLY_TOKEN_SECRET_ENV]: Buffer.alloc(8, 1).toString("base64") }),
+    ).toThrow(/32 bytes/);
+  });
+
+  it("does not fall back to the OAuth state secret or the token encryption key", () => {
+    // Key separation: a leak in one protocol must not forge another's artefacts.
+    expect(() =>
+      readReplyTokenSecret({
+        MAILBOX_OAUTH_STATE_SECRET: Buffer.alloc(32, 1).toString("base64"),
+        MAILBOX_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 2).toString("base64"),
+      }),
+    ).toThrow(new RegExp(REPLY_TOKEN_SECRET_ENV));
   });
 });
 

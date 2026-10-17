@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { runApplicationMatchBatch } from "./matchBatch.js";
+import { mintReplyAddress } from "./replyToken.js";
+
+const REPLY_SECRET = Buffer.alloc(32, 7);
+/** A real UUID, because a reply token is a keyed MAC of an attempt id and a fixture id cannot be signed. */
+const REPLY_ATTEMPT = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+const FOREIGN_ATTEMPT = "9c858901-8a57-4791-81fe-4c455b099bc9";
 
 type Result = { data?: unknown; error?: unknown };
 
@@ -61,6 +67,8 @@ function messageRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: "msg-1",
     sender: "recruiting@acme.com",
+    recipient: null,
+    auth_results: null,
     mailbox_connections: { candidate_id: "cand-a" },
     response_classifications: [
       { extracted_company: "Acme Corp", extracted_role: "Senior Backend Engineer", extracted_job_id: "GH-4021" },
@@ -246,5 +254,80 @@ describe("runApplicationMatchBatch", () => {
     const result = await runApplicationMatchBatch(client);
 
     expect(result).toMatchObject({ scanned: 1, linked: 0, errors: 1 });
+  });
+});
+
+describe("runApplicationMatchBatch — the reply token", () => {
+  function tokenRow(attemptId: string, overrides: Partial<Record<string, unknown>> = {}) {
+    return messageRow({
+      recipient: mintReplyAddress(attemptId, { secret: REPLY_SECRET, baseAddress: "jane.doe@gmail.com" }),
+      response_classifications: [{ extracted_company: null, extracted_role: null, extracted_job_id: null }],
+      ...overrides,
+    });
+  }
+
+  function plansFor(attemptId: string) {
+    return {
+      "cand-a": {
+        data: [planRow({ application_attempts: [{ id: attemptId, created_at: "2026-08-01T00:00:00Z" }] })],
+        error: null,
+      },
+    };
+  }
+
+  it("links on a verified token even when the extracted entities match nothing", async () => {
+    const { client, updateCalls } = makeClient({
+      messages: { data: [tokenRow(REPLY_ATTEMPT)], error: null },
+      plansByCandidate: plansFor(REPLY_ATTEMPT),
+    });
+
+    const result = await runApplicationMatchBatch(client, { replyTokenSecret: REPLY_SECRET });
+
+    expect(result).toMatchObject({ scanned: 1, linked: 1, review: 0 });
+    expect(updateCalls[0].payload.application_attempt_id).toBe(REPLY_ATTEMPT);
+    expect((updateCalls[0].payload.application_match as { reasons: string[] }).reasons).toContain(
+      "reply_token_verified",
+    );
+  });
+
+  it("ignores a token minted for an attempt this candidate does not own", async () => {
+    const { client, updateCalls } = makeClient({
+      messages: { data: [tokenRow(FOREIGN_ATTEMPT)], error: null },
+      plansByCandidate: plansFor(REPLY_ATTEMPT),
+    });
+
+    const result = await runApplicationMatchBatch(client, { replyTokenSecret: REPLY_SECRET });
+
+    // The token is valid but resolves to nothing in this candidate's list, so the message is
+    // unattributable rather than linked to somebody else's application.
+    expect(result).toMatchObject({ scanned: 1, linked: 0, unmatched: 1 });
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it("routes to review when the provider reports a hard auth failure, token or not", async () => {
+    const { client, updateCalls } = makeClient({
+      messages: {
+        data: [tokenRow(REPLY_ATTEMPT, { auth_results: "mx.google.com; spf=fail smtp.mailfrom=evil.example" })],
+        error: null,
+      },
+      plansByCandidate: plansFor(REPLY_ATTEMPT),
+    });
+
+    const result = await runApplicationMatchBatch(client, { replyTokenSecret: REPLY_SECRET });
+
+    expect(result).toMatchObject({ scanned: 1, linked: 0, review: 1 });
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it("falls back to the heuristics when no secret is configured instead of throwing", async () => {
+    const { client, updateCalls } = makeClient({
+      messages: { data: [tokenRow(REPLY_ATTEMPT)], error: null },
+      plansByCandidate: plansFor(REPLY_ATTEMPT),
+    });
+
+    const result = await runApplicationMatchBatch(client, { replyTokenSecret: null });
+
+    expect(result).toMatchObject({ scanned: 1, linked: 0, unmatched: 1 });
+    expect(updateCalls).toHaveLength(0);
   });
 });

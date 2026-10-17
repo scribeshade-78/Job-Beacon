@@ -292,15 +292,18 @@ describe("ingestEmailResponse — a rejection email", () => {
     );
   });
 
-  it("hands the extracted entities to the matcher", async () => {
+  it("hands the extracted entities to the matcher, including the recipient the reply token arrives in", async () => {
     const { client } = makeClient();
     mockedMatch.mockResolvedValue({ kind: "none" });
 
-    await ingestEmailResponse(client, {} as never, { candidateId: "cand-1", raw: rejectionEmail });
+    await ingestEmailResponse(client, {} as never, {
+      candidateId: "cand-1",
+      raw: { ...rejectionEmail, to: "jane.doe+TOKEN@gmail.com" },
+    });
 
     expect(mockedMatch).toHaveBeenCalledWith(
       expect.anything(),
-      { id: "msg-1", sender: rejectionEmail.from },
+      { id: "msg-1", sender: rejectionEmail.from, recipient: "jane.doe+TOKEN@gmail.com" },
       { extracted_company: "Lemon.io", extracted_role: "Senior Data Engineer", extracted_job_id: null },
       expect.anything(),
     );

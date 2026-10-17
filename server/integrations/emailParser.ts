@@ -449,7 +449,7 @@ export async function ingestEmailResponse(
     const apps = await loadCandidateApplications(client, input.candidateId);
     const outcome = await matchOneClassifiedMessage(
       client,
-      { id: messageId, sender: parsed.sender },
+      { id: messageId, sender: parsed.sender, recipient: parsed.recipient },
       entities,
       apps,
     );

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { scoreApplicationMatch, type CandidateApplication, type MatchInput } from "./matchApplication.js";
+import { readReplyTokenSecret, verifyReplyToken } from "./replyToken.js";
 
 interface MessageRow {
   id: string;
@@ -9,6 +10,11 @@ interface MessageRow {
    * (see 20261019120000_messages_auth_results.sql). NULL means UNKNOWN, never passed.
    */
   auth_results: string | null;
+  /**
+   * The raw To header (falling back to Delivered-To), where the reply token arrives. NULL means
+   * NOT CAPTURED — a message stored before the column existed, or a payload with neither header.
+   */
+  recipient: string | null;
   mailbox_connections: { candidate_id: string } | null;
   response_classifications: Array<{
     extracted_company: string | null;
@@ -54,12 +60,51 @@ export type SingleMessageLinkOutcome =
  * concurrent or repeated pass cannot overwrite an existing link with a
  * different one.
  */
+export interface MatchMessageContext {
+  id: string;
+  sender: string | null;
+  /** Raw To/Delivered-To header — where a reply token arrives. Absent means NOT CAPTURED. */
+  recipient?: string | null;
+  authResults?: string | null;
+}
+
+/**
+ * The reply-token secret, or null when this deployment has not configured one.
+ *
+ * NOT A HARD FAILURE. Matching must keep working on a deployment that never minted a token, and
+ * a token can only have been minted where this same secret was configured. If the secret has
+ * since been removed, the result is the pre-token behaviour: every reply falls back to the
+ * heuristics, the same way it does when a provider strips the `+`.
+ */
+function optionalReplyTokenSecret(env: Record<string, string | undefined> = process.env): Buffer | null {
+  try {
+    return readReplyTokenSecret(env);
+  } catch {
+    return null;
+  }
+}
+
 export async function matchOneClassifiedMessage(
   client: SupabaseClient,
-  message: { id: string; sender: string | null; authResults?: string | null },
+  message: MatchMessageContext,
   classification: ClassifiedMessageEntities,
   apps: CandidateApplication[],
+  options: { replyTokenSecret?: Buffer | null } = {},
 ): Promise<SingleMessageLinkOutcome> {
+  const replyTokenSecret =
+    options.replyTokenSecret === undefined ? optionalReplyTokenSecret() : options.replyTokenSecret;
+
+  // Verified against THIS candidate's attempts only, which is how ownership is enforced without
+  // a second query: a token minted for somebody else's attempt simply resolves to nothing.
+  const verified =
+    message.recipient && replyTokenSecret
+      ? verifyReplyToken(
+          message.recipient,
+          apps.map((app) => app.attemptId),
+          replyTokenSecret,
+        )
+      : null;
+
   const input: MatchInput = {
     sender: message.sender,
     company: classification.extracted_company,
@@ -68,6 +113,9 @@ export async function matchOneClassifiedMessage(
     // Absent for a caller that has no provider verdict (the raw .eml ingest path) — that is
     // UNKNOWN, and authVerdict only ever acts on an explicit failure.
     authResults: message.authResults,
+    // Null means no usable token, which is NOT the same as a failed verification: both fall
+    // through to the heuristics.
+    verifiedAttemptId: verified?.attemptId ?? null,
   };
 
   const match = scoreApplicationMatch(input, apps);
@@ -173,14 +221,18 @@ export async function loadCandidateApplications(
  */
 export async function runApplicationMatchBatch(
   client: SupabaseClient,
-  options: { limit?: number } = {},
+  options: { limit?: number; replyTokenSecret?: Buffer | null } = {},
 ): Promise<RunApplicationMatchBatchResult> {
   const limit = options.limit ?? 50;
+  // Resolved ONCE per batch: reading the environment per message would let one run behave
+  // differently from the next if the variable changed mid-flight.
+  const replyTokenSecret =
+    options.replyTokenSecret === undefined ? optionalReplyTokenSecret() : options.replyTokenSecret;
 
   const { data, error } = await client
     .from("messages")
     .select(
-      "id, sender, auth_results, mailbox_connections!inner (candidate_id), response_classifications!inner (extracted_company, extracted_role, extracted_job_id)",
+      "id, sender, auth_results, recipient, mailbox_connections!inner (candidate_id), response_classifications!inner (extracted_company, extracted_role, extracted_job_id)",
     )
     .is("application_attempt_id", null)
     .order("received_at", { ascending: true, nullsFirst: false })
@@ -218,9 +270,15 @@ export async function runApplicationMatchBatch(
 
       const match = await matchOneClassifiedMessage(
         client,
-        { id: row.id, sender: row.sender, authResults: row.auth_results },
+        {
+          id: row.id,
+          sender: row.sender,
+          recipient: row.recipient,
+          authResults: row.auth_results,
+        },
         classification,
         apps,
+        { replyTokenSecret },
       );
 
       if (match.kind === "auto") {

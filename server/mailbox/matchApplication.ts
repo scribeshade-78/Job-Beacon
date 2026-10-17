@@ -63,6 +63,15 @@ export const MATCH_REASONS = [
    * who happens to know the company's name.
    */
   "relay_company_exact",
+  /**
+   * A reply token resolved to an application attempt.
+   *
+   * The only reason in this list that is not a guess about strings: it is a keyed MAC of the
+   * attempt id, minted into the address the employer replied to, and it is unguessable without
+   * the signing secret. That is why it is also the only reason that can decide a link without
+   * scoring at all.
+   */
+  "reply_token_verified",
 ] as const;
 
 export type MatchReason = (typeof MATCH_REASONS)[number];
@@ -81,6 +90,14 @@ export interface MatchInput {
    * WHO SENT THIS rather than to string similarity.
    */
   authResults?: string | null;
+  /**
+   * The attempt a VERIFIED reply token resolved to.
+   *
+   * OPTIONAL, AND ABSENT MEANS NO TOKEN — not "unverified". The scorer still re-checks it against
+   * the applications it was given, so a caller holding a stale id can never link an attempt this
+   * function was not shown.
+   */
+  verifiedAttemptId?: string | null;
 }
 
 export type AuthVerdict = "pass" | "fail" | "unknown";
@@ -382,6 +399,45 @@ function scoreOne(input: MatchInput, app: CandidateApplication): ScoredApplicati
 }
 
 export function scoreApplicationMatch(input: MatchInput, apps: CandidateApplication[]): MatchResult {
+  // PROVENANCE THAT IS NOT A GUESS IS DECIDED FIRST.
+  //
+  // Everything below this block is arithmetic over strings an attacker can read off a job board.
+  // A verified reply token is different in kind: it is a MAC of the attempt id, minted by us into
+  // the address the reply was sent to, so it identifies ONE application rather than scoring
+  // similar to several. It therefore bypasses the review threshold, the independence requirement
+  // and the ambiguity margin - none of which are evidence about a lookup, and all of which would
+  // otherwise downgrade a cryptographic certainty to a coin toss between identical scores.
+  //
+  // IT DOES NOT BYPASS A HARD AUTH FAILURE. The token says which application a message is ABOUT;
+  // it says nothing about who sent it, and the address can be learned by anyone the reply reaches.
+  // A failed SPF/DKIM/DMARC verdict is the receiving provider telling us it could not vouch for
+  // the sender, so that case still goes to a human. "Fail wins" outranks even this.
+  if (input.verifiedAttemptId) {
+    const proven = apps.find((app) => app.attemptId === input.verifiedAttemptId);
+
+    if (proven) {
+      const candidate: ScoredApplication = {
+        attemptId: proven.attemptId,
+        confidence: 1,
+        reasons: ["reply_token_verified"],
+      };
+
+      if (authVerdict(input.authResults) === "fail") {
+        return { kind: "review", candidates: [candidate] };
+      }
+
+      return {
+        kind: "auto",
+        attemptId: proven.attemptId,
+        confidence: 1,
+        reasons: ["reply_token_verified"],
+      };
+    }
+
+    // A verified id that is not among this candidate's applications is not evidence of anything
+    // this function may act on. Fall through rather than link an attempt we were not shown.
+  }
+
   const scored = apps
     .map((app) => scoreOne(input, app))
     .filter((s) => s.reasons.length > 0)
