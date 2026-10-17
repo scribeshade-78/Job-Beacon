@@ -151,6 +151,9 @@ export async function pollOneMailboxConnection(
             provider_message_id: metadata.id,
             sender: metadata.sender,
             subject: metadata.subject,
+            // Stored raw so the reply token can be parsed at match time, not at write time
+            // (see replyToken.ts, 20261019150000). NULL means the header was not captured.
+            recipient: metadata.recipient,
             received_at: metadata.receivedAt,
             raw_payload: metadata.raw,
             // SPF/DKIM PROVENANCE, captured here because matching runs in a later batch and the

@@ -52,6 +52,14 @@ export interface GmailMessageMetadata {
   id: string;
   sender: string | null;
   subject: string | null;
+  /**
+   * The raw To header (falling back to Delivered-To), or null.
+   *
+   * RAW, NOT PARSED: the reply-token verdict is derived at match time, the same way auth_results
+   * is stored as evidence and judged later. NULL means NOT CAPTURED — a message stored before
+   * the column existed, or a payload carrying neither header — never "this message has no token".
+   */
+  recipient: string | null;
   receivedAt: string | null;
   /** Gmail's response verbatim — stored as-is in messages.raw_payload, same "no invented shape" precedent as vacancy_evidence.payload. */
   raw: unknown;
@@ -74,6 +82,11 @@ export async function fetchMessageMetadata(
   url.searchParams.set("format", "metadata");
   url.searchParams.append("metadataHeaders", "From");
   url.searchParams.append("metadataHeaders", "Subject");
+  // THE REPLY-TOKEN RECIPIENT. The token is minted into the plus-address of the candidate's own
+  // mailbox, so it comes back in the recipient of the employer's reply. Delivered-To is the value
+  // the receiving MTA recorded and survives some forwarding, so it is the fallback.
+  url.searchParams.append("metadataHeaders", "To");
+  url.searchParams.append("metadataHeaders", "Delivered-To");
   // SPF/DKIM PROVENANCE. The receiving provider's own verdict on who sent this. It is the only
   // signal in the whole matcher that speaks to PROVENANCE rather than to string similarity -
   // company names, roles and job ids are all public or guessable.
@@ -97,6 +110,7 @@ export async function fetchMessageMetadata(
     id: body.id,
     sender: findHeader(body.payload?.headers, "From"),
     subject: findHeader(body.payload?.headers, "Subject"),
+    recipient: findHeader(body.payload?.headers, "To") ?? findHeader(body.payload?.headers, "Delivered-To"),
     // Absent for a provider that does not send one, and for every message polled before this
     // existed. The caller must treat null as UNKNOWN, never as a pass.
     authResults: findHeader(body.payload?.headers, "Authentication-Results"),

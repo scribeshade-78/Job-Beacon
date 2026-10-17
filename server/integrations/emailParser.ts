@@ -70,6 +70,8 @@ export interface ParsedEmail {
   providerMessageId: string;
   sender: string | null;
   subject: string | null;
+  /** Raw To / Delivered-To header — the reply token's transport. Null means not supplied, never "no token". */
+  recipient: string | null;
   bodyText: string;
   receivedAt: string | null;
   /** True when no id was supplied and one was derived from the payload's content. */
@@ -140,6 +142,11 @@ export function parseRawEmailPayload(raw: unknown): ParsedEmail {
       providerMessageId: suppliedId ?? derivedMessageId(JSON.stringify(raw)),
       sender: asNonEmptyString(record.sender) ?? asNonEmptyString(record.from),
       subject,
+      recipient:
+        asNonEmptyString(record.to) ??
+        asNonEmptyString(record.recipient) ??
+        asNonEmptyString(record.deliveredTo) ??
+        asNonEmptyString(record.delivered_to),
       bodyText,
       receivedAt:
         asNonEmptyString(record.receivedAt) ??
@@ -152,7 +159,8 @@ export function parseRawEmailPayload(raw: unknown): ParsedEmail {
   throw new UnparseableEmailError(`expected an object or a string, received ${typeof raw}`);
 }
 
-const HEADER_PATTERN = /^(from|sender|subject|date|received|message-id):\s*(.*)$/i;
+const HEADER_PATTERN =
+  /^(from|sender|to|delivered-to|x-original-to|subject|date|received|message-id):\s*(.*)$/i;
 
 function parseRfc822ish(raw: string): ParsedEmail {
   const normalized = raw.replace(/\r\n/g, "\n");
@@ -194,6 +202,10 @@ function parseRfc822ish(raw: string): ParsedEmail {
     providerMessageId: suppliedId ?? derivedMessageId(normalized),
     sender: asNonEmptyString(headers.from) ?? asNonEmptyString(headers.sender),
     subject,
+    recipient:
+      asNonEmptyString(headers.to) ??
+      asNonEmptyString(headers["delivered-to"]) ??
+      asNonEmptyString(headers["x-original-to"]),
     bodyText: resolvedBody,
     receivedAt: asNonEmptyString(headers.date) ?? asNonEmptyString(headers.received),
     idDerived: suppliedId === null,
@@ -366,6 +378,7 @@ export async function ingestEmailResponse(
         provider_message_id: parsed.providerMessageId,
         sender: parsed.sender,
         subject: parsed.subject,
+        recipient: parsed.recipient,
         received_at: parsed.receivedAt ?? new Date().toISOString(),
         raw_payload: { ingestedFrom: LOCAL_PAYLOAD_PROVIDER, parsed, raw: input.raw },
       },

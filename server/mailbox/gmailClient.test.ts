@@ -57,6 +57,7 @@ describe("fetchMessageMetadata", () => {
       id: "msg-1",
       sender: "recruiter@example.com",
       subject: "Re: Backend Engineer",
+      recipient: null,
       // The mock sends no Authentication-Results header, so this is null - which the matcher must read
       // as UNKNOWN and never as a pass. Asserting the null here is what pins that contract.
       authResults: null,
@@ -67,6 +68,41 @@ describe("fetchMessageMetadata", () => {
     const [calledUrl] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
     expect(calledUrl).toContain("format=metadata");
     expect(calledUrl).not.toContain("format=full");
+  });
+
+  it("requests To and Delivered-To, preferring To because that is where the reply token arrives", async () => {
+    const fetchImpl = mockFetch({
+      ok: true,
+      json: async () => ({
+        id: "msg-1",
+        payload: {
+          headers: [
+            { name: "To", value: "jane.doe+TOKEN@gmail.com" },
+            { name: "Delivered-To", value: "jane.doe+OTHER@gmail.com" },
+          ],
+        },
+      }),
+    });
+
+    const metadata = await fetchMessageMetadata("at", "msg-1", fetchImpl);
+
+    expect(metadata.recipient).toBe("jane.doe+TOKEN@gmail.com");
+
+    const [calledUrl] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(calledUrl).toContain("metadataHeaders=To");
+    expect(calledUrl).toContain("metadataHeaders=Delivered-To");
+  });
+
+  it("falls back to Delivered-To when the message carries no To header", async () => {
+    const fetchImpl = mockFetch({
+      ok: true,
+      json: async () => ({
+        id: "msg-1",
+        payload: { headers: [{ name: "Delivered-To", value: "jane.doe+TOKEN@gmail.com" }] },
+      }),
+    });
+
+    expect((await fetchMessageMetadata("at", "msg-1", fetchImpl)).recipient).toBe("jane.doe+TOKEN@gmail.com");
   });
 
   it("returns nulls for missing headers/date instead of throwing", async () => {

@@ -209,6 +209,29 @@ describe("parseRawEmailPayload", () => {
 
     expect(parsed.subject).toBe("A very long subject that continues here");
   });
+
+  it("captures the recipient header, which is where the reply token travels", () => {
+    const parsed = parseRawEmailPayload({
+      from: "jobs@lemon.io",
+      to: "jane.doe+REPLYTOKEN@gmail.com",
+      subject: "Re: your application",
+      body: "Thanks for applying.",
+    });
+
+    expect(parsed.recipient).toBe("jane.doe+REPLYTOKEN@gmail.com");
+  });
+
+  it("reads To from RFC822-ish text, falls back to Delivered-To, and reports null when neither exists", () => {
+    const withTo = parseRawEmailPayload("From: a@b.com\nTo: jane.doe+TOKEN@gmail.com\nSubject: S\n\nBody.");
+    expect(withTo.recipient).toBe("jane.doe+TOKEN@gmail.com");
+
+    const deliveredTo = parseRawEmailPayload("From: a@b.com\nDelivered-To: jane.doe+TOKEN@gmail.com\nSubject: S\n\nBody.");
+    expect(deliveredTo.recipient).toBe("jane.doe+TOKEN@gmail.com");
+
+    // NULL means NOT CAPTURED. It must not be read as "this message carries no token".
+    const neither = parseRawEmailPayload("From: a@b.com\nSubject: S\n\nBody.");
+    expect(neither.recipient).toBeNull();
+  });
 });
 
 describe("ingestEmailResponse — a rejection email", () => {
