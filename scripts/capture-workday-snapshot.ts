@@ -31,7 +31,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 
 const DEFAULT_OUT = "extension/src/lib/__fixtures__/workday-step.html";
 
@@ -42,6 +42,27 @@ const USAGE = [
   "  --url   A Workday tenant or job URL. The operator navigates to a step by hand.",
   "  --out   Where to write the sanitised fixture (default: " + DEFAULT_OUT + ").",
 ].join("\n");
+
+/**
+ * Launches a headed browser, preferring Playwright's bundled Chromium and falling back to the
+ * system Chrome.
+ *
+ * WHY THE FALLBACK. The bundled browser is a separate download ("npx playwright install"), and a
+ * machine that already has Chrome should not need it to capture one page. The bundled browser is
+ * tried first so a fresh checkout on any OS behaves predictably; the fallback is what makes the
+ * tool usable on a developer machine without that download.
+ */
+async function launchBrowser(): Promise<Browser> {
+  try {
+    return await chromium.launch({ headless: false });
+  } catch (bundledError) {
+    const reason = bundledError instanceof Error ? bundledError.message.split("\n")[0] : String(bundledError);
+    console.warn(
+      "Bundled Chromium is unavailable (" + reason + "). Falling back to the system Chrome installation.",
+    );
+    return chromium.launch({ headless: false, channel: "chrome" });
+  }
+}
 
 function fail(message: string): never {
   console.error("\n" + message + "\n");
@@ -104,7 +125,7 @@ async function main(): Promise<void> {
     ].join("\n"),
   );
 
-  const browser = await chromium.launch({ headless: false });
+  const browser = await launchBrowser();
 
   try {
     const page = await browser.newPage();
