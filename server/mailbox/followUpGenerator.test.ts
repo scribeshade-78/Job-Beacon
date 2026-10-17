@@ -8,6 +8,7 @@ import {
   generateFollowUpDraft,
   MalformedFollowUpError,
   MAX_FOLLOW_UP_PARAGRAPHS,
+  MAX_FOLLOW_UP_SUBJECT_CHARS,
   renderApplicationFacts,
 } from "./followUpGenerator.js";
 import {
@@ -69,6 +70,7 @@ const input = {
  * candidate's own confirmed facts.
  */
 const VALID_RESPONSE = {
+  subject: "Re: Data Engineer III application",
   paragraphs: [
     {
       text: "I applied for the Data Engineer III role at Acme on 2026-08-29 and wanted to follow up.",
@@ -119,6 +121,11 @@ describe("the follow-up prompt", () => {
   it("forbids inventing a reason for the delay", () => {
     expect(FOLLOW_UP_SYSTEM_PROMPT).toContain("Do not invent a reason for the delay");
   });
+
+  it("asks for a subject the candidate will review with the body", () => {
+    expect(FOLLOW_UP_SYSTEM_PROMPT).toContain("SUBJECT");
+    expect(FOLLOW_UP_SYSTEM_PROMPT).toContain('"subject": string');
+  });
 });
 
 describe("application facts", () => {
@@ -166,6 +173,7 @@ describe("generateFollowUpDraft — the happy path", () => {
 
     const draft = await generateFollowUpDraft(client, { openai: model.openai }, { ...input, model: "test/model-v1" });
 
+    expect(draft.subject).toBe("Re: Data Engineer III application");
     expect(draft.paragraphs).toHaveLength(2);
     expect(draft.promptVersion).toBe(FOLLOW_UP_PROMPT_VERSION);
     expect(draft.modelVersion).toBe("test/model-v1");
@@ -215,6 +223,7 @@ describe("generateFollowUpDraft — the honesty gate", () => {
   it("throws UncitedClaimError for a paragraph that cites nothing", async () => {
     const client = makeClient();
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: [
         VALID_RESPONSE.paragraphs[0],
         { text: "I would also bring deep Kubernetes expertise to your team.", factRefs: [] },
@@ -229,6 +238,7 @@ describe("generateFollowUpDraft — the honesty gate", () => {
   it("throws FabricatedContentError for a citation that does not exist", async () => {
     const client = makeClient();
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: [{ text: "Checking in on my application.", factRefs: ["fact-invented"] }],
     });
 
@@ -243,6 +253,7 @@ describe("generateFollowUpDraft — the honesty gate", () => {
     // invented extractedFactId is.
     const client = makeClient();
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: [{ text: "Following up on my application.", factRefs: [applicationFactId("salary")] }],
     });
 
@@ -258,6 +269,7 @@ describe("generateFollowUpDraft — the honesty gate", () => {
       vacancies: { data: { raw_title: "Data Engineer III", companies: null }, error: null },
     });
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: [{ text: "Following up with Acme.", factRefs: [applicationFactId("company")] }],
     });
 
@@ -269,6 +281,7 @@ describe("generateFollowUpDraft — the honesty gate", () => {
   it("refuses the whole draft rather than dropping the offending paragraph", async () => {
     const client = makeClient();
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: [VALID_RESPONSE.paragraphs[0], { text: "Unsupported.", factRefs: [] }],
     });
 
@@ -279,7 +292,10 @@ describe("generateFollowUpDraft — the honesty gate", () => {
 
   it("reports a refused follow-up as neither a resume nor a cover letter", async () => {
     const client = makeClient();
-    const model = makeModel({ paragraphs: [{ text: "An uncited claim.", factRefs: [] }] });
+    const model = makeModel({
+      subject: "Re: Data Engineer III application",
+      paragraphs: [{ text: "An uncited claim.", factRefs: [] }],
+    });
 
     const error = await generateFollowUpDraft(client, { openai: model.openai }, input).catch((e: unknown) => e);
 
@@ -312,6 +328,7 @@ describe("generateFollowUpDraft — refusals that are not the gate", () => {
   it("refuses a third paragraph", async () => {
     const client = makeClient();
     const model = makeModel({
+      subject: "Re: Data Engineer III application",
       paragraphs: Array.from({ length: MAX_FOLLOW_UP_PARAGRAPHS + 1 }, () => VALID_RESPONSE.paragraphs[0]),
     });
 
@@ -332,6 +349,41 @@ describe("generateFollowUpDraft — refusals that are not the gate", () => {
   it("throws when the shape is wrong", async () => {
     const client = makeClient();
     const model = makeModel({ body: "Dear hiring manager," });
+
+    await expect(generateFollowUpDraft(client, { openai: model.openai }, input)).rejects.toBeInstanceOf(
+      MalformedFollowUpError,
+    );
+  });
+});
+
+describe("the subject is part of the approved content", () => {
+  it("refuses a response with no subject, rather than drafting something unsendable", async () => {
+    const client = makeClient();
+    const model = makeModel({ paragraphs: VALID_RESPONSE.paragraphs });
+
+    await expect(generateFollowUpDraft(client, { openai: model.openai }, input)).rejects.toBeInstanceOf(
+      MalformedFollowUpError,
+    );
+  });
+
+  it("refuses a subject carrying a line break, which would inject a header", async () => {
+    const client = makeClient();
+    const model = makeModel({
+      subject: "Re: Data Engineer III\r\nBcc: evil@example.com",
+      paragraphs: VALID_RESPONSE.paragraphs,
+    });
+
+    await expect(generateFollowUpDraft(client, { openai: model.openai }, input)).rejects.toBeInstanceOf(
+      MalformedFollowUpError,
+    );
+  });
+
+  it("refuses a subject longer than a mail client will show", async () => {
+    const client = makeClient();
+    const model = makeModel({
+      subject: "x".repeat(MAX_FOLLOW_UP_SUBJECT_CHARS + 1),
+      paragraphs: VALID_RESPONSE.paragraphs,
+    });
 
     await expect(generateFollowUpDraft(client, { openai: model.openai }, input)).rejects.toBeInstanceOf(
       MalformedFollowUpError,

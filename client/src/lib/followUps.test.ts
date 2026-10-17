@@ -100,19 +100,24 @@ describe("sendFollowUp", () => {
     expect(calls[0].init?.method).toBe("POST");
   });
 
-  it("always reports transmitted false, whatever the server says", async () => {
-    // The type says false because it cannot be true in this phase. A server
-    // that claimed otherwise would be wrong, and this refuses to pass it on.
+  it("reports the transmission the server reports, rather than assuming either way", async () => {
     const { fetchImpl } = recordingFetch(200, {
       draftId: "draft-1",
       status: "sent",
       transmitted: true,
-      note: "Sent!",
+      providerMessageId: "email-1",
+      recipient: "jobs@acme.com",
+      note: "Sent to jobs@acme.com.",
     });
 
     const result = await sendFollowUp("draft-1", { fetchImpl, getAccessToken: token });
 
-    expect(result).toMatchObject({ kind: "success", transmitted: false });
+    expect(result).toMatchObject({
+      kind: "success",
+      transmitted: true,
+      providerMessageId: "email-1",
+      recipient: "jobs@acme.com",
+    });
   });
 
   it("carries the server's note through, which is where the honesty lives", async () => {

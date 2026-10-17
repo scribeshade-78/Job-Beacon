@@ -30,12 +30,20 @@ export interface MailTransport {
  */
 export class MailTransportError extends Error {
   readonly retryable: boolean;
+  /**
+   * TRUE means the request may have reached the provider and we do not know whether it was
+   * accepted. That is the distinction the caller needs: a definitive rejection can hand the draft
+   * back for retry, while an ambiguous one must leave the row claimed for a human to settle.
+   * Retryability alone cannot express it — a 429 is retryable but definitely NOT accepted.
+   */
+  readonly ambiguous: boolean;
   readonly status: number | undefined;
 
-  constructor(message: string, options: { retryable: boolean; status?: number }) {
+  constructor(message: string, options: { retryable: boolean; ambiguous?: boolean; status?: number }) {
     super(message);
     this.name = "MailTransportError";
     this.retryable = options.retryable;
+    this.ambiguous = options.ambiguous ?? false;
     this.status = options.status;
   }
 }

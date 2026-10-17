@@ -2806,8 +2806,10 @@ describe("POST /api/candidate/follow-ups/:id/send", () => {
     mockSend.mockResolvedValue({
       draftId,
       status: "sent",
-      transmitted: false,
-      note: "Marked as sent. No email was transmitted.",
+      transmitted: true,
+      providerMessageId: "email-1",
+      recipient: "jobs@acme.com",
+      note: "Sent to jobs@acme.com.",
     });
   });
 
@@ -2832,7 +2834,7 @@ describe("POST /api/candidate/follow-ups/:id/send", () => {
     });
   });
 
-  it("returns 200 and reports that nothing was transmitted", async () => {
+  it("returns 200 and reports the transmission the server performed", async () => {
     await withTestServer({ verifyAccessToken: verifier, serviceClient: {} as never }, async (testBaseUrl) => {
       const response = await fetch(`${testBaseUrl}/api/candidate/follow-ups/${draftId}/send`, {
         method: "POST",
@@ -2840,8 +2842,12 @@ describe("POST /api/candidate/follow-ups/:id/send", () => {
       });
 
       expect(response.status).toBe(200);
-      // The response must never let a client conclude an email went out.
-      expect(await response.json()).toMatchObject({ status: "sent", transmitted: false });
+      // transmitted is what the provider did, and the id is what a support query can trace.
+      expect(await response.json()).toMatchObject({
+        status: "sent",
+        transmitted: true,
+        providerMessageId: "email-1",
+      });
     });
   });
 

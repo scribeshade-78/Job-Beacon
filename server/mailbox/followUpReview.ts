@@ -1,4 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dispatchFollowUp, type FollowUpDispatchResult } from "./followUpDispatch.js";
+import { FollowUpDraftMissingSubjectError, OutboundMailNotConfiguredError } from "./followUpErrors.js";
+import type { MailTransport } from "./mailTransport.js";
+import { readReplyTokenSecret } from "./replyToken.js";
+import { createResendTransport, readResendConfig } from "./resendTransport.js";
 
 /**
  * Task C2 — the candidate-facing review surface for follow-up drafts.
@@ -169,6 +174,9 @@ interface OwnedDraft {
   vacancyTitle: string;
   companyName: string | null;
   draftText: string;
+  /** NULL on drafts written before the subject existed: not approvable, not silently defaulted. */
+  subject: string | null;
+  sendAttempts: number;
 }
 
 /**
@@ -181,7 +189,9 @@ export async function loadOwnedDraft(
 ): Promise<OwnedDraft> {
   const { data: draft, error: draftError } = await client
     .from("follow_up_drafts")
-    .select(`id, status, application_attempt_id, draft_text, application_attempts (application_plan_id)`)
+    .select(
+      `id, status, subject, send_attempts, application_attempt_id, draft_text, application_attempts (application_plan_id)`,
+    )
     .eq("id", draftId)
     .maybeSingle();
 
@@ -195,6 +205,8 @@ export async function loadOwnedDraft(
   const row = draft as unknown as {
     id: string;
     status: string;
+    subject: string | null;
+    send_attempts: number;
     application_attempt_id: string;
     draft_text: string;
     application_attempts: { application_plan_id: string } | null;
@@ -235,6 +247,8 @@ export async function loadOwnedDraft(
     vacancyTitle: planRow.vacancies?.raw_title ?? "(vacancy removed)",
     companyName: planRow.vacancies?.companies?.displayed_name ?? null,
     draftText: row.draft_text,
+    subject: row.subject,
+    sendAttempts: row.send_attempts,
   };
 }
 
@@ -243,39 +257,53 @@ export interface FollowUpActionDeps {
   logDispatch?: (line: string, detail: Record<string, unknown>) => void;
 }
 
+export interface SendFollowUpDeps extends FollowUpActionDeps {
+  /** Injected by tests; the real dispatcher otherwise. */
+  dispatch?: typeof dispatchFollowUp;
+  transport?: MailTransport;
+  from?: { name: string | null; address: string };
+  replyTokenSecret?: Buffer;
+  now?: () => number;
+}
+
 export interface SendFollowUpResult {
   draftId: string;
   status: "sent";
-  /** Always false in this phase, and returned explicitly rather than implied by silence. */
-  transmitted: false;
+  /** TRUE now means the provider ACCEPTED it. The previous phase typed this literal false. */
+  transmitted: true;
+  providerMessageId: string;
+  recipient: string;
   note: string;
 }
 
-const NO_TRANSMISSION_NOTE =
-  "Marked as sent. No email was transmitted — delivery is not wired up yet, and this records the candidate's approval for a later sending phase.";
+/**
+ * Resolves the provider configuration lazily.
+ *
+ * A MISSING CONFIG IS A DEPLOYMENT STATE, NOT A SEND FAILURE. Wrapping it in its own error lets
+ * the route answer 503 "not configured yet" instead of a generic 500 that reads like the
+ * candidate's draft is broken.
+ */
+function resolveOutboundMail(): { transport: MailTransport; from: { name: string | null; address: string } } {
+  try {
+    const config = readResendConfig();
+    return { transport: createResendTransport({ apiKey: config.apiKey }), from: config.from };
+  } catch (error) {
+    throw new OutboundMailNotConfiguredError(error instanceof Error ? error.message : String(error));
+  }
+}
 
 /**
- * The mock dispatch.
+ * Sends one approved follow-up.
  *
- * Sets status to 'sent' and writes the draft body to the server console. It
- * does NOT send anything: there is no SMTP client, no mailbox connection for
- * outbound mail, and no recipient address anywhere in this schema — the
- * employer's address is not stored on a vacancy, and the only addresses the
- * database has ever seen are ones employers wrote FROM.
- *
- * The returned result says so in a field rather than leaving it to be inferred.
- * A caller that renders "Sent" on the strength of a 200 is making a claim this
- * endpoint cannot support, and the honest thing is to hand it the fact.
- *
- * A compare-and-swap on the status, like the attempt approval: two concurrent
- * approvals must not both believe they sent it, and a zero-row result means
- * somebody else already moved it.
+ * The preconditions the REVIEW layer owns — ownership, still pending, has a subject — are checked
+ * here, before anything external happens. Everything after that (consent, recipient, claim,
+ * delivery, settlement) belongs to dispatchFollowUp, the module that reasons about irreversibility.
  */
 export async function sendFollowUpDraft(
   client: SupabaseClient,
   candidateId: string,
   draftId: string,
-  deps: FollowUpActionDeps = {},
+  deps: SendFollowUpDeps = {},
 ): Promise<SendFollowUpResult> {
   const draft = await loadOwnedDraft(client, candidateId, draftId);
 
@@ -283,35 +311,51 @@ export async function sendFollowUpDraft(
     throw new FollowUpDraftNotPendingError(draftId, draft.status);
   }
 
-  // The console line is the whole dispatch. Structured, and deliberately
-  // containing the body the requirement asked to log.
+  if (draft.subject === null || draft.subject.trim() === "") {
+    // Drafted before the subject existed. The candidate has nothing to approve yet, and an
+    // invented subject is not theirs to sign off on.
+    throw new FollowUpDraftMissingSubjectError(draftId);
+  }
+
+  const mail =
+    deps.transport && deps.from ? { transport: deps.transport, from: deps.from } : resolveOutboundMail();
+  const replyTokenSecret = deps.replyTokenSecret ?? readReplyTokenSecret();
+  const dispatch = deps.dispatch ?? dispatchFollowUp;
   const logDispatch = deps.logDispatch ?? ((line, detail) => console.log(line, detail));
 
-  logDispatch("[follow-up:dispatch] would send follow-up email", {
-    draftId: draft.draftId,
-    to: null,
-    recipientNote: "no recipient address exists in this schema; not transmitted",
-    company: draft.companyName,
-    vacancyTitle: draft.vacancyTitle,
-    body: draft.draftText,
+  const sent: FollowUpDispatchResult = await dispatch(
+    client,
+    {
+      draftId: draft.draftId,
+      candidateId,
+      applicationAttemptId: draft.applicationAttemptId,
+      subject: draft.subject,
+      text: draft.draftText,
+      sendAttempts: draft.sendAttempts,
+    },
+    {
+      transport: mail.transport,
+      from: mail.from,
+      replyTokenSecret,
+      now: deps.now,
+      log: (event, detail) => logDispatch(event, detail ?? {}),
+    },
+  );
+
+  logDispatch("[follow-up:dispatch] sent", {
+    draftId,
+    providerMessageId: sent.providerMessageId,
+    to: sent.recipient,
   });
 
-  const { data: updated, error } = await client
-    .from("follow_up_drafts")
-    .update({ status: "sent", updated_at: new Date().toISOString() })
-    .eq("id", draftId)
-    .eq("status", "pending_review")
-    .select("id");
-
-  if (error) {
-    throw error;
-  }
-
-  if (!updated || updated.length === 0) {
-    throw new FollowUpDraftNotPendingError(draftId, "changed");
-  }
-
-  return { draftId, status: "sent", transmitted: false, note: NO_TRANSMISSION_NOTE };
+  return {
+    draftId,
+    status: "sent",
+    transmitted: true,
+    providerMessageId: sent.providerMessageId,
+    recipient: sent.recipient,
+    note: "Sent to " + sent.recipient + ".",
+  };
 }
 
 export interface DismissFollowUpResult {

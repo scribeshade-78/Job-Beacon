@@ -55,7 +55,7 @@ export function createResendTransport(config: ResendTransportConfig): MailTransp
         // key is what makes retrying correct rather than duplicative.
         throw new MailTransportError(
           "Resend request failed before a response: " + (error instanceof Error ? error.message : String(error)),
-          { retryable: true },
+          { retryable: true, ambiguous: true },
         );
       }
 
@@ -90,6 +90,7 @@ export function createResendTransport(config: ResendTransportConfig): MailTransp
         // definitive failure would be a lie; the retry is safe because of the idempotency key.
         throw new MailTransportError("Resend accepted the request but returned no message id.", {
           retryable: true,
+          ambiguous: true,
           status: response.status,
         });
       }

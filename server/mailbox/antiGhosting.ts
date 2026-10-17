@@ -135,6 +135,7 @@ export async function runFollowUpSweep(
         .insert({
           application_attempt_id: attempt.applicationAttemptId,
           draft_text: draft.text,
+          subject: draft.subject,
           status: "pending_review",
           model_version: draft.modelVersion,
           prompt_version: draft.promptVersion,

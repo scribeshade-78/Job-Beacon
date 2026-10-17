@@ -37,16 +37,17 @@ export type ListPendingFollowUpsResult =
 /**
  * What the server actually did when a draft was approved.
  *
- * transmitted is typed as false rather than boolean, because in this phase it
- * cannot be anything else: there is no SMTP client, no mailbox for outbound
- * mail, and no recipient address anywhere in the schema. Typing it boolean
- * would invite a caller to write a branch that can never be taken, and typing
- * it false makes the omission visible at every call site that renders it.
+ * transmitted is now a real boolean: outbound mail is wired to a provider, so true means the
+ * provider ACCEPTED the message and false is no longer a value this endpoint can produce — the
+ * field stays boolean because a caller that renders "Sent" must branch on the answer rather than
+ * assume it.
  */
 export interface SendFollowUpResult {
   kind: "success";
   draftId: string;
-  transmitted: false;
+  transmitted: boolean;
+  providerMessageId?: string;
+  recipient?: string;
   note: string;
 }
 
@@ -166,7 +167,13 @@ export async function sendFollowUp(
   }
 
   try {
-    const body = (await response.json()) as { draftId?: unknown; note?: unknown; transmitted?: unknown };
+    const body = (await response.json()) as {
+      draftId?: unknown;
+      note?: unknown;
+      transmitted?: unknown;
+      providerMessageId?: unknown;
+      recipient?: unknown;
+    };
 
     if (typeof body.draftId !== "string") {
       return { kind: "error", message: SEND_FAILED };
@@ -175,7 +182,9 @@ export async function sendFollowUp(
     return {
       kind: "success",
       draftId: body.draftId,
-      transmitted: false,
+      transmitted: body.transmitted === true,
+      ...(typeof body.providerMessageId === "string" ? { providerMessageId: body.providerMessageId } : {}),
+      ...(typeof body.recipient === "string" ? { recipient: body.recipient } : {}),
       note: typeof body.note === "string" ? body.note : "Marked as sent.",
     };
   } catch {

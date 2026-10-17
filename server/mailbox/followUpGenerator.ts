@@ -34,7 +34,9 @@ import {
  * discipline a property of whichever file someone happened to write.
  */
 
-export const FOLLOW_UP_PROMPT_VERSION = "follow-up-v1";
+// v2 adds the subject line, which the candidate now reviews and approves with the body.
+// Bumping it is what makes a stored draft traceable to the prompt that wrote it.
+export const FOLLOW_UP_PROMPT_VERSION = "follow-up-v2";
 export const DEFAULT_FOLLOW_UP_MODEL = "openai/gpt-4o-mini";
 
 export const MAX_FOLLOW_UP_PARAGRAPHS = 2;
@@ -56,6 +58,11 @@ export const FOLLOW_UP_SYSTEM_PROMPT = [
   "You are given two sets of facts: CONFIRMED FACTS about the candidate, and",
   "APPLICATION FACTS about this specific application. Both are the only permitted",
   "sources. Everything else you might want to say, you may not say.",
+  "",
+  "SUBJECT — exactly one line, at most 100 characters:",
+  "- Name the role, and the company when the facts include it.",
+  '- It is a reply to an existing thread, so it begins "Re: ". No other prefix.',
+  "- It must not introduce a claim the body does not make.",
   "",
   "STRUCTURE — exactly two short paragraphs:",
   "1. Which application this is about, and that the candidate is following up.",
@@ -80,14 +87,18 @@ export const FOLLOW_UP_SYSTEM_PROMPT = [
   "",
   "Every paragraph is a claim, so every paragraph carries its own citations.",
   "The shape is:",
-  '  {"paragraphs": [{"text": string, "factRefs": string[]}]}',
+  '  {"subject": string, "paragraphs": [{"text": string, "factRefs": string[]}]}',
   "Each factRefs array names the ids that paragraph was written from — either an",
   "extractedFactId from the confirmed facts, or an application: id from the",
   "application facts. A paragraph you cannot cite must not be written.",
   "Reply with JSON only.",
 ].join("\n");
 
+/** The subject is reviewed and approved alongside the body, so it is part of the content. */
+export const MAX_FOLLOW_UP_SUBJECT_CHARS = 120;
+
 export interface FollowUpContent {
+  subject: string;
   paragraphs: GroundedText[];
 }
 
@@ -105,10 +116,28 @@ export class ApplicationFactsUnavailableError extends Error {
   }
 }
 
+/**
+ * A subject is a header: one line, non-empty, and not longer than a mail client will show.
+ * A draft without one is rejected HERE rather than at send time, so the candidate is never
+ * asked to approve a message that cannot be transmitted.
+ */
+function isValidSubject(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= MAX_FOLLOW_UP_SUBJECT_CHARS &&
+    !/[\r\n]/.test(value)
+  );
+}
+
 function isValidFollowUpContent(value: unknown): value is FollowUpContent {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<FollowUpContent>;
-  return Array.isArray(candidate.paragraphs) && candidate.paragraphs.every(isGroundedText);
+  return (
+    isValidSubject(candidate.subject) &&
+    Array.isArray(candidate.paragraphs) &&
+    candidate.paragraphs.every(isGroundedText)
+  );
 }
 
 export interface ApplicationFacts {
@@ -181,6 +210,8 @@ export interface FollowUpDraftMetadata {
 }
 
 export interface GeneratedFollowUpDraft {
+  /** The approved subject line, joined to nothing — it is stored and sent as its own field. */
+  subject: string;
   paragraphs: GroundedText[];
   text: string;
   modelVersion: string;
@@ -324,6 +355,7 @@ export async function generateFollowUpDraft(
   const trimmed = nonEmpty.map((paragraph) => ({ ...paragraph, text: paragraph.text.trim() }));
 
   return {
+    subject: parsed.subject.trim(),
     paragraphs: trimmed,
     text: trimmed.map((paragraph) => paragraph.text).join("\n\n"),
     modelVersion: model,

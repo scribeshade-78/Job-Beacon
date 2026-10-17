@@ -8,6 +8,7 @@ import {
   loadOwnedDraft,
   sendFollowUpDraft,
 } from "./followUpReview.js";
+import { FollowUpDraftMissingSubjectError } from "./followUpErrors.js";
 
 type TableResult = { data: unknown; error: unknown };
 
@@ -89,6 +90,8 @@ const OWNED_DRAFT = {
   data: {
     id: "draft-1",
     status: "pending_review",
+    subject: "Re: Data Engineer III application",
+    send_attempts: 0,
     application_attempt_id: "attempt-1",
     draft_text: "Following up on my application.",
     application_attempts: { application_plan_id: "plan-1" },
@@ -208,6 +211,8 @@ describe("loadOwnedDraft", () => {
       vacancyTitle: "Data Engineer III",
       companyName: "Acme",
       draftText: "Following up on my application.",
+      subject: "Re: Data Engineer III application",
+      sendAttempts: 0,
     });
   });
 
@@ -228,48 +233,87 @@ describe("loadOwnedDraft", () => {
 });
 
 describe("sendFollowUpDraft", () => {
-  it("marks the draft sent", async () => {
-    const { client, updates } = makeClient({ singleDraft: OWNED_DRAFT, plan: OWNED_PLAN });
+  const SENT = {
+    draftId: "draft-1",
+    providerMessageId: "email-1",
+    recipient: "jobs@acme.com",
+    replyAddress: "jane.doe+TOKEN@gmail.com",
+    sentAt: "2026-09-19T00:00:00.000Z",
+  };
 
-    const result = await sendFollowUpDraft(client, "cand-1", "draft-1", { logDispatch: () => {} });
+  // A dispatcher is injected, so the real one is never built — but the review layer still
+  // resolves mail configuration unless a transport is supplied, and a test must not depend on
+  // the developer's environment.
+  const MAIL = {
+    transport: { send: async () => ({ providerMessageId: "unused" }) } as unknown as import("./mailTransport.js").MailTransport,
+    from: { name: null, address: "notifications@jobbeacon.in" },
+  };
 
-    expect(result).toMatchObject({ draftId: "draft-1", status: "sent" });
-    expect(updates[0]?.payload).toMatchObject({ status: "sent" });
-  });
+  function dispatched() {
+    const dispatch = vi.fn(async () => SENT);
+    return { dispatch, dispatchFn: dispatch as unknown as typeof import("./followUpDispatch.js").dispatchFollowUp };
+  }
 
-  it("says plainly that nothing was transmitted", async () => {
-    // A caller rendering "Sent" from a 200 would be making a claim this endpoint
-    // cannot support, so the fact travels in the result rather than being
-    // inferred from the absence of an error.
+  it("reports a real transmission with the provider id", async () => {
     const { client } = makeClient({ singleDraft: OWNED_DRAFT, plan: OWNED_PLAN });
+    const { dispatchFn } = dispatched();
 
-    const result = await sendFollowUpDraft(client, "cand-1", "draft-1", { logDispatch: () => {} });
+    const result = await sendFollowUpDraft(client, "cand-1", "draft-1", {
+      ...MAIL,
+      dispatch: dispatchFn,
+      replyTokenSecret: Buffer.alloc(32, 1),
+      logDispatch: () => {},
+    });
 
-    expect(result.transmitted).toBe(false);
-    expect(result.note).toContain("No email was transmitted");
+    expect(result).toMatchObject({
+      draftId: "draft-1",
+      status: "sent",
+      transmitted: true,
+      providerMessageId: "email-1",
+      recipient: "jobs@acme.com",
+    });
+    expect(result.note).toContain("jobs@acme.com");
   });
 
-  it("logs the draft body, which is the entire dispatch", async () => {
-    const logDispatch = vi.fn();
+  it("hands the dispatcher the subject and body the candidate reviewed", async () => {
     const { client } = makeClient({ singleDraft: OWNED_DRAFT, plan: OWNED_PLAN });
+    const { dispatchFn } = dispatched();
 
-    await sendFollowUpDraft(client, "cand-1", "draft-1", { logDispatch });
+    await sendFollowUpDraft(client, "cand-1", "draft-1", {
+      ...MAIL,
+      dispatch: dispatchFn,
+      replyTokenSecret: Buffer.alloc(32, 1),
+      logDispatch: () => {},
+    });
 
-    expect(logDispatch).toHaveBeenCalledTimes(1);
-    const detail = logDispatch.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(detail.body).toBe("Following up on my application.");
-    expect(detail.company).toBe("Acme");
-    // Honest about the gap: there is no recipient address in this schema.
-    expect(detail.to).toBeNull();
+    const draftArg = (dispatchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[1];
+    expect(draftArg).toMatchObject({
+      draftId: "draft-1",
+      candidateId: "cand-1",
+      applicationAttemptId: "attempt-1",
+      subject: "Re: Data Engineer III application",
+      text: "Following up on my application.",
+    });
   });
 
-  it("uses a compare-and-swap predicate, so a concurrent approval cannot double-fire", async () => {
-    const { client, updates } = makeClient({ singleDraft: OWNED_DRAFT, plan: OWNED_PLAN });
+  it("refuses a draft with no subject, which was written before subjects existed", async () => {
+    const { client } = makeClient({
+      singleDraft: { data: { ...OWNED_DRAFT.data, subject: null }, error: null },
+      plan: OWNED_PLAN,
+    });
+    const { dispatchFn, dispatch } = dispatched();
 
-    await sendFollowUpDraft(client, "cand-1", "draft-1", { logDispatch: () => {} });
+    await expect(
+      sendFollowUpDraft(client, "cand-1", "draft-1", {
+        ...MAIL,
+        dispatch: dispatchFn,
+        replyTokenSecret: Buffer.alloc(32, 1),
+        logDispatch: () => {},
+      }),
+    ).rejects.toBeInstanceOf(FollowUpDraftMissingSubjectError);
 
-    expect(updates[0]?.predicates).toContainEqual(["id", "draft-1"]);
-    expect(updates[0]?.predicates).toContainEqual(["status", "pending_review"]);
+    // Nothing was sent and nothing was claimed: the candidate had nothing to approve.
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("refuses a draft that is not awaiting review", async () => {
@@ -283,26 +327,19 @@ describe("sendFollowUpDraft", () => {
     );
   });
 
-  it("reports a concurrent change rather than claiming to have sent it", async () => {
-    const { client } = makeClient({ singleDraft: OWNED_DRAFT, plan: OWNED_PLAN, updateRows: [] });
-
-    await expect(sendFollowUpDraft(client, "cand-1", "draft-1")).rejects.toBeInstanceOf(
-      FollowUpDraftNotPendingError,
-    );
-  });
-
-  it("refuses another candidate's draft without logging anything", async () => {
+  it("refuses another candidate's draft without dispatching anything", async () => {
     const logDispatch = vi.fn();
     const { client } = makeClient({
       singleDraft: OWNED_DRAFT,
       plan: { data: { candidate_id: "someone-else", vacancies: null }, error: null },
     });
+    const { dispatchFn, dispatch } = dispatched();
 
-    await expect(sendFollowUpDraft(client, "cand-1", "draft-1", { logDispatch })).rejects.toBeInstanceOf(
-      FollowUpDraftNotOwnedError,
-    );
-    // Nothing is logged for a draft the caller does not own: the log line
-    // contains the body, so emitting it would leak a stranger's letter.
+    await expect(
+      sendFollowUpDraft(client, "cand-1", "draft-1", { ...MAIL, dispatch: dispatchFn, logDispatch }),
+    ).rejects.toBeInstanceOf(FollowUpDraftNotOwnedError);
+
+    expect(dispatch).not.toHaveBeenCalled();
     expect(logDispatch).not.toHaveBeenCalled();
   });
 });

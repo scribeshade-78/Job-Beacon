@@ -33,6 +33,8 @@ import {
   MAILBOX_MATCH_TASK_NAME,
   MAILBOX_POLL_TASK_NAME,
   DEFAULT_OAUTH_STATE_SWEEP_INTERVAL_MS,
+  DEFAULT_FOLLOW_UP_RECOVERY_INTERVAL_MS,
+  FOLLOW_UP_RECOVERY_TASK_NAME,
   OAUTH_STATE_SWEEP_TASK_NAME,
   parseDisabledTasks,
   RANKING_REFRESH_TASK_NAME,
@@ -100,8 +102,8 @@ const GOOGLE_ENV: Record<string, string | undefined> = {
 // immediately before ingestion-drain so work queued this tick is processed this tick;
 // the drain then sits before the mailbox block deliberately — a drain that overruns its
 // deadline delays whatever follows it, and mail classification is what the candidate
-// actually notices. oauth-state-sweep sits at the head of the mailbox block because it is one
-// indexed DELETE that must never queue behind a network poll.
+// actually notices. oauth-state-sweep and follow-up-recovery sit at the head of the mailbox block
+// because they are DB-only: cheap work must never queue behind a network poll.
 const ALWAYS_ON = [
   FIT_RECONCILE_TASK_NAME,
   FIT_TASK_NAME,
@@ -110,6 +112,7 @@ const ALWAYS_ON = [
   KEYLESS_INGESTION_ENQUEUE_TASK_NAME,
   INGESTION_DRAIN_TASK_NAME,
   OAUTH_STATE_SWEEP_TASK_NAME,
+  FOLLOW_UP_RECOVERY_TASK_NAME,
   MAILBOX_CLASSIFY_TASK_NAME,
   MAILBOX_MATCH_TASK_NAME,
   INTAKE_REFRESH_DRAIN_TASK_NAME,

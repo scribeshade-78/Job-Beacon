@@ -145,6 +145,17 @@ import {
   listPendingFollowUps,
   sendFollowUpDraft,
 } from "./mailbox/followUpReview.js";
+import {
+  FollowUpDeliveryUnconfirmedError,
+  FollowUpDraftMissingSubjectError,
+  FollowUpMailboxUnavailableError,
+  FollowUpNotAuthorizedError,
+  FollowUpNotClaimableError,
+  FollowUpRecipientUnavailableError,
+  FollowUpSendRejectedError,
+  OutboundMailNotConfiguredError,
+} from "./mailbox/followUpErrors.js";
+import { ReplyAddressUnavailableError } from "./mailbox/followUpEnvelope.js";
 import { enqueueIntakeRefresh, readLatestIntakeRefresh } from "./intake/refreshQueue.js";
 import { submitVacancyReport, REPORT_CATEGORIES, type ReportCategory } from "./reports.js";
 import { getModerationQueue } from "./moderation/queue.js";
@@ -1864,6 +1875,51 @@ export function createApp(options: CreateAppOptions = {}) {
             error: "This follow-up is no longer awaiting your review.",
             status: error.status,
           });
+          return;
+        }
+
+        if (error instanceof FollowUpDraftMissingSubjectError) {
+          response.status(409).json({
+            error: "This follow-up has no subject yet, so there is nothing to approve. It was drafted before subjects existed.",
+          });
+          return;
+        }
+
+        if (error instanceof FollowUpNotClaimableError) {
+          response.status(409).json({ error: "This follow-up is already being sent or has been resolved." });
+          return;
+        }
+
+        if (error instanceof FollowUpNotAuthorizedError) {
+          response.status(403).json({ error: error.message });
+          return;
+        }
+
+        if (error instanceof FollowUpMailboxUnavailableError || error instanceof FollowUpRecipientUnavailableError) {
+          response.status(409).json({ error: error.message });
+          return;
+        }
+
+        if (error instanceof ReplyAddressUnavailableError) {
+          response.status(409).json({ error: error.message });
+          return;
+        }
+
+        if (error instanceof FollowUpSendRejectedError) {
+          // The draft is back in review: retrying is safe, but not automatic.
+          response.status(502).json({ error: "The email provider rejected this message. Nothing was sent; you can try again." });
+          return;
+        }
+
+        if (error instanceof FollowUpDeliveryUnconfirmedError) {
+          response.status(502).json({
+            error: "The provider's answer never arrived, so delivery is unconfirmed. Check the employer's reply before trying again.",
+          });
+          return;
+        }
+
+        if (error instanceof OutboundMailNotConfiguredError) {
+          response.status(503).json({ error: "Email sending is not configured yet." });
           return;
         }
 
