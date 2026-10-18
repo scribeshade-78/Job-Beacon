@@ -58,7 +58,6 @@ export interface EligibilityGates {
   source_policy: GateResult;
   vacancy_trust: GateResult;
   automation_authorization: GateResult;
-  candidate_exclusions: GateResult;
   idempotency: GateResult;
   role_match: GateResult;
   verified_facts: GateResult;
@@ -67,7 +66,7 @@ export interface EligibilityGates {
   /**
    * The candidate's own per-vacancy dismissal (dismissed_vacancies). Dismissal
    * beats a save row, so this is checked as its own gate rather than folded
-   * into candidate_exclusions — those are global categories, not a listing.
+   * into a broader category check.
    */
   dismissed: GateResult;
   /**
@@ -160,7 +159,6 @@ export async function evaluateEligibilityGates(
   const [
     sourcePolicyGate,
     automationAuthorizationGate,
-    candidateExclusionsGate,
     idempotencyGate,
     verifiedFactsGate,
     rateAndAbuseControlsGate,
@@ -173,7 +171,6 @@ export async function evaluateEligibilityGates(
   ] = await Promise.all([
     evaluateSourcePolicy(client, vacancy.source_code),
     evaluateAutomationAuthorization(client, candidateId),
-    evaluateCandidateExclusions(client, candidateId),
     evaluateIdempotency(client, candidateId, vacancyId),
     evaluateVerifiedFacts(client, candidateId),
     evaluateRateAndAbuseControls(client, candidateId),
@@ -221,7 +218,6 @@ export async function evaluateEligibilityGates(
     source_policy: sourcePolicyGate,
     vacancy_trust: evaluateVacancyTrust(vacancy.trust_status),
     automation_authorization: automationAuthorizationGate,
-    candidate_exclusions: candidateExclusionsGate,
     idempotency: idempotencyGate,
     // role_match keeps its own codes and matchedRole detail (Phase 0 decision),
     // but now matches with the shared tokenized matcher rather than a substring.
@@ -453,32 +449,7 @@ async function evaluateRateAndAbuseControls(client: SupabaseClient, candidateId:
   return { status: "pass", detail: { count, limit: MAX_DAILY_APPLICATIONS_PER_CANDIDATE } };
 }
 
-/**
- * PRD §9.2's global exclusions (candidate_exclusions, R1) are real,
- * queried data — but vacancies (§11.2) carries no category classification
- * matching candidate_exclusions' categories (staffing_agencies,
- * contract_roles, relocation_required, sensitive_sectors); that
- * vacancy-side taxonomy doesn't exist anywhere in this repository. Until
- * it does, this gate always passes: a real query against real candidate
- * data, honestly nothing on the vacancy side to compare it against yet —
- * not a fabricated check. excludedCategories is recorded in `detail` so
- * the moment vacancy-side classification lands, only the comparison logic
- * needs to be added here, not a new data source.
- */
-async function evaluateCandidateExclusions(client: SupabaseClient, candidateId: string): Promise<GateResult> {
-  const { data, error } = await client
-    .from("candidate_exclusions")
-    .select("category")
-    .eq("candidate_id", candidateId);
 
-  if (error) {
-    throw error;
-  }
-
-  const excludedCategories = ((data ?? []) as Array<{ category: string }>).map((row) => row.category);
-
-  return { status: "pass", detail: { excludedCategories } };
-}
 
 /**
  * Whether the vacancy's title is relevant to ANY of the candidate's saved target

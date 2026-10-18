@@ -8,7 +8,7 @@ const pass: GateResult = { status: "pass" };
 function gates(overrides: Record<string, GateResult> = {}): EligibilityGates {
   return {
     source_policy: pass, vacancy_trust: pass, automation_authorization: pass,
-    candidate_exclusions: pass, idempotency: pass, role_match: pass, verified_facts: pass,
+    idempotency: pass, role_match: pass, verified_facts: pass,
     application_support: pass, rate_and_abuse_controls: pass, dismissed: pass,
     preferred_qualifiers: pass, ...overrides,
   };

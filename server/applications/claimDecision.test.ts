@@ -11,7 +11,6 @@ function gates(overrides: Partial<EligibilityGates> = {}): EligibilityGates {
     source_policy: pass,
     vacancy_trust: pass,
     automation_authorization: pass,
-    candidate_exclusions: pass,
     idempotency: pass,
     role_match: pass,
     verified_facts: pass,
@@ -45,7 +44,7 @@ describe("decideFillClaim", () => {
     // Every gate, one at a time. A claim loop that checked a subset would pass the happy
     // path and authorise a submission the platform had already refused.
     const names = Object.keys(gates());
-    expect(names.length).toBeGreaterThanOrEqual(11);
+    expect(names.length).toBeGreaterThanOrEqual(10);
     for (const name of names) {
       const spoiled: Record<string, GateResult> = { ...gates(), [name]: fail("GATE_FAILED") };
       const outcome = decideFillClaim(context({ gates: spoiled as unknown as EligibilityGates }));

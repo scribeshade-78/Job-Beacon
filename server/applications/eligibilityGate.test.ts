@@ -62,7 +62,6 @@ const DEFAULT_TABLE_RESULTS: Record<string, TableResult> = {
   vacancies: { data: { source_code: "usajobs", trust_status: "VERIFIED", raw_title: "Backend Engineer" }, error: null },
   source_policies: { data: { discovery_allowed: true, automated_application_allowed: true }, error: null },
   automation_authorizations: { data: { status: "authorized" }, error: null },
-  candidate_exclusions: { data: [], error: null },
   candidate_selected_roles: { data: [], error: null },
   extracted_facts: { data: [], error: null },
   fact_confirmations: { data: [], error: null },
@@ -476,28 +475,6 @@ describe("evaluateEligibilityGates", () => {
     });
   });
 
-  describe("candidate_exclusions", () => {
-    it("always passes and records the candidate's excluded categories as evidence", async () => {
-      const client = makeClient({
-        candidate_exclusions: {
-          data: [{ category: "staffing_agencies" }, { category: "relocation_required" }],
-          error: null,
-        },
-      });
-      const result = await evaluateEligibilityGates(client, baseInput);
-      expect(result.gates.candidate_exclusions).toEqual({
-        status: "pass",
-        detail: { excludedCategories: ["staffing_agencies", "relocation_required"] },
-      });
-    });
-
-    it("passes with an empty excludedCategories list when the candidate has none set", async () => {
-      const client = makeClient();
-      const result = await evaluateEligibilityGates(client, baseInput);
-      expect(result.gates.candidate_exclusions).toEqual({ status: "pass", detail: { excludedCategories: [] } });
-    });
-  });
-
   describe("idempotency", () => {
     it("passes when no application_plans row exists yet for this candidate + vacancy", async () => {
       const client = makeClient();
@@ -668,11 +645,6 @@ describe("evaluateEligibilityGates", () => {
 
     it("propagates a database error from the automation_authorizations lookup", async () => {
       const client = makeClient({ automation_authorizations: { data: null, error: { message: "db error" } } });
-      await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
-    });
-
-    it("propagates a database error from the candidate_exclusions lookup", async () => {
-      const client = makeClient({ candidate_exclusions: { data: null, error: { message: "db error" } } });
       await expect(evaluateEligibilityGates(client, baseInput)).rejects.toBeTruthy();
     });
 

@@ -70,7 +70,6 @@ const GATE_ORDER: Array<keyof EligibilityGates> = [
   "source_policy",
   "vacancy_trust",
   "automation_authorization",
-  "candidate_exclusions",
   "idempotency",
   "role_match",
   "verified_facts",

@@ -17,7 +17,6 @@ function gateResults(failing: Record<string, string>) {
     "source_policy",
     "vacancy_trust",
     "automation_authorization",
-    "candidate_exclusions",
     "idempotency",
     "role_match",
     "verified_facts",
