@@ -31,6 +31,7 @@ import { cn } from "../lib/utils";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
 import { Button } from "./ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "./ui/sheet";
+import { CopilotIcon } from "./brand/CopilotIcon";
 import { Spinner } from "./ui/spinner";
 
 /**
@@ -397,9 +398,7 @@ export function CopilotDrawer() {
         <SheetContent>
           <div className="flex items-center justify-between gap-2 border-b border-blue-100 bg-white px-4 py-3">
             <div className="flex min-w-0 items-center gap-2.5">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
-                <Sparkles className="h-5 w-5" aria-hidden="true" />
-              </span>
+              <CopilotIcon className="h-9 w-9 shrink-0" />
               <div className="min-w-0">
                 <SheetTitle className="truncate">Career Copilot</SheetTitle>
                 <span className="mt-0.5 inline-block max-w-full truncate rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">

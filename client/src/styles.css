@@ -207,3 +207,28 @@
     animation-duration: 1ms;
   }
 }
+
+/**
+ * Brand wordmark fills.
+ *
+ * THE NAVY "Job" WOULD VANISH on a dark surface, so both halves flip under a .dark ancestor. This
+ * is a class scope rather than Tailwind's dark: variant on purpose: that variant follows the OS
+ * preference, and the app has no dark theme yet, so a dark-OS visitor would get a white wordmark on
+ * the current light sidebar. Until a .dark class is introduced these rules are inert, which is the
+ * correct behaviour for a light-only app that is being made ready for a dark one.
+ */
+.jb-wordmark-primary {
+  fill: #0b2a6f;
+}
+
+.dark .jb-wordmark-primary {
+  fill: #f5f7fa;
+}
+
+.jb-wordmark-accent {
+  fill: #1e63e9;
+}
+
+.dark .jb-wordmark-accent {
+  fill: #6aa4ff;
+}

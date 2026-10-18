@@ -20,7 +20,7 @@ import {
   X,
   type LucideIcon, Activity,
 } from "lucide-react";
-import { APP_NAME } from "../../../shared/app";
+import { JobBeaconLogo } from "./brand/JobBeaconLogo";
 import { cn } from "../lib/utils";
 import type { Capabilities } from "../lib/capabilities";
 import { CopilotDrawer } from "./CopilotDrawer";
@@ -128,7 +128,7 @@ export function AppShell({ email, onLogout, children, capabilities }: AppShellPr
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[260px] flex-col border-r border-ios-separator bg-ios-card lg:flex">
         <div className="flex h-16 items-center px-5">
-          <span className="text-lg font-bold text-black">{APP_NAME}</span>
+          <JobBeaconLogo className="h-9" />
         </div>
         <NavList items={navItems} />
         <SidebarFooter email={email} onLogout={onLogout} />
@@ -145,7 +145,7 @@ export function AppShell({ email, onLogout, children, capabilities }: AppShellPr
           />
           <aside className="absolute inset-y-0 left-0 flex w-[260px] flex-col bg-ios-card shadow-card">
             <div className="flex h-16 items-center justify-between px-5">
-              <span className="text-lg font-bold text-black">{APP_NAME}</span>
+              <JobBeaconLogo className="h-8" />
               <button
                 type="button"
                 aria-label="Close navigation"
@@ -178,7 +178,7 @@ export function AppShell({ email, onLogout, children, capabilities }: AppShellPr
           >
             <Menu className="h-6 w-6" aria-hidden="true" />
           </button>
-          <span className="text-base font-semibold text-black lg:hidden">{APP_NAME}</span>
+          <JobBeaconLogo className="h-8 lg:hidden" />
         </header>
 
         {/* pb-28 on mobile reserves room for the Copilot launcher, a fixed 56px
