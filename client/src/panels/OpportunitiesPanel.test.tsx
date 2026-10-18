@@ -276,7 +276,7 @@ describe("OpportunitiesPanel — status and empty states", () => {
     // The inline text button and the filter pills are not the Button primitive, so they
     // carry the token ring explicitly rather than relying on the global fallback.
     expect(screen.getByRole("button", { name: /retry/i }).className).toContain("focus-visible:ring-2");
-    expect(screen.getByRole("button", { name: /Work mode filter/i }).className).toContain(
+    expect(screen.getByRole("button", { name: /Workplace/i }).className).toContain(
       "focus-visible:ring-2",
     );
   });

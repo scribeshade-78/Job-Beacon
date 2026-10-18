@@ -46,7 +46,7 @@ import {
   readIntakeRefreshStatus,
 } from "../lib/ingestion";
 import { workplaceLabel } from "../lib/opportunityFilters";
-import { DEFAULT_SORT, SORT_FIELDS_BY_ID, type SortId } from "../../../shared/opportunityQuery";
+import { DEFAULT_SORT, SORT_FIELDS_BY_ID, VACANCY_SORTS, type SortId } from "../../../shared/opportunityQuery";
 import {
   EMPTY_FILTERS,
   countActiveFilters,
@@ -66,11 +66,11 @@ import {
 import { loadSearchPreferences } from "../lib/searchPreferences";
 import { ineligibilityReasonOf } from "../../../shared/eligibilityReason";
 import type { SearchPreferences } from "../../../shared/searchPreferences";
-import { OpportunityFilterBar } from "./OpportunityFilterBar";
+import { JobSearchFilterBar, emptyJobSearchDraft, type JobSearchDraft } from "./JobSearchFilterBar";
 import { InterviewPrepDialog } from "../components/InterviewPrepDialog";
 import { showToast } from "../components/ui/use-toast";
 import { getSupabaseBrowserClient } from "../lib/supabaseClient";
-import { INLINE_FOCUS_RING } from "../lib/utils";
+import { INLINE_FOCUS_RING, cn } from "../lib/utils";
 import {
   describeRankingRefresh,
   readRankingRefreshStatus,
@@ -199,6 +199,15 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
   const [filters, setFilters] = useState<OpportunityFilters | null>(null);
   const [preferences, setPreferences] = useState<CandidatePreferences | null>(null);
   const [sort, setSort] = useState<SortId>(DEFAULT_SORT);
+  /**
+   * The committed search draft for the bar.
+   *
+   * THE BAR KEEPS ITS OWN DRAFT AND ONLY WRITES BACK ON APPLY. This copy exists so the panel can
+   * render the committed state and so the sort control (which the bar does not own) sits beside it.
+   * Keyword search stays off — see keywordsEnabled — because the read model has no description
+   * column to search, and a box that accepts text and changes nothing is worse than no box.
+   */
+  const [searchDraft, setSearchDraft] = useState<JobSearchDraft>(() => emptyJobSearchDraft());
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   /**
    * The unified SearchPreferences object — the feed's single source of truth.
@@ -1016,18 +1025,39 @@ export function OpportunitiesPanel({ candidateId }: OpportunitiesPanelProps) {
           </PanelNotice>
         )}
 
-        {/* Filter bar: below the header, above the results. The 10 declared
-            filters and the 6 sorts live in OpportunityFilterBar, which is
-            controlled and fetches nothing of its own; the primary action stays
+        {/* Filter bar: below the header, above the results. The bar holds its own draft and
+            commits only on Apply, so four pill changes cost one query instead of four; the sort
+            control stays here because the bar does not own ordering. The primary action stays
             right-aligned on the same line. */}
         <div className="mb-4 flex flex-wrap items-start gap-2">
-          <OpportunityFilterBar
-            filters={filters ?? EMPTY_FILTERS}
-            onChange={setFilters}
-            sort={sort}
-            onSortChange={setSort}
-            preferences={preferences}
+          <JobSearchFilterBar
+            value={{ ...searchDraft, filters: filters ?? EMPTY_FILTERS }}
+            onApply={(next) => {
+              setSearchDraft(next);
+              setFilters(next.filters);
+            }}
+            keywordsEnabled={false}
           />
+
+          <label className="sr-only" htmlFor="opportunity-sort">
+            Sort by
+          </label>
+          <select
+            id="opportunity-sort"
+            aria-label="Sort by"
+            value={sort}
+            onChange={(event) => setSort(event.target.value as SortId)}
+            className={cn(
+              "h-9 rounded-control border border-ios-separator bg-ios-card px-2 text-sm text-black",
+              INLINE_FOCUS_RING,
+            )}
+          >
+            {VACANCY_SORTS.filter((entry) => entry.unavailableReason === null).map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
 
           {/* The count describes the LOADED LIST; the button describes the
               ACTION. Keeping them apart is what stops the label reading as a

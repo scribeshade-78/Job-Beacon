@@ -226,10 +226,25 @@ interface JobSearchFilterBarProps {
   onApply: (next: JobSearchDraft) => void;
   /** Opens an advanced settings surface, when the caller has one. */
   onOpenSettings?: () => void;
+  /**
+   * Whether the search and exclusion rows are shown.
+   *
+   * FALSE WHEN THE CALLER CANNOT APPLY THEM. The read model exposes a title and a company name but
+   * no description, so "Title + Description" cannot be honoured; rendering the inputs anyway would
+   * give the candidate a search box that accepts text and changes nothing. Defaults to true so the
+   * component is complete on its own.
+   */
+  keywordsEnabled?: boolean;
   className?: string;
 }
 
-export function JobSearchFilterBar({ value, onApply, onOpenSettings, className }: JobSearchFilterBarProps) {
+export function JobSearchFilterBar({
+  value,
+  onApply,
+  onOpenSettings,
+  keywordsEnabled = true,
+  className,
+}: JobSearchFilterBarProps) {
   const [draft, setDraft] = useState<JobSearchDraft>(value);
   const searchId = useId();
   const excludeId = useId();
@@ -267,6 +282,8 @@ export function JobSearchFilterBar({ value, onApply, onOpenSettings, className }
       }}
       aria-label="Job search filters"
     >
+      {keywordsEnabled ? (
+        <>
       {/* PRIMARY SEARCH ROW */}
       <div className="flex flex-col gap-2 sm:flex-row">
         <label className="sr-only" htmlFor={searchId + "-scope"}>
@@ -318,6 +335,8 @@ export function JobSearchFilterBar({ value, onApply, onOpenSettings, className }
           autoComplete="off"
         />
       </div>
+        </>
+      ) : null}
 
       {/* FILTER PILLS + ACTION AREA */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
