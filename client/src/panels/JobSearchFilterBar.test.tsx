@@ -126,9 +126,28 @@ describe("JobSearchFilterBar", () => {
       pillUnavailableReason({ id: "visa", label: "Sponsors Visa", missingReason: "no visa column" }),
     ).toBe("no visa column");
 
-    // The backed ones are open.
+    // The backed ones are open, including the four carried over from the old bar.
     expect(pillUnavailableReason({ id: "date", label: "Date", field: "freshness" })).toBeNull();
     expect(pillUnavailableReason({ id: "companies", label: "Companies", field: "company" })).toBeNull();
+
+    for (const field of ["salary", "trust", "application_status", "source"] as const) {
+      expect(pillUnavailableReason({ id: field, label: field, field })).toBeNull();
+    }
+  });
+
+  it("edits Trust in the draft and still emits nothing until Apply", () => {
+    const onApply = vi.fn();
+    render(<JobSearchFilterBar value={draft()} onApply={onApply} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Trust/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Verified$/ }));
+
+    expect(onApply).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Apply/ }));
+
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect((onApply.mock.calls[0][0] as JobSearchDraft).filters.trustStatuses).toEqual(["VERIFIED"]);
   });
 
   it("counts what the draft narrows by, and compares drafts field-wise", () => {

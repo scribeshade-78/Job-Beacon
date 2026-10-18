@@ -4,8 +4,10 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import {
+  APPLICATION_STATUS_FILTER_OPTIONS,
   FRESHNESS_WINDOWS,
   REMOTE_PREFERENCE_OPTIONS,
+  TRUST_FILTER_OPTIONS,
   VACANCY_FILTERS,
   type FilterFieldId,
 } from "../../../shared/opportunityQuery";
@@ -143,6 +145,12 @@ const PILL_SPECS: readonly PillSpec[] = [
   },
   { id: "job_type", label: "Job Type", field: "employment_type" },
   { id: "employment_type", label: "Employment Type", field: "employment_type" },
+  // The four the old bar had and this one must not lose. They are all backed, so they resolve
+  // to active pills through the same spec lookup as Date, Workplace and Companies.
+  { id: "salary", label: "Salary", field: "salary" },
+  { id: "trust", label: "Trust", field: "trust" },
+  { id: "application_status", label: "Application Status", field: "application_status" },
+  { id: "source", label: "Source", field: "source" },
 ];
 
 /** The reason a pill cannot change the query, or null when it can. */
@@ -217,6 +225,108 @@ function OptionRow({
       <span>{label}</span>
       {selected ? <Check className="h-4 w-4 text-ios-blue" aria-hidden="true" /> : null}
     </button>
+  );
+}
+
+/** A checkbox-style multi-select pill, used by Workplace, Trust and Application Status. */
+function MultiFilterPill({
+  id,
+  label,
+  options,
+  selected,
+  onChange,
+  note,
+}: {
+  id: string;
+  label: string;
+  options: readonly { value: string; label: string }[];
+  selected: readonly string[];
+  onChange: (next: string[]) => void;
+  note?: string;
+}) {
+  return (
+    <Popover>
+      <PillTrigger label={label} active={selected.length > 0} count={selected.length} />
+      <PopoverContent aria-label={label + " options"}>
+        {options.map((option) => {
+          const isSelected = selected.includes(option.value);
+          return (
+            <OptionRow
+              key={option.value}
+              label={option.label}
+              selected={isSelected}
+              onClick={() =>
+                onChange(
+                  isSelected ? selected.filter((value) => value !== option.value) : [...selected, option.value],
+                )
+              }
+            />
+          );
+        })}
+        {note ? (
+          <p className="mt-2 border-t border-ios-separator pt-2 text-xs text-ios-text-secondary">{note}</p>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** A "type a list" pill, used by Companies and Source. Commits on Enter and shows removable chips. */
+function ListFilterPill({
+  id,
+  label,
+  values,
+  placeholder,
+  note,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  values: readonly string[];
+  placeholder: string;
+  note: string;
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <Popover>
+      <PillTrigger label={label} active={values.length > 0} count={values.length} />
+      <PopoverContent className="w-64">
+        <label className="text-xs font-semibold text-ios-text-secondary" htmlFor={id + "-values"}>
+          {label}
+        </label>
+        <Input
+          id={id + "-values"}
+          className="mt-1 h-9"
+          placeholder={placeholder}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const added = parseListInput(event.currentTarget.value);
+            if (added.length === 0) return;
+            onChange(Array.from(new Set([...values, ...added])));
+            event.currentTarget.value = "";
+          }}
+        />
+        {values.length > 0 ? (
+          <ul className="mt-2 flex flex-wrap gap-1">
+            {values.map((value) => (
+              <li key={value}>
+                <button
+                  type="button"
+                  onClick={() => onChange(values.filter((entry) => entry !== value))}
+                  className="inline-flex items-center gap-1 rounded-full bg-ios-bg px-2 py-1 text-xs text-black"
+                >
+                  {value}
+                  <X className="h-3 w-3" aria-hidden="true" />
+                  <span className="sr-only">Remove {value}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <p className="mt-2 border-t border-ios-separator pt-2 text-xs text-ios-text-secondary">{note}</p>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -424,55 +534,118 @@ export function JobSearchFilterBar({
               );
             }
 
-            // company
-            return (
-              <Popover key={spec.id}>
-                <PillTrigger
+            if (spec.field === "company") {
+              return (
+                <ListFilterPill
+                  key={spec.id}
+                  id={spec.id}
                   label={spec.label}
-                  active={draft.filters.companies.length > 0}
-                  count={draft.filters.companies.length}
+                  values={draft.filters.companies}
+                  placeholder="Company name, then Enter"
+                  note="Matches the company's displayed name exactly."
+                  onChange={(companies) => patchFilters({ companies })}
                 />
-                <PopoverContent className="w-64">
-                  <label className="text-xs font-semibold text-ios-text-secondary" htmlFor={spec.id + "-companies"}>
-                    Add a company
-                  </label>
-                  <Input
-                    id={spec.id + "-companies"}
-                    className="mt-1 h-9"
-                    placeholder="Company name, then Enter"
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") return;
-                      event.preventDefault();
-                      const added = parseListInput(event.currentTarget.value);
-                      if (added.length === 0) return;
-                      patchFilters({
-                        companies: Array.from(new Set([...draft.filters.companies, ...added])),
-                      });
-                      event.currentTarget.value = "";
-                    }}
+              );
+            }
+
+            if (spec.field === "source") {
+              return (
+                <ListFilterPill
+                  key={spec.id}
+                  id={spec.id}
+                  label={spec.label}
+                  values={draft.filters.sources}
+                  placeholder="Source code, then Enter"
+                  note="Free text, matched against the listing's source code."
+                  onChange={(sources) => patchFilters({ sources })}
+                />
+              );
+            }
+
+            if (spec.field === "trust") {
+              return (
+                <MultiFilterPill
+                  key={spec.id}
+                  id={spec.id}
+                  label={spec.label}
+                  options={TRUST_FILTER_OPTIONS}
+                  selected={draft.filters.trustStatuses}
+                  onChange={(trustStatuses) => patchFilters({ trustStatuses })}
+                />
+              );
+            }
+
+            if (spec.field === "application_status") {
+              return (
+                <MultiFilterPill
+                  key={spec.id}
+                  id={spec.id}
+                  label={spec.label}
+                  options={APPLICATION_STATUS_FILTER_OPTIONS}
+                  selected={draft.filters.applicationStatuses}
+                  onChange={(applicationStatuses) => patchFilters({ applicationStatuses })}
+                  note="Not applied means no application attempt exists for that vacancy yet."
+                />
+              );
+            }
+
+            if (spec.field === "salary") {
+              return (
+                <Popover key={spec.id}>
+                  <PillTrigger
+                    label={spec.label}
+                    active={draft.filters.minSalary !== null}
+                    count={draft.filters.minSalary !== null ? 1 : 0}
                   />
-                  {draft.filters.companies.length > 0 ? (
-                    <ul className="mt-2 flex flex-wrap gap-1">
-                      {draft.filters.companies.map((company) => (
-                        <li key={company}>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              patchFilters({ companies: draft.filters.companies.filter((value) => value !== company) })
-                            }
-                            className="inline-flex items-center gap-1 rounded-full bg-ios-bg px-2 py-1 text-xs text-black"
-                          >
-                            {company}
-                            <X className="h-3 w-3" aria-hidden="true" />
-                            <span className="sr-only">Remove {company}</span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </PopoverContent>
-              </Popover>
-            );
+                  <PopoverContent className="w-64">
+                    <label
+                      className="text-xs font-semibold text-ios-text-secondary"
+                      htmlFor={spec.id + "-salary"}
+                    >
+                      Minimum salary
+                    </label>
+                    <Input
+                      id={spec.id + "-salary"}
+                      className="mt-1 h-9"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      placeholder="80000"
+                      value={draft.filters.minSalary === null ? "" : String(draft.filters.minSalary)}
+                      onChange={(event) => {
+                        const raw = event.target.value;
+                        const parsed = raw.trim() === "" ? null : Number(raw);
+                        patchFilters({
+                          minSalary: parsed !== null && Number.isFinite(parsed) ? parsed : null,
+                        });
+                      }}
+                    />
+                    <label
+                      className="mt-2 block text-xs font-semibold text-ios-text-secondary"
+                      htmlFor={spec.id + "-currency"}
+                    >
+                      Currency
+                    </label>
+                    <Input
+                      id={spec.id + "-currency"}
+                      className="mt-1 h-9"
+                      maxLength={3}
+                      placeholder="Any"
+                      value={draft.filters.minSalaryCurrency ?? ""}
+                      onChange={(event) => {
+                        const trimmed = event.target.value.trim().toUpperCase();
+                        patchFilters({ minSalaryCurrency: trimmed === "" ? null : trimmed });
+                      }}
+                    />
+                    <p className="mt-2 border-t border-ios-separator pt-2 text-xs text-ios-text-secondary">
+                      Leave the currency empty to compare numbers in any currency.
+                    </p>
+                  </PopoverContent>
+                </Popover>
+              );
+            }
+
+            return null;
           })}
         </div>
 
