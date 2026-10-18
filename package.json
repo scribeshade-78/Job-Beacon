@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepare": "git config core.hooksPath .githooks",
+    "prepare": "git config core.hooksPath .githooks || echo skip-git-hooks",
     "hooks:install": "git config core.hooksPath .githooks",
     "dev": "concurrently --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:scheduler\"",
     "dev:client": "vite --config vite.config.ts",
