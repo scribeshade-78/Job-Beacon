@@ -1,6 +1,5 @@
 import { ApplicationPreferencesPanel } from "../panels/ApplicationPreferencesPanel";
 import { CandidatePreferencesPanel } from "../panels/CandidatePreferencesPanel";
-import { ExclusionsPanel } from "../panels/ExclusionsPanel";
 import { IntegrationsPanel } from "../panels/IntegrationsPanel";
 
 interface ProfilePageProps {
@@ -19,7 +18,6 @@ export function ProfilePage({ candidateId, ready }: ProfilePageProps) {
           <CandidatePreferencesPanel candidateId={candidateId} />
           <ApplicationPreferencesPanel candidateId={candidateId} />
           <IntegrationsPanel />
-          <ExclusionsPanel candidateId={candidateId} />
         </>
       )}
     </div>

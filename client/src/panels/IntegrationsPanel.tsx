@@ -1,6 +1,4 @@
 import { useState } from "react";
-import { ArrowRight } from "lucide-react";
-import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { showToast } from "../components/ui/use-toast";
@@ -24,8 +22,12 @@ import { cn } from "../lib/utils";
  * as one stack of labelled sections.
  *
  * UI ONLY, by explicit scope: no OAuth flow, no Express route, no MCP server is
- * built or called here. The Job Boards rows are placeholders and say so through
- * their own "Not connected" state plus a toast on click.
+ * built or called here.
+ *
+ * THE JOB BOARDS TAB IS GONE. It listed exactly two boards, Indeed and Naukri, both
+ * placeholders with a "Not connected" badge and a Connect button that only raised a toast.
+ * With both rows removed the tab had no content, and an empty tab is a worse answer than no
+ * tab; the remaining tabs are Email and AI Assistants.
  *
  * The Email tab is the exception, and deliberately so: rather than build a
  * second, fake Gmail/Outlook connector next to the real one, it renders the
@@ -36,14 +38,11 @@ import { cn } from "../lib/utils";
  */
 
 const INTEGRATION_TABS = [
-  { id: "jobBoards", label: "Job Boards" },
   { id: "email", label: "Email" },
   { id: "aiAssistants", label: "AI Assistants" },
 ] as const;
 
 type IntegrationTabId = (typeof INTEGRATION_TABS)[number]["id"];
-
-const JOB_BOARDS = ["Indeed", "Naukri"] as const;
 
 /**
  * The configuration a terminal agent actually needs.
@@ -76,14 +75,8 @@ const MCP_CLIENT_CONFIG = `{
   "cwd": "<absolute_path_to_jobbeacon>"
 }`;
 
-const CONNECT_IN_DEVELOPMENT = "Integration flows are currently in development.";
-
 export function IntegrationsPanel() {
-  const [tab, setTab] = useState<IntegrationTabId>("jobBoards");
-
-  function handleConnectPlaceholder() {
-    showToast({ title: CONNECT_IN_DEVELOPMENT, tone: "default" });
-  }
+  const [tab, setTab] = useState<IntegrationTabId>("email");
 
   /**
    * The failure branch is real rather than theoretical — navigator.clipboard
@@ -115,11 +108,12 @@ export function IntegrationsPanel() {
       </h2>
 
       {/* Same tablist treatment as AuthCard's log in / sign up switcher
-          (role=tablist + role=tab + aria-selected), widened to three columns. */}
+          (role=tablist + role=tab + aria-selected). Two columns now that the Job Boards
+          tab has been removed. */}
       <div
         role="tablist"
         aria-label="Integration categories"
-        className="grid grid-cols-3 gap-1 rounded-control bg-ios-bg p-1"
+        className="grid grid-cols-2 gap-1 rounded-control bg-ios-bg p-1"
       >
         {INTEGRATION_TABS.map(({ id, label }) => (
           <button
@@ -139,42 +133,6 @@ export function IntegrationsPanel() {
           </button>
         ))}
       </div>
-
-      {tab === "jobBoards" && (
-        <Card role="tabpanel" id="integrations-panel-jobBoards" aria-labelledby="integrations-tab-jobBoards">
-          <CardHeader>
-            <CardTitle>Job Boards</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-xs text-ios-text-secondary">
-              Import listings from job boards you already use. Connecting a board is not available yet.
-            </p>
-
-            <ul className="space-y-2">
-              {JOB_BOARDS.map((board) => (
-                <li
-                  key={board}
-                  className="flex items-center justify-between gap-3 rounded-control border border-ios-separator p-3 text-sm text-black"
-                >
-                  <span className="font-medium">{board}</span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    <Badge className="bg-ios-separator text-ios-text-secondary">Not connected</Badge>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={handleConnectPlaceholder}
-                      aria-label={`Connect ${board}`}
-                    >
-                      Connect
-                      <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                    </Button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      )}
 
       {tab === "email" && (
         <div role="tabpanel" id="integrations-panel-email" aria-labelledby="integrations-tab-email" className="space-y-3">
